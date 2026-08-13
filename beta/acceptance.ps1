@@ -7,7 +7,7 @@
 #      case asserts on a SIGNATURE STRING proving the installer actually ran.
 $ErrorActionPreference = "Stop"
 $SP   = "$PSScriptRoot\_testtmp"
-$ZIP  = "$PSScriptRoot\dist\ORO-beta-260812.zip"
+$ZIP  = "$PSScriptRoot\dist\ORO-beta-260813.zip"
 $MOCK = "$SP\mock"
 $pass = 0; $fail = 0
 
