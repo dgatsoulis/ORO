@@ -1,0 +1,48 @@
+--- a/OVP/D3D9Client/D3D9Pad.cpp
++++ b/OVP/D3D9Client/D3D9Pad.cpp
+@@ -451,6 +451,7 @@
+ 
+ 	DWORD dwBlend = dwBlendState & 0xF;
+ 	DWORD dwFilter = dwBlendState & 0xF0;
++	bool bAdditive = false;		// ORO patch d: SKPBS_ADDITIVE (0x5) in flight this flush
+ 	
+ #ifdef SKPDBG 
+ 	char buf[128]; strcpy_s(buf, 128, "");
+@@ -492,6 +493,20 @@
+ 		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
+ 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+ 	}
++	else if (dwBlend == 0x5) {
++		// ORO patch d (2026-08-01): SKPBS_ADDITIVE - src.rgb * src.a ADDS to the
++		// destination (light on top of the frame: plasma, glows, flames). The Sketchpad
++		// API exposed no additive state although the device uses D3DBLEND_ONE all over
++		// the client internally (exhaust, beacons, base tiles). Set AFTER BeginPass so
++		// it overrides the pass defaults; the pass re-establishes InvSrcAlpha on the
++		// next BeginPass, and the explicit restore below keeps nothing leaking past
++		// EndPass (the effect runs D3DXFX_DONOTSAVESTATE).
++		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
++		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
++		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
++		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE));
++		bAdditive = true;
++	}
+ 	else if (dwBlend == Sketchpad::BlendState::COPY) {
+ 		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+ 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
+@@ -538,10 +553,15 @@
+ 
+ 	HR(FX->EndPass());
+ 	HR(FX->End());
+-	
++
+ 	HR(pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF));
+ 	HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, bkALPHA));
+ 
++	if (bAdditive) {	// ORO patch d: hand back the client-wide default blend factors
++		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
++		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
++	}
++
+ 	//HR(pDev->SetRenderState(D3DRS_ZENABLE, bkZEN));
+ 	//HR(pDev->SetRenderState(D3DRS_ZWRITEENABLE, bkZW));
+ 	//HR(pDev->SetRenderState(D3DRS_CULLMODE, bkCULL));

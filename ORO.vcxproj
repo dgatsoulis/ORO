@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- ORO - Orbiter Realism Overhaul, an immersion suite for Orbiter 2024.
+       Release|Win32 ONLY. This is a 32-bit x86 target and must stay one: ORO calls
+       into D3D9Client.dll (via gcGetCoreInterface) and a module must match the host
+       process/client architecture. Never add an x64 configuration. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="OroModule.cpp" />
+    <ClCompile Include="OroDialog.cpp" />
+    <ClCompile Include="OroPhysics.cpp" />
+    <ClCompile Include="OroReentry.cpp" />
+    <ClCompile Include="OroEclipse.cpp" />
+    <ClCompile Include="OroGodRays.cpp" />
+    <ClCompile Include="OroAurora.cpp" />
+    <ClCompile Include="OroLightning.cpp" />
+    <ClCompile Include="OroVapour.cpp" />
+    <ClCompile Include="OroPlume.cpp" />
+    <ClCompile Include="OroBell.cpp" />
+    <ClCompile Include="OroParticles.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="OroModule.h" />
+    <ClInclude Include="OroDialog.h" />
+    <ClInclude Include="OroState.h" />
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="ORO.rc" />
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>15.0</VCProjectVersion>
+    <ProjectGuid>{A7E3C1F0-9D24-4B6A-8E5F-2C1D0B3A4E6F}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>ORO</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <LinkIncremental>false</LinkIncremental>
+    <TargetName>ORO</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;ORO_EXPORTS;_WINDOWS;_USRDLL;STRICT;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <SDLCheck>false</SDLCheck>
+      <AdditionalIncludeDirectories>Z:\Orbiter-2024\Orbitersdk\include;Z:\Orbiter-2024\Orbitersdk\XRSound;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <!-- A linker MAP, so the stack walk ORO logs on a CRT abort or an uncaught
+           exception (see the crash-forensics block in OroModule.cpp) can be turned
+           into a function name: the log prints "ORO.dll + 0x<offset>", and this file
+           is what maps that offset back to a symbol. Costs nothing at runtime. -->
+      <GenerateMapFile>true</GenerateMapFile>
+      <MapFileName>$(OutDir)ORO.map</MapFileName>
+      <AdditionalLibraryDirectories>Z:\Orbiter-2024\Orbitersdk\lib;Z:\Orbiter-2024\Orbitersdk\XRSound;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>Orbiter.lib;Orbitersdk.lib;XRSound.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>Z:\Orbiter-2024\Modules\Plugin\$(TargetName).dll</OutputFile>
+      <!-- CRITICAL for a minimal module. Orbiter 2024 registers plugins DURING LoadLibrary:
+           the SDK's DllMain (compiled from Src/Orbitersdk/Orbitersdk.cpp into Orbitersdk.lib)
+           calls Orbiter's InitLib(), which in turn invokes our exported InitModule and reads
+           our GetModuleVersion export for the "Module X.dll [Build...]" log line. Orbiter does
+           NOT GetProcAddress("InitModule") after load anymore, so if that glue object isn't
+           linked, InitModule NEVER runs and the DLL loads as "(legacy interface)" doing nothing.
+           The glue lives in a static lib, so the linker only pulls it in when a symbol it
+           defines is referenced. A large module (e.g. TrajectoryOptimizer) drags it in via other
+           SDK symbols; ORO references none, so we must force it. We force _GetModuleVersion -
+           a symbol UNIQUE to the glue object. (Forcing _DllMain@12 does NOT work: the CRT
+           defines that same name, so the /INCLUDE is satisfied by the CRT's do-nothing default
+           and the glue is never pulled. The DLL came out byte-identical.) Do NOT remove. -->
+      <ForceSymbolReferences>_GetModuleVersion</ForceSymbolReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

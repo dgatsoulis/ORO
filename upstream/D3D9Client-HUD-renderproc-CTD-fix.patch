@@ -1,0 +1,38 @@
+diff --git a/OVP/D3D9Client/D3D9Client.cpp b/OVP/D3D9Client/D3D9Client.cpp
+index f9c5ff7..d88e102 100644
+--- a/OVP/D3D9Client/D3D9Client.cpp
++++ b/OVP/D3D9Client/D3D9Client.cpp
+@@ -2761,8 +2761,14 @@ void D3D9Client::MakeRenderProcCall(Sketchpad *pSkp, DWORD id, LPD3DXMATRIX pV,
+ 			pSkp2->LoadDefaults();
+ 			if (id == RENDERPROC_EXTERIOR || id == RENDERPROC_PLANETARIUM) {
+ 				pSkp2->SetViewMode(Sketchpad::USER);
++				// SetViewProj moved inside this branch: the HUD stages invoke this
++				// function with pV = pP = NULL (Scene::RenderMainScene), and
++				// D3D9Pad::SetViewProj dereferences both -> a registered
++				// RENDERPROC_HUD_1ST/HUD_2ND callback crashed the client before the
++				// callback was ever entered. HUD procs draw in the ortho defaults
++				// already established by LoadDefaults(), so they need no view/proj.
++				pSkp2->SetViewProj(pV, pP);
+ 			}
+-			pSkp2->SetViewProj(pV, pP);
+ 			it->proc(pSkp, it->pParam);
+ 			pSkp2->FlushAll(); // Flush render queue
+ 		}
+diff --git a/OVP/D3D9Client/D3D9Pad.cpp b/OVP/D3D9Client/D3D9Pad.cpp
+index e166409..f762617 100644
+--- a/OVP/D3D9Client/D3D9Pad.cpp
++++ b/OVP/D3D9Client/D3D9Pad.cpp
+@@ -339,8 +339,11 @@ D3D9Pad::~D3D9Pad ()
+ //
+ void D3D9Pad::SetViewProj(const D3DXMATRIX* pV, const D3DXMATRIX* pP)
+ {
+-	mV = mVOrig = *pV;
+-	mP = mPOrig = *pP;
++	// NULL-guarded (defense in depth): the HUD render-proc stages used to reach
++	// this with NULL matrices, crashing the client. Keep the matrices unchanged
++	// (identity from LoadDefaults) when a caller passes NULL.
++	if (pV) mV = mVOrig = *pV;
++	if (pP) mP = mPOrig = *pP;
+ }
+ 
+ 

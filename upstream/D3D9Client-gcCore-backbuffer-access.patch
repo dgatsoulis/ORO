@@ -1,0 +1,96 @@
+diff --git a/OVP/D3D9Client/D3D9Util.cpp b/OVP/D3D9Client/D3D9Util.cpp
+index 0f9904d..e2e733a 100644
+--- a/OVP/D3D9Client/D3D9Util.cpp
++++ b/OVP/D3D9Client/D3D9Util.cpp
+@@ -24,6 +24,9 @@
+ extern D3D9Client* g_client;
+ extern unordered_map<MESHHANDLE, class SketchMesh*> MeshMap;
+ 
++// NOTE: BuildDate() bakes __DATE__ at compile time; this TU is force-touched on each
++// ORO client patch so the [Build YYMMDD] marker in Orbiter.log refreshes and confirms
++// the redeployed DLL is live. (ORO patch b: gcCore backbuffer access, 2026-07-26.)
+ DWORD BuildDate()
+ {
+ 	const char *months[] = { "???","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+diff --git a/OVP/D3D9Client/gcCore.cpp b/OVP/D3D9Client/gcCore.cpp
+index 76c0d04..f46ea68 100644
+--- a/OVP/D3D9Client/gcCore.cpp
++++ b/OVP/D3D9Client/gcCore.cpp
+@@ -42,6 +42,8 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
+ 	if (strcmp(name,"RegisterSwap")==0) *ppFnc = &gcCore2::RegisterSwap;
+ 	if (strcmp(name,"FlipSwap")==0) *ppFnc = &gcCore2::FlipSwap;
+ 	if (strcmp(name,"GetRenderTarget")==0) *ppFnc = &gcCore2::GetRenderTarget;
++	if (strcmp(name,"GetBackBufferHandle")==0) *ppFnc = &gcCore2::GetBackBufferHandle;
++	if (strcmp(name,"CopyResource")==0) *ppFnc = &gcCore2::CopyResource;
+ 	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
+ 	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
+ 	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
+@@ -159,11 +161,34 @@ void gcCore::FlipSwap(HSWAP hSwap)
+ 
+ // ===============================================================================================
+ //
+-SURFHANDLE gcCore::GetRenderTarget(HSWAP hSwap) 
+-{ 
++SURFHANDLE gcCore::GetRenderTarget(HSWAP hSwap)
++{
+ 	return ((gcSwap*)hSwap)->hSurf;
+ }
+ 
++// ===============================================================================================
++// ORO addon (2026): expose the main backbuffer + a mid-scene-safe surface copy so a module
++// can resample the live frame through gcIPInterface (grey-out / blur / tilt).
++//
++SURFHANDLE gcCore::GetBackBufferHandle()
++{
++	return g_client->GetBackBufferHandle();
++}
++
++// ===============================================================================================
++//
++bool gcCore::CopyResource(SURFHANDLE tgt, SURFHANDLE src)
++{
++	if (!tgt || !src) return false;
++	LPDIRECT3DSURFACE9 pts = SURFACE(tgt)->GetSurface();
++	LPDIRECT3DSURFACE9 pss = SURFACE(src)->GetSurface();
++	if (!pts || !pss) return false;
++	// Direct device StretchRect - NO Begin/EndScene wrapper (cf. StretchRectInScene), so this
++	// is callable from inside a render callback. NULL rects = whole-surface copy (also the form
++	// that resolves a multisampled source into a plain texture).
++	return g_client->GetDevice()->StretchRect(pss, NULL, pts, NULL, D3DTEXF_LINEAR) == S_OK;
++}
++
+ // ===============================================================================================
+ //
+ void gcCore::ReleaseSwap(HSWAP hSwap) 
+diff --git a/OVP/D3D9Client/gcCore.h b/OVP/D3D9Client/gcCore.h
+index f8634ac..bd83bb5 100644
+--- a/OVP/D3D9Client/gcCore.h
++++ b/OVP/D3D9Client/gcCore.h
+@@ -387,6 +387,27 @@ public:
+ 	*/
+ 	gc_interface SURFHANDLE GetRenderTarget(HSWAP hSwap);
+ 
++	/**
++	* \brief Get a handle to the main render window's backbuffer surface.
++	* \return SURFHANDLE wrapping the current backbuffer (non-owning; do not release).
++	* \note ORO addon (2026): exposes the client's existing D3D9Client::GetBackBufferHandle()
++	*  so a module can post-process the live frame through the image-processing pipeline
++	*  (use as the CopyResource source and as the gcIPInterface::SetOutput target).
++	*/
++	gc_interface SURFHANDLE GetBackBufferHandle();
++
++	/**
++	* \brief Copy one surface onto another (StretchRect), safe to call mid-scene.
++	* \param tgt destination surface (e.g. a render-target texture)
++	* \param src source surface (e.g. the backbuffer from GetBackBufferHandle)
++	* \return true on success.
++	* \note ORO addon (2026): unlike StretchRectInScene this issues the device StretchRect
++	*  directly WITHOUT a Begin/EndScene wrapper, so it works from inside a render callback
++	*  (which already runs between the device's BeginScene/EndScene). Full-surface copy
++	*  (whole src -> whole tgt); resolves multisampling if the backbuffer is AA'd.
++	*/
++	gc_interface bool CopyResource(SURFHANDLE tgt, SURFHANDLE src);
++
+ 	/**
+ 	* \brief Release a swap object after it's no longer needed.
+ 	* \param hSwap Handle to a swap object.

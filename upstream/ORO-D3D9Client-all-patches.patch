@@ -1,0 +1,1654 @@
+diff --git a/OVP/D3D9Client/D3D9Client.cpp b/OVP/D3D9Client/D3D9Client.cpp
+index f9c5ff7..d88e102 100644
+--- a/OVP/D3D9Client/D3D9Client.cpp
++++ b/OVP/D3D9Client/D3D9Client.cpp
+@@ -2761,8 +2761,14 @@ void D3D9Client::MakeRenderProcCall(Sketchpad *pSkp, DWORD id, LPD3DXMATRIX pV,
+ 			pSkp2->LoadDefaults();
+ 			if (id == RENDERPROC_EXTERIOR || id == RENDERPROC_PLANETARIUM) {
+ 				pSkp2->SetViewMode(Sketchpad::USER);
++				// SetViewProj moved inside this branch: the HUD stages invoke this
++				// function with pV = pP = NULL (Scene::RenderMainScene), and
++				// D3D9Pad::SetViewProj dereferences both -> a registered
++				// RENDERPROC_HUD_1ST/HUD_2ND callback crashed the client before the
++				// callback was ever entered. HUD procs draw in the ortho defaults
++				// already established by LoadDefaults(), so they need no view/proj.
++				pSkp2->SetViewProj(pV, pP);
+ 			}
+-			pSkp2->SetViewProj(pV, pP);
+ 			it->proc(pSkp, it->pParam);
+ 			pSkp2->FlushAll(); // Flush render queue
+ 		}
+diff --git a/OVP/D3D9Client/D3D9Config.cpp b/OVP/D3D9Client/D3D9Config.cpp
+index d867b73..d1709db 100644
+--- a/OVP/D3D9Client/D3D9Config.cpp
++++ b/OVP/D3D9Client/D3D9Config.cpp
+@@ -219,8 +219,142 @@ bool D3D9Config::ReadParams ()
+ }
+ 
+ 
++// ============================================================================
++// ORO patch (j): WRITE THE CFG WITH RAW WIN32 I/O, ATOMICALLY.
++//
++// The stock implementation wrote through oapiOpenFile(FILE_OUT) - i.e. a
++// `new std::ofstream` constructed INSIDE orbiter.exe. When WriteParams runs
++// from ExitModule at application close (~D3D9Config), the core's C++ static
++// objects (iostream/locale machinery) are ALREADY DESTROYED: the C-level open
++// underneath still succeeds - which TRUNCATES D3D9Client.cfg - and the C++
++// layer then rips on the dead locale facets. Measured on 2026-08-08 with a
++// raw-Win32 tracer: EXCEPTION 0xC0000005 with the instruction pointer inside
++// ASCII string bytes ("bad "), i.e. a call through a clobbered runtime
++// pointer, swallowed by the loader so the process still "exits cleanly".
++// Net effect: EVERY normal exit left a 0-byte cfg and all video settings
++// silently reverted to defaults on the next launch. (The session-start write
++// in clbkCreateRenderWindow worked - statics alive - but the next Launchpad
++// close destroyed the file again.)
++//
++// Fix: no C++ streams, no oapi file I/O - plain kernel32 CreateFile/WriteFile
++// (safe at any teardown stage), and an ATOMIC REPLACE (write .new, then
++// MoveFileEx over the real file) so no failure mode can ever leave a
++// truncated cfg again: if anything goes wrong the previous file survives.
++// Behavioural note for the upstream report: this is a stock Orbiter 2024 bug,
++// reproducible with an unpatched client - the patch only changes HOW the same
++// items are written, not which or where.
++// ============================================================================
+ void D3D9Config::WriteParams ()
+ {
++	char buf[8192]; int n = 0;
++#define WP_INT(name, val) n += sprintf_s(buf + n, sizeof(buf) - (size_t)n, "%s = %d\r\n",  name, (int)(val))
++#define WP_FLT(name, val) n += sprintf_s(buf + n, sizeof(buf) - (size_t)n, "%s = %g\r\n",  name, (double)(val))
++#define WP_STR(name, val) n += sprintf_s(buf + n, sizeof(buf) - (size_t)n, "%s = %s\r\n",  name, (const char*)(val))
++
++	WP_INT("EnableDX12Wrapper", Enable9On12);
++	WP_FLT("FrameRate", FrameRate);
++	WP_INT("EnableLimiter", EnableLimiter);
++	WP_INT("CustomCamMode", CustomCamMode);
++	WP_INT("PlanetPreloadMode", PlanetPreloadMode);
++	WP_INT("PlanetTexLoadFreq", PlanetLoadFrequency);
++	WP_INT("Anisotrophy", Anisotrophy);
++	WP_INT("SceneAntialias", SceneAntialias);
++	WP_INT("SketchpadFont", SketchpadFont);
++	WP_INT("PreLoadBaseVisuals", PreLBaseVis);
++	WP_INT("EnableNormalMapping", UseNormalMap);
++	WP_INT("NearClipPlaneMode", NearClipPlane);
++	WP_INT("RwyLightAnimate", RwyLightAnimate);
++	WP_FLT("RwyLightAngle", RwyLightAngle);
++	WP_FLT("RwyBrightness", RwyBrightness);
++	WP_FLT("NightLightsAngle", SunAngle);
++	WP_FLT("BumpMapAmplitude", BumpAmp);
++	WP_FLT("PlanetGlow", PlanetGlow);
++	WP_INT("EnvMapSize", EnvMapSize);
++	WP_INT("EnvMapMode", EnvMapMode);
++	WP_INT("EnvMapFaces", EnvMapFaces);
++	WP_INT("ShadowMapMode", ShadowMapMode);
++	WP_INT("ShadowMapFilter", ShadowFilter);
++	WP_INT("ShadowMapSize", ShadowMapSize);
++	WP_INT("TerrainShadowing", TerrainShadowing);
++	WP_INT("EnableGlass", EnableGlass);
++	WP_INT("EnableMeshDbg", EnableMeshDbg);
++	WP_INT("TileMipmaps", TileMipmaps);
++	WP_INT("TextureMips", TextureMips);
++	WP_INT("TileDebug", TileDebug);
++	WP_FLT("StereoSeparation", Separation);
++	WP_FLT("StereoConvergence", Convergence);
++	WP_INT("DebugLvl", DebugLvl);
++	WP_FLT("VCNearPlane", VCNearPlane);
++	WP_INT("LightConfiguration", LightConfig);
++	WP_INT("DisableDrvMgm", DisableDriverManagement);
++	WP_INT("NVPerfHUD", NVPerfHUD);
++	WP_INT("DebugLineFontSize", DebugFontSize);
++	WP_INT("DisableVisualHelperReadout", DisableVisualHelperReadout);
++	WP_FLT("LODBias", LODBias);
++	WP_INT("MeshRes", MeshRes);
++	WP_INT("MaxTiles", MaxTiles);
++	WP_INT("MicroMode", MicroMode);
++	WP_INT("MicroFilter", MicroFilter);
++	WP_INT("BlendMode", BlendMode);
++	WP_INT("MicroBias", MicroBias);
++	WP_INT("CloudMicro", CloudMicro);
++	WP_INT("PostProcess", PostProcess);
++	WP_INT("ShaderDebug", ShaderDebug);
++	WP_INT("PresentLocation", PresentLocation);
++	WP_INT("PlanetTileLoadFlags", PlanetTileLoadFlags);
++	WP_INT("LabelDisplayFlags", LabelDisplayFlags);
++	WP_INT("GDIOverlay", GDIOverlay);
++	WP_INT("gcGUIMode", gcGUIMode);
++	WP_INT("AbsoluteAnimations", bAbsAnims);
++	WP_INT("NormalmappedClouds", bCloudNormals);
++	WP_INT("TerrainFlats", bFlats);
++	WP_INT("SunGlare", bGlares);
++	WP_INT("LightsGlare", bLocalGlares);
++	WP_INT("Irradiance", bIrradiance);
++	WP_INT("AtmoQuality", bAtmoQuality);
++	WP_INT("DebugBreak", DebugBreak);
++	WP_INT("ShaderCacheUse", ShaderCacheUse);
++	WP_INT("NoPlanetAA", NoPlanetAA);
++
++	WP_FLT("OrbitalShadowMult", OrbitalShadowMult);
++	WP_FLT("GFXIntensity", GFXIntensity);
++	WP_FLT("GFXDistance", GFXDistance);
++	WP_FLT("GFXThreshold", GFXThreshold);
++	WP_FLT("GFXGamma", GFXGamma);
++	WP_FLT("GFXSunIntensity", GFXSunIntensity);
++	WP_FLT("GFXLocalMax", GFXLocalMax);
++	WP_FLT("GFXGlare", GFXGlare);
++
++	WP_STR("SolCfg", SolCfg);
++	WP_STR("DebugLineFont", DebugFont);
++	WP_STR("EarthAtmoCfg", AtmoCfg["Earth"].c_str());
++
++#undef WP_INT
++#undef WP_FLT
++#undef WP_STR
++
++	if (n <= 0 || n >= (int)sizeof(buf)) return;         // formatting failed: keep the old file
++
++	char tmpname[MAX_PATH];
++	sprintf_s(tmpname, MAX_PATH, "%s.new", cfgfile);
++
++	HANDLE h = CreateFileA(tmpname, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
++	if (h == INVALID_HANDLE_VALUE) return;                // cannot write: keep the old file
++
++	DWORD w = 0;
++	BOOL ok = WriteFile(h, buf, (DWORD)n, &w, NULL) && (w == (DWORD)n);
++	if (ok) ok = FlushFileBuffers(h);
++	CloseHandle(h);
++
++	if (ok) MoveFileExA(tmpname, cfgfile, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
++	else    DeleteFileA(tmpname);                         // partial temp: discard, keep the old file
++}
++
++// Stock implementation kept for reference (DO NOT CALL AT EXIT - see patch (j)
++// note above; `new ofstream` inside the core crashes after static teardown):
++static void WriteParams_stock_disabled (D3D9Config*)
++{
++#if 0
+ 	FILEHANDLE hFile = oapiOpenFile (cfgfile, FILE_OUT, ROOT);
+ 
+ 	oapiWriteItem_int   (hFile, (char*)"EnableDX12Wrapper", Enable9On12);
+@@ -303,4 +437,5 @@ void D3D9Config::WriteParams ()
+ 	oapiWriteItem_string(hFile, (char*)"EarthAtmoCfg", (char *)AtmoCfg["Earth"].c_str());
+ 
+ 	oapiCloseFile (hFile, FILE_OUT);
++#endif
+ }
+diff --git a/OVP/D3D9Client/D3D9Effect.cpp b/OVP/D3D9Client/D3D9Effect.cpp
+index 8c40c0f..6676689 100644
+--- a/OVP/D3D9Client/D3D9Effect.cpp
++++ b/OVP/D3D9Client/D3D9Effect.cpp
+@@ -92,6 +92,7 @@ D3DXHANDLE D3D9Effect::eFogColor = 0;	// Fog color input
+ D3DXHANDLE D3D9Effect::eTexOff = 0;		// Surface tile texture offsets
+ D3DXHANDLE D3D9Effect::eTime = 0;		// FLOAT Simulation elapsed time
+ D3DXHANDLE D3D9Effect::eMix = 0;		// FLOAT Auxiliary factor/multiplier
++D3DXHANDLE D3D9Effect::eVCShdDepth = 0;	// FLOAT ORO patch (p)
+ D3DXHANDLE D3D9Effect::eFogDensity = 0;	// 
+ D3DXHANDLE D3D9Effect::ePointScale = 0;
+ D3DXHANDLE D3D9Effect::eSHD = 0;
+@@ -445,6 +446,7 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
+ 	eEast		  = FX->GetParameterByName(0,"gEast");
+ 	ePointScale   = FX->GetParameterByName(0,"gPointScale");
+ 	eMix		  = FX->GetParameterByName(0,"gMix");
++	eVCShdDepth   = FX->GetParameterByName(0,"gVCShdDepth");
+ 	eTime		  = FX->GetParameterByName(0,"gTime");
+ 	eMtrlAlpha	  = FX->GetParameterByName(0,"gMtrlAlpha");
+ 	eGlowConst    = FX->GetParameterByName(0,"gGlowConst");
+diff --git a/OVP/D3D9Client/D3D9Effect.h b/OVP/D3D9Client/D3D9Effect.h
+index c9213f3..3f89586 100644
+--- a/OVP/D3D9Client/D3D9Effect.h
++++ b/OVP/D3D9Client/D3D9Effect.h
+@@ -142,6 +142,7 @@ public:
+ 	static D3DXHANDLE	eOITEnable;	   ///< BOOL
+ 	static D3DXHANDLE	eInvProxySize;
+ 	static D3DXHANDLE	eMix;          ///< FLOAT Auxiliary factor/multiplier
++	static D3DXHANDLE	eVCShdDepth;   ///< FLOAT ORO patch (p): VC shadow ambient bite, 0..1
+ 	static D3DXHANDLE   eColor;        ///< Auxiliary color input
+ 	static D3DXHANDLE   eFogColor;     ///< Fog color input
+ 	static D3DXHANDLE   eTexOff;       ///< Surface tile texture offsets
+diff --git a/OVP/D3D9Client/D3D9Pad.cpp b/OVP/D3D9Client/D3D9Pad.cpp
+index e166409..94b8be7 100644
+--- a/OVP/D3D9Client/D3D9Pad.cpp
++++ b/OVP/D3D9Client/D3D9Pad.cpp
+@@ -46,6 +46,10 @@ std::vector<FontCache *> fcache;
+ oapi::Font * deffont = 0;
+ oapi::Pen * defpen = 0;
+ 
++// ORO patch (g): forward declaration so Flush() can read the depth texture; the
++// definition (and the doc comment) live with the other file-scope globals at the bottom.
++extern LPDIRECT3DTEXTURE9 g_gcSceneDepth;
++
+ 
+ // ===============================================================================================
+ //
+@@ -155,7 +159,9 @@ void D3D9Pad::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 pDevice)
+ 	eGamma	  = FX->GetParameterByName(0, "gGamma");
+ 	eNoiseColor = FX->GetParameterByName(0, "gNoiseColor");
+ 	eColorMatrix = FX->GetParameterByName(0, "gColorMatrix");
+-	
++	eDepthClip = FX->GetParameterByName(0, "gDepthClip");   // ORO patch (g)
++	eDepthTex  = FX->GetParameterByName(0, "gDepthTex");    // ORO patch (g)
++
+ }
+ 
+ 
+@@ -339,8 +345,11 @@ D3D9Pad::~D3D9Pad ()
+ //
+ void D3D9Pad::SetViewProj(const D3DXMATRIX* pV, const D3DXMATRIX* pP)
+ {
+-	mV = mVOrig = *pV;
+-	mP = mPOrig = *pP;
++	// NULL-guarded (defense in depth): the HUD render-proc stages used to reach
++	// this with NULL matrices, crashing the client. Keep the matrices unchanged
++	// (identity from LoadDefaults) when a caller passes NULL.
++	if (pV) mV = mVOrig = *pV;
++	if (pP) mP = mPOrig = *pP;
+ }
+ 
+ 
+@@ -448,6 +457,7 @@ bool D3D9Pad::Flush(HPOLY hPoly)
+ 
+ 	DWORD dwBlend = dwBlendState & 0xF;
+ 	DWORD dwFilter = dwBlendState & 0xF0;
++	bool bAdditive = false;		// ORO patch d: SKPBS_ADDITIVE (0x5) in flight this flush
+ 	
+ #ifdef SKPDBG 
+ 	char buf[128]; strcpy_s(buf, 128, "");
+@@ -475,6 +485,18 @@ bool D3D9Pad::Flush(HPOLY hPoly)
+ 		
+ 	HR(FX->SetFloat(eRandom, float(oapiRand())));
+ 	HR(FX->SetVector(eTarget, &vTarget));
++
++	// ORO patch (g): per-fragment DEPTH CLIP against the scene depth buffer. Enabled by
++	// the 0x100 bit on the blend state (the no-SDK-header trick from patch d), and only when
++	// the depth texture actually exists (SunGlare on). The shader compares each fragment's
++	// camera-space depth (carried in SkpVtx.l -> frg.len) against GBUF_DEPTH.a and clips the
++	// occluded ones - so an addon's screen-space additive geometry (aurora / reentry plasma)
++	// sits BEHIND the cockpit, hull and terrain instead of painting over them. Set every
++	// Flush so the uniform can never leak true into ordinary 2D drawing.
++	bool bDepthClip = ((dwBlendState & 0x100) != 0) && (g_gcSceneDepth != NULL);
++	HR(FX->SetBool(eDepthClip, bDepthClip));
++	if (bDepthClip) HR(FX->SetTexture(eDepthTex, g_gcSceneDepth));
++
+ 	HR(FX->SetTechnique(eSketch));
+ 	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
+ 
+@@ -489,6 +511,20 @@ bool D3D9Pad::Flush(HPOLY hPoly)
+ 		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
+ 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+ 	}
++	else if (dwBlend == 0x5) {
++		// ORO patch d (2026-08-01): SKPBS_ADDITIVE - src.rgb * src.a ADDS to the
++		// destination (light on top of the frame: plasma, glows, flames). The Sketchpad
++		// API exposed no additive state although the device uses D3DBLEND_ONE all over
++		// the client internally (exhaust, beacons, base tiles). Set AFTER BeginPass so
++		// it overrides the pass defaults; the pass re-establishes InvSrcAlpha on the
++		// next BeginPass, and the explicit restore below keeps nothing leaking past
++		// EndPass (the effect runs D3DXFX_DONOTSAVESTATE).
++		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
++		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
++		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
++		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE));
++		bAdditive = true;
++	}
+ 	else if (dwBlend == Sketchpad::BlendState::COPY) {
+ 		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+ 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
+@@ -535,10 +571,15 @@ bool D3D9Pad::Flush(HPOLY hPoly)
+ 
+ 	HR(FX->EndPass());
+ 	HR(FX->End());
+-	
++
+ 	HR(pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF));
+ 	HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, bkALPHA));
+ 
++	if (bAdditive) {	// ORO patch d: hand back the client-wide default blend factors
++		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
++		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
++	}
++
+ 	//HR(pDev->SetRenderState(D3DRS_ZENABLE, bkZEN));
+ 	//HR(pDev->SetRenderState(D3DRS_ZWRITEENABLE, bkZW));
+ 	//HR(pDev->SetRenderState(D3DRS_CULLMODE, bkCULL));
+@@ -1356,6 +1397,20 @@ void D3D9Pad::DrawPoly (HPOLY hPoly, DWORD flags)
+ 		D3D9PolyBase *pBase = static_cast<D3D9PolyBase *>(hPoly);
+ 		int PolyType = pBase->type;
+ 
++		// ORO patch (l): a textured triangle poly binds its texture through the pad's OWN
++		// state machinery (TexChangeNative -> SKPCHG_TEXTURE -> SetupDevice inside Topology
++		// below), so gTex0 / gTexEn / gSize are all applied by the code that always applies
++		// them. Colour keying belongs to the blit paths, not to poly geometry - clear it so
++		// a stale key from an earlier blit cannot clip our fragments.
++		if (PolyType == 1) {
++			LPDIRECT3DTEXTURE9 pT = static_cast<D3D9Triangle *>(pBase)->GetTex();
++			if (pT) {
++				bColorKey = false;
++				cColorKey = D3DXCOLOR(DWORD(0));
++				TexChangeNative(pT);
++			}
++		}
++
+ 		if ((PolyType == 0) && !HasPen()) return;
+ 
+ 		// Flush pending graphics before a use of different interface 
+@@ -1791,6 +1846,13 @@ D3DXHANDLE	 D3D9Pad::eNoiseTex = 0;
+ D3DXHANDLE   D3D9Pad::eNoiseColor = 0;
+ D3DXHANDLE   D3D9Pad::eColorMatrix = 0;
+ D3DXHANDLE   D3D9Pad::eGamma = 0;
++D3DXHANDLE   D3D9Pad::eDepthClip = 0;   // ORO patch (g)
++D3DXHANDLE   D3D9Pad::eDepthTex = 0;    // ORO patch (g)
++
++// ORO patch (g): the live scene depth texture (GBUF_DEPTH), published by the Scene at
++// buffer creation (Scene.cpp) and consumed by Flush's depth-clip path below. NULL when
++// SunGlare is off, in which case depth-tagged polys fall back to plain additive geometry.
++LPDIRECT3DTEXTURE9 g_gcSceneDepth = NULL;
+ 
+ ID3DXEffect* D3D9Pad::FX = 0;
+ D3D9Client * D3D9Pad::gc = 0;
+diff --git a/OVP/D3D9Client/D3D9Pad.h b/OVP/D3D9Client/D3D9Pad.h
+index 73822d4..d75ed66 100644
+--- a/OVP/D3D9Client/D3D9Pad.h
++++ b/OVP/D3D9Client/D3D9Pad.h
+@@ -43,6 +43,9 @@ extern oapi::Pen  *defpen;
+ #define SKPSW_FRAGMENT		0x00000000	// Index 2
+ #define SKPSW_PENCOLOR		0x00000080	// Index 2
+ #define SKPSW_TEXTURE		0x000000FF	// Index 2
++#define SKPSW_TEXMODUL		0x0000001A	// Index 2 - ORO patch (l): texture x vertex colour
++										// (byte 26 -> 0.102; the shader tests 0.06..0.14, a band
++										// no stock value occupies - 0x00, 0x80 and 0xFF all miss)
+ 
+ // Specials:
+ #define SKPSW_FONT			0x0000FF00	// Index 1
+@@ -711,6 +714,8 @@ private:
+ 	static D3DXHANDLE   eCovEn;
+ 	static D3DXHANDLE   eClearEn;
+ 	static D3DXHANDLE   eEffectsEn;
++	static D3DXHANDLE   eDepthClip;		// ORO patch (g): enable per-fragment depth clip
++	static D3DXHANDLE   eDepthTex;		// ORO patch (g): the scene depth texture (GBUF_DEPTH)
+ };
+ 
+ 
+@@ -873,10 +878,19 @@ class D3D9Triangle : public D3D9PolyBase
+ {
+ 
+ public:
+-	D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int style);
++	// pDepth (ORO patch g): optional per-vertex CAMERA-SPACE depth, stored in the spare
++	// SkpVtx.l (POSITION0.z) so the depth-clip shader path can compare it against the scene.
++	// NULL = a plain 2D colour triangle poly, exactly as before.
++	D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int style, const float *pDepth = NULL);
+ 	~D3D9Triangle();
+ 
+-	void Update(const gcCore::clrVtx *pt, int npt);
++	void Update(const gcCore::clrVtx *pt, int npt, const float *pDepth = NULL);
++	// ORO patch (l): the TEXTURED update - u,v (texels) ride SkpVtx.nx/ny (the blit paths'
++	// own texcoord channel) and fnc selects the shader's modulate band (SKPSW_TEXMODUL:
++	// fragment = texture x vertex colour). Composes with pDepth exactly like Update.
++	void UpdateTex(const gcCore::texVtx *pt, int npt, const float *pDepth = NULL);
++	void SetTex(LPDIRECT3DTEXTURE9 pT) { pTex = pT; }
++	LPDIRECT3DTEXTURE9 GetTex() const  { return pTex; }
+ 	void Draw(D3D9Pad*, LPDIRECT3DDEVICE9 pDev);
+ 	void Release();
+ 
+@@ -884,6 +898,9 @@ private:
+ 	int style;
+ 	WORD nPt;
+ 	LPDIRECT3DVERTEXBUFFER9 pVB;
++	// ORO patch (l): the poly's texture, or NULL for a plain colour poly. NOT ref-counted:
++	// the owning SURFHANDLE must outlive the poly (documented on gcCore::CreateTrianglesTex).
++	LPDIRECT3DTEXTURE9 pTex = NULL;
+ };
+ 
+ #endif
+diff --git a/OVP/D3D9Client/D3D9Pad2.cpp b/OVP/D3D9Client/D3D9Pad2.cpp
+index 7568bcd..6e833f2 100644
+--- a/OVP/D3D9Client/D3D9Pad2.cpp
++++ b/OVP/D3D9Client/D3D9Pad2.cpp
+@@ -962,12 +962,12 @@ void D3D9PolyLine::Update(const FVECTOR2 *_pt, int _npt, bool bConnect)
+ 
+ 
+ 
+-D3D9Triangle::D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int _style) : D3D9PolyBase(1)
++D3D9Triangle::D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int _style, const float *pDepth) : D3D9PolyBase(1)
+ {
+ 	nPt = npt;
+ 	style = _style;
+ 	HR(pDev->CreateVertexBuffer(nPt * sizeof(SkpVtx), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &pVB, NULL));
+-	if (pt) Update(pt, npt);
++	if (pt) Update(pt, npt, pDepth);
+ }
+ 
+ 
+@@ -1000,7 +1000,7 @@ void D3D9Triangle::Draw(D3D9Pad* pSkp, LPDIRECT3DDEVICE9 pDev)
+ 
+ // ===============================================================================================
+ //
+-void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt)
++void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt, const float *pDepth)
+ {
+ 	SkpVtx *Vtx = NULL;
+ 	HR(pVB->Lock(0, 0, (LPVOID*)&Vtx, D3DLOCK_DISCARD));
+@@ -1010,8 +1010,39 @@ void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt)
+ 	for (int i = 0; i < npt; i++) {
+ 		Vtx[i].x = pt[i].pos.x;
+ 		Vtx[i].y = pt[i].pos.y;
++		// ORO patch (g): l is POSITION0.z in the vertex decl and reaches the pixel shader
++		// as frg.len (OrthoVS). Unused (0) for a plain colour triangle; the camera-space
++		// depth when the caller wants depth clipping. Zero is harmless (never occludes).
++		Vtx[i].l = pDepth ? pDepth[i] : 0.0f;
+ 		Vtx[i].clr = pt[i].color;
+ 		Vtx[i].fnc = SKPSW_CENTER | SKPSW_FRAGMENT;
+ 	}
+ 	HR(pVB->Unlock());
+ }
++
++
++// ===============================================================================================
++// ORO patch (l): the TEXTURED update. u,v ride nx/ny - the same SkpVtx channel the blit
++// paths use for texture coordinates (OrthoVS: tex.xy = dir.xy * gSize.xy, so u,v are in
++// TEXELS) - and fnc selects the shader's MODULATE band: fragment = texture x vertex colour,
++// the mode the stock pad lacks (its blits replace colour with texture). pDepth composes
++// exactly as in Update; the depth clip runs after colour selection in the same shader.
++//
++void D3D9Triangle::UpdateTex(const gcCore::texVtx *pt, int npt, const float *pDepth)
++{
++	SkpVtx *Vtx = NULL;
++	HR(pVB->Lock(0, 0, (LPVOID*)&Vtx, D3DLOCK_DISCARD));
++
++	memset(Vtx, 0, sizeof(SkpVtx)*npt);
++
++	for (int i = 0; i < npt; i++) {
++		Vtx[i].x = pt[i].pos.x;
++		Vtx[i].y = pt[i].pos.y;
++		Vtx[i].l = pDepth ? pDepth[i] : 0.0f;
++		Vtx[i].nx = pt[i].u;
++		Vtx[i].ny = pt[i].v;
++		Vtx[i].clr = pt[i].color;
++		Vtx[i].fnc = SKPSW_CENTER | SKPSW_TEXMODUL;
++	}
++	HR(pVB->Unlock());
++}
+diff --git a/OVP/D3D9Client/D3D9Util.cpp b/OVP/D3D9Client/D3D9Util.cpp
+index 0f9904d..2011f36 100644
+--- a/OVP/D3D9Client/D3D9Util.cpp
++++ b/OVP/D3D9Client/D3D9Util.cpp
+@@ -24,6 +24,16 @@
+ extern D3D9Client* g_client;
+ extern unordered_map<MESHHANDLE, class SketchMesh*> MeshMap;
+ 
++// NOTE: BuildDate() bakes __DATE__ at compile time; this TU is force-touched on each
++// ORO client patch so the [Build YYMMDD] marker in Orbiter.log refreshes and confirms
++// the redeployed DLL is live. (ORO patch b: gcCore backbuffer access, 2026-07-26;
++// ORO patch c: gcCore::SuppressReentry, 2026-08-01; patch f: VC shadows, 2026-08-04;
++// patch g: gcCore::CreateTrianglesDepth + Sketchpad depth clip, 2026-08-05;
++// patch i: RENDERPROC_PRE_RESOLVE, the pre-bloom compositing slot, 2026-08-08;
++// patch j: atomic Win32 cfg write - stock WriteParams crashed at exit inside
++// the core's dead C++ statics and left a 0-byte D3D9Client.cfg, 2026-08-08;
++// patch n: gcCore::SuppressExhaust - per-vessel stock exhaust billboards +
++// exhaust-stream emission off, the reentry suppression's sibling, 2026-08-09.)
+ DWORD BuildDate()
+ {
+ 	const char *months[] = { "???","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+diff --git a/OVP/D3D9Client/Mesh.cpp b/OVP/D3D9Client/Mesh.cpp
+index decef76..795cd5e 100644
+--- a/OVP/D3D9Client/Mesh.cpp
++++ b/OVP/D3D9Client/Mesh.cpp
+@@ -2777,7 +2777,28 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
+ 	{
+ 		if (Grp[g].UsrFlag & 0x2) continue;
+ 		if (Grp[g].UsrFlag & 0x1) continue;
+-		
++
++		// --- ORO patch (f), part 2: TRANSPARENT MATERIALS MUST NOT CAST OPAQUE SHADOWS
++		// A group escapes the shadow map today only by carrying UsrFlag 0x1 (no-shadow)
++		// or 0x2 (skip), and it can only shadow SOFTLY through the OIT path, which needs
++		// UsrFlag 0x20 AND a texture. A mesh that sets none of those - which is most of
++		// them - has every group rasterised as fully opaque no matter how transparent its
++		// material is.
++		//
++		// The stock DeltaGlider is the worked example: deltaglider.msh contains ZERO FLAG
++		// lines, so every UsrFlag is 0, while its `cockpitglass` material carries diffuse
++		// alpha 0.5 (visor 0.5, HUD_glass 0.4) and no texture. The canopy therefore casts
++		// a SOLID shadow - onto its own fuselage in exterior views, and (with part 1 of
++		// this patch feeding the map to the internal pass) across the entire cabin, so no
++		// sunlight can reach the virtual cockpit through the windows at all.
++		//
++		// A binary shadow map cannot express partial occlusion without OIT, so the honest
++		// approximation is: a material that is clearly not opaque does not cast. The
++		// threshold is deliberately high - only genuinely translucent materials are
++		// excused, and a 0.95-alpha decal still shadows as before.
++		if (opt != 1 && Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
++		    && Mtrl[Grp[g].MtrlIdx].Diffuse.w < 0.9f) continue;
++
+ 		MeshShader::ps_bools.bOIT = (Grp[g].UsrFlag & 0x20) != 0;
+ 
+ 		if (MeshShader::ps_bools.bOIT) {
+diff --git a/OVP/D3D9Client/Particle.cpp b/OVP/D3D9Client/Particle.cpp
+index 6bc93d1..681a8d1 100644
+--- a/OVP/D3D9Client/Particle.cpp
++++ b/OVP/D3D9Client/Particle.cpp
+@@ -545,6 +545,9 @@ void D3D9ParticleStream::RenderEmissive(LPDIRECT3DDEVICE9 dev)
+ 
+ // =======================================================================
+ 
++// ORO patch (o): the construction-time latch (gcCore.cpp).
++extern bool gcExemptLatch();
++
+ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
+ 	const double *srclevel, const VECTOR3 *thref, const VECTOR3 *thdir,
+ 	PARTICLESTREAMSPEC *pss)
+@@ -552,6 +555,7 @@ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
+ {
+ 	Attach (hV, thref, thdir, srclevel);
+ 	hPlanet = 0;
++	bExempt = gcExemptLatch();          // ORO patch (o)
+ }
+ 
+ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
+@@ -561,8 +565,20 @@ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
+ {
+ 	Attach (hV, ref, _dir, srclevel);
+ 	hPlanet = 0;
++	bExempt = gcExemptLatch();          // ORO patch (o)
+ }
+ 
++// ORO patch (n): the per-vessel exhaust suppression (gcCore.cpp) covers the exhaust
++// PARTICLE streams too - the billboard gate alone would leave smoke and contrails
++// puffing from an engine whose flame an addon has replaced. Suppression stops
++// EMISSION only: particles already in flight expire naturally (the patch-(e) rule -
++// suppressed vessels fall through to the else below, which resets t0, so lifting the
++// suppression does not release a burst of backlogged particles).
++extern bool gcIsExhaustStreamSuppressed(OBJHANDLE hVessel);
++// ORO patch (o): ... unless THIS stream was exempted (an addon's own replacement
++// stream, added to a vessel whose stock exhaust it is suppressing).
++extern bool gcExemptLatch();
++
+ void ExhaustStream::Update ()
+ {
+ 	D3D9ParticleStream::Update();
+@@ -635,7 +651,8 @@ void ExhaustStream::Update ()
+ 		}
+ 	}
+ 
+-	if (level && *level > 0 && vessel && (alpha0 = Level2Alpha(*level) * Atm2Alpha (vessel->GetAtmDensity())) > 0.01) {
++	if (level && *level > 0 && vessel && (!gcIsExhaustStreamSuppressed(hRef) || bExempt)
++	    && (alpha0 = Level2Alpha(*level) * Atm2Alpha (vessel->GetAtmDensity())) > 0.01) {
+ 		if (simt > t0+interval) {
+ 			VECTOR3 vp, vv;
+ 			MATRIX3 vR;
+@@ -779,6 +796,13 @@ void ReentryStream::SetMaterial (D3DCOLORVALUE &col)
+ 	col.b = 0.5f;
+ }
+ 
++// ORO patch (e): the per-vessel reentry suppression (gcCore.cpp) must cover the
++// reentry PARTICLE streams too - the core hands EVERY vessel a default "plasmastream"
++// (Vessel::SetDefaultReentryStream), and vessels like Atlantis add their own, so an
++// addon replacing the reentry visuals gets orphan puffs from ~95 km without this.
++// Suppression stops EMISSION only: particles already in flight expire naturally.
++extern bool gcIsReentrySuppressed(OBJHANDLE hVessel);
++
+ void ReentryStream::Update ()
+ {
+ 	D3D9ParticleStream::Update ();
+@@ -816,7 +840,9 @@ void ReentryStream::Update ()
+ 		}
+ 	}
+ 
+-	if (friction > 0 && (alpha0 = Atm2Alpha (friction)) > 0.01) {
++	if (friction > 0 && !gcIsReentrySuppressed(hRef) && (alpha0 = Atm2Alpha (friction)) > 0.01) {
++		// (suppressed vessels fall through to the else, which resets t0 - so lifting
++		// the suppression does not release a burst of backlogged particles)
+ 		if (simt > t0+interval) {
+ 			VECTOR3 vp, vv, av;
+ 			vessel->GetGlobalPos (vp);
+diff --git a/OVP/D3D9Client/Particle.h b/OVP/D3D9Client/Particle.h
+index 959af8d..b14de2f 100644
+--- a/OVP/D3D9Client/Particle.h
++++ b/OVP/D3D9Client/Particle.h
+@@ -140,6 +140,13 @@ public:
+ 
+ private:
+ 	OBJHANDLE hPlanet;
++	// ORO patch (o): this stream belongs to an addon that is suppressing the
++	// vessel's stock exhaust, so patch (n)'s gate must not stop it. Stamped from a
++	// LATCH at construction rather than looked up by pointer afterwards -
++	// D3D9ParticleStream has two base classes, and an addon's PSTREAM_HANDLE is a
++	// ParticleStream* while the gate runs with an ExhaustStream*, so a set-of-
++	// pointers exemption is a base-subobject-offset bet. A member cannot miss.
++	bool bExempt;
+ };
+ 
+ class ReentryStream: public D3D9ParticleStream {
+diff --git a/OVP/D3D9Client/Scene.cpp b/OVP/D3D9Client/Scene.cpp
+index ebed069..7bc8741 100644
+--- a/OVP/D3D9Client/Scene.cpp
++++ b/OVP/D3D9Client/Scene.cpp
+@@ -29,6 +29,10 @@
+ 
+ using namespace oapi;
+ 
++// ORO patch (g): the live scene depth texture, defined in D3D9Pad.cpp and read by
++// D3D9Pad::Flush's depth-clip path. Set here at buffer creation, cleared at teardown.
++extern LPDIRECT3DTEXTURE9 g_gcSceneDepth;
++
+ static D3DXMATRIX ident;
+ 
+ const double LABEL_DISTLIMIT = 0.6;
+@@ -245,6 +249,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+ 		HR(pDevice->CreateDepthStencilSurface(viewW, viewH, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &pDepthNormalDS, NULL));
+ 		HR(D3DXCreateTexture(pDevice, viewW, viewH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &ptgBuffer[GBUF_DEPTH]));
+ 	}
++	// ORO patch (g): publish the depth texture for the Sketchpad's depth-clip path
++	// (D3D9Pad::Flush reads this global; it is NULL when the buffer was not created, so the
++	// clip silently no-ops and depth-tagged polys draw as plain additive geometry).
++	g_gcSceneDepth = ptgBuffer[GBUF_DEPTH];
+ 
+ 
+ 	// Initialize post processing effects --------------------------------------------------------------------------------------------------
+@@ -328,6 +336,7 @@ Scene::~Scene ()
+ 	pDevice->SetRenderTarget(2, NULL);
+ 	pDevice->SetRenderTarget(3, NULL);
+ 
++	g_gcSceneDepth = NULL;   // ORO patch (g): before the depth texture is released below
+ 	for (int i = 0; i < ARRAYSIZE(psgBuffer); i++) SAFE_RELEASE(psgBuffer[i]);
+ 	for (int i = 0; i < ARRAYSIZE(ptgBuffer); i++) SAFE_RELEASE(ptgBuffer[i]);
+ 	for (int i = 0; i < ARRAYSIZE(pTextures); i++) SAFE_RELEASE(pTextures[i]);
+@@ -1246,7 +1255,15 @@ void Scene::RenderMainScene()
+ 
+ 	if (!UpdateCamVis()) {
+ 		if (SUCCEEDED(gc->BeginScene())) {
+-			HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0L));
++			// ORO patch (q) - STOCK BUG. This early-out runs before the scene has a
++			// depth-stencil bound (it is the "focus vessel has no visual yet" path, i.e.
++			// every scenario reload), so asking to clear ZBUFFER|STENCIL here returns
++			// D3DERR_INVALIDCALL, HR() logs it, and the clear does not happen at all -
++			// which is why the intended black loading screen is never painted. Clearing
++			// the TARGET alone is what this line was actually for, it succeeds, and it
++			// removes ~30 D3D9ERROR lines from every reload in every user's log.
++			// Reproducible with no addon loaded.
++			HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET, 0, 1.0f, 0L));
+ 			gc->EndScene();
+ 		}
+ 		return; // Scene not yet properly inilialized, return
+@@ -1956,6 +1973,60 @@ void Scene::RenderMainScene()
+ 
+ 	if (oapiCameraInternal() && vFocus) {
+ 
++		// --- ORO patch (f): SHADOWS IN THE VIRTUAL COCKPIT --------------------
++		// The VC never received shadows, and nothing was actually missing to make it
++		// work. The focus vessel's shadow map is rendered above; then, before the
++		// "remaining vessels" loop, smap.pShadowMap is set to NULL - and THIS pass,
++		// the internal one, runs after that. vVessel::Render binds the map only while
++		// shd->pShadowMap is non-NULL, so gShadowsEnabled was false for every VC draw
++		// and Common.hlsl's ComputeShadow() early-returned "fully lit" for the whole
++		// cabin. An ordering consequence, not an absent feature.
++		//
++		// Re-rendering here rather than stashing the earlier map is deliberate: smap
++		// carries the light's matrices as well as the texture, and with
++		// ShadowMapMode >= 2 the loop above may have left those describing some OTHER
++		// vessel while reusing the same per-LOD render target. Pairing the focus
++		// vessel's texture with a stranger's matrices would project garbage. One extra
++		// shadow pass - only while the camera is inside - refills the whole struct
++		// consistently. (If the cost ever shows, the optimisation is to stash the
++		// entire smap struct after the first call and prove the LOD was not reused.)
++		//
++		// The caster set needs no work whatsoever: RENDERPASS_SHADOWMAP forces
++		// bCockpit = bVC = false in vVessel::Render, so what lands in the map is the
++		// ship's EXTERIOR hull. Sunlight reaching the cabin is therefore cut by the
++		// vessel's own skin and arrives through the window apertures - no window
++		// identification, no per-addon heuristic, just geometry the client already
++		// rasterises every frame. Transparent panes are handled too: the shadow pass
++		// has an OIT variant (SHADER_SHADOWMAP_OIT).
++		//
++		// FIT THE MAP TO THE CABIN, NOT THE HULL. The exterior pass sizes its ortho box
++		// to the vessel's bounding sphere - about 20 m across on a DeltaGlider, which at
++		// ShadowMapSize 2048 is ~1 cm per texel. That is invisible on a fuselage seen from
++		// fifty metres and glaring on a panel forty centimetres from your eye: it is what
++		// makes VC shadow edges stair-step. The camera sits at the ORIGIN of this space
++		// (vObject::mWorld carries the camera-relative translation), so centring there and
++		// shrinking the box to a few metres puts the texels where the eye actually is -
++		// ~4 mm each - while still comfortably containing the canopy frames and nose
++		// structure that do the casting. Shrinking the box also shrinks gSHD[0], hence the
++		// slope-scaled bias in ComputeShadow(), so edges tighten twice over. Geometry
++		// further out stops casting into the cabin, which costs nothing: at 1 cm texels it
++		// was not resolving anything meaningful anyway.
++		// The box half-width and an on/off are exposed through gcCore::SetVCShadows (see
++		// gcCore.cpp) so an addon can A/B the pass and tune the radius per vessel without
++		// a rebuild. Both default to the values below, so a client nobody calls behaves
++		// exactly as if the entry point did not exist.
++		extern bool  g_gcVCShadows;
++		extern float g_gcVCShadowRad;
++		if (Config->ShadowMapMode >= 1 && g_gcVCShadows) {
++			D3DXVECTOR3 ld  = sunLight.Dir;
++			float       rad = min(vFocus->GetBoundingSphereRadius(), g_gcVCShadowRad);
++			// Deliberately NOT the exact origin: RenderShadowMap divides by |pos| to pick
++			// the LOD, and log2f(size / (inf * 1.5f)) would hand int(round(-inf)) straight
++			// to the psShmRT[] index. A centimetre off-centre on a metres-wide box is free.
++			D3DXVECTOR3 pos(0.0f, 0.0f, 0.01f);
++			RenderShadowMap(pos, ld, rad);
++		}
++
+ 		// switch cockpit lights on, external-only lights off
+ 		//
+ 		if (bLocalLight) {
+@@ -1975,7 +2046,13 @@ void Scene::RenderMainScene()
+ 		if (znear>1.0)  znear=1.0;
+ 		OBJHANDLE hFocus = oapiGetFocusObject();
+ 		SetCameraFrustumLimits(znear, oapiGetSize(hFocus)*2.0);
++		// ORO patch (p): the shadow may take the material AMBIENT with it, but ONLY
++		// in here. Raised for the cockpit draw and cleared immediately after, so every
++		// exterior pass keeps stock shading no matter what the addon asked for.
++		extern float g_gcVCShadowDep;
++		if (D3D9Effect::eVCShdDepth) D3D9Effect::FX->SetFloat(D3D9Effect::eVCShdDepth, g_gcVCShadowDep);
+ 		vFocus->Render(pDevice, true);
++		if (D3D9Effect::eVCShdDepth) D3D9Effect::FX->SetFloat(D3D9Effect::eVCShdDepth, 0.0f);
+ 	}
+ 
+ 	pDevice->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
+@@ -1984,9 +2061,24 @@ void Scene::RenderMainScene()
+ 	// End Of Main Scene Rendering ---------------------------------------------
+ 	//
+ 
++	// -------------------------------------------------------------------------------------------------------
++	// ORO patch (i): pre-resolve render proc. The complete scene (terrain, vessels,
++	// transparency, VC) is down; the light-blur resolve and the HUD have not run yet, and
++	// the top render target is still the main scene target - the fp16 offscreen buffer
++	// when PostProcess is enabled. Addon art drawn here is therefore composited in HDR
++	// space and participates in the threshold bloom + tonemap below, and always lands
++	// under the HUD/2D overlay. Invoked with NULL matrices: the pad stays in its ortho
++	// pixel-space defaults, the same contract as the HUD stages (see patch (a) note in
++	// MakeRenderProcCall).
++	// -------------------------------------------------------------------------------------------------------
+ 
+-
+-
++	{
++		D3D9Pad *pSketch = GetPooledSketchpad(SKETCHPAD_2D_OVERLAY);
++		if (pSketch) {
++			gc->MakeRenderProcCall(pSketch, RENDERPROC_PRE_RESOLVE, NULL, NULL);
++			pSketch->EndDrawing(); // SKETCHPAD_2D_OVERLAY
++		}
++	}
+ 
+ 
+ 
+@@ -3406,6 +3498,8 @@ bool Scene::UpdateCameraFromOrbiter(DWORD dwPass)
+ 
+ 	oapiCameraGlobalDir(&Camera.dir);
+ 	oapiCameraRotationMatrix(&grot);
++	Camera.grot = grot;		// ORO patch (k): keep the double-precision rotation for
++							// gcCore::GetRenderCam (mView below is the same, as float)
+ 	D3DXMatrixIdentity(&Camera.mView);
+ 	D3DMAT_SetRotation(&Camera.mView, &grot);
+ 
+diff --git a/OVP/D3D9Client/Scene.h b/OVP/D3D9Client/Scene.h
+index 917f38b..ca5da63 100644
+--- a/OVP/D3D9Client/Scene.h
++++ b/OVP/D3D9Client/Scene.h
+@@ -134,6 +134,10 @@ public:
+ 		D3DXMATRIX	mProj;		// D3DX projection matrix for current camera state
+ 		D3DXMATRIX	mProjView;	// D3DX combined projection view matrix
+ 		D3DXMATRIX  mProjViewInf; // D3DX combined projection view matrix, far plane at infinity
++		MATRIX3		grot;		// ORO patch (k): the oapiCameraRotationMatrix this frame
++								// renders with, kept in DOUBLE precision for addons that
++								// project world-anchored geometry on the CPU (mView is the
++								// same rotation, but demoted to float)
+ 		OBJHANDLE	hTarget;	// Current camera target, Mesh Debugger Related
+ 
+ 		OBJHANDLE	hObj_proxy;	// closest celestial body
+@@ -257,6 +261,11 @@ public:
+ 	LPDIRECT3DSURFACE9 GetIrradianceDepthStencil() const { return pIrradDS; }
+ 	LPDIRECT3DSURFACE9 GetEnvDepthStencil() const { return pEnvDS; }
+ 	LPDIRECT3DSURFACE9 GetBuffer(int id) const { return psgBuffer[id]; }
++	// ORO patch (g): the shader-readable scene depth texture (camera-space linear depth
++	// in .a, cockpit included - filled in RENDERPASS_NORMAL_DEPTH). NULL when SunGlare is
++	// off (bGlares), so callers must degrade. Lets an addon depth-clip its own screen-space
++	// geometry (aurora / reentry plasma) against the real scene instead of painting over it.
++	LPDIRECT3DTEXTURE9 GetDepthTexture() const { return ptgBuffer[GBUF_DEPTH]; }
+ 	LPDIRECT3DTEXTURE9 GetSunTexture() const { return pSunTex; }
+ 	LPDIRECT3DTEXTURE9 GetSunGlareAtm() const { return pSunGlareAtm; }
+ 
+@@ -355,6 +364,14 @@ public:
+ 	float			GetCameraNearPlane() const { return Camera.nearplane; }
+ 	float			GetCameraAperture() const { return (float)Camera.aperture; }
+ 	VECTOR3			GetCameraGPos() const { return Camera.pos; }
++	// ORO patch (k): snapshot of the camera the CURRENT frame is being rendered with -
++	// position, rotation and tan(aperture) in the exact form oapiCamera* hand out, but read
++	// AT RENDER TIME. Module pre/post-step hooks both run before Orbiter updates the camera,
++	// so anything a module projects there is one full step stale; world-anchored geometry at
++	// close range (the ORO reentry trail) visibly jumps by one frame of camera travel.
++	// Refreshed by UpdateCameraFromOrbiter at the top of every pass that renders the scene.
++	void			GetRenderCam(VECTOR3* p, MATRIX3* r, double* t) const {
++						*p = Camera.pos; *r = Camera.grot; *t = tan((double)Camera.aperture); }
+ 	VECTOR3			GetCameraGDir() const { return Camera.dir; }
+ 	OBJHANDLE		GetCameraProxyBody() const { return Camera.hObj_proxy; }
+ 	vPlanet *		GetCameraProxyVisual() const { return Camera.vProxy; }
+diff --git a/OVP/D3D9Client/Surfmgr2.cpp b/OVP/D3D9Client/Surfmgr2.cpp
+index 85278c8..5c6c78f 100644
+--- a/OVP/D3D9Client/Surfmgr2.cpp
++++ b/OVP/D3D9Client/Surfmgr2.cpp
+@@ -800,7 +800,12 @@ void SurfTile::Render ()
+ 		rad = rad0 / (double)(2 << lvl); // tile radius
+ 		has_specular = (ltex != NULL) && sdist < (1.75 + rad);
+ 		has_lights = (render_lights && ltex && sdist > 1.35);
+-		has_shadows = (render_shadows && sdist < (PI05 + rad));
++		// ORO patch (m): bind the cloud tiles for NIGHT tiles too (this was day-side
++		// only, because the textures existed solely for the sun shadows). The terrain
++		// shader now also reads them at night to BLOT the city lights under cloud
++		// (NewPlanet.hlsl, the cNgt block). Day side: nothing changes - the shadow
++		// term still only bites where the sun terms are nonzero.
++		has_shadows = (render_shadows && (sdist < (PI05 + rad) || has_lights));
+ 	}
+ 	
+ 	has_specular &= pShader->bWater;
+diff --git a/OVP/D3D9Client/VVessel.cpp b/OVP/D3D9Client/VVessel.cpp
+index bb0ab52..6028604 100644
+--- a/OVP/D3D9Client/VVessel.cpp
++++ b/OVP/D3D9Client/VVessel.cpp
+@@ -944,11 +944,18 @@ void vVessel::RenderVectors (LPDIRECT3DDEVICE9 dev, D3D9Pad *pSkp)
+ 
+ 
+ // ============================================================================================
+-//
++// ORO patch (n): an addon may suppress the stock exhaust billboards per vessel so it can
++// draw its own exhaust visuals (see gcCore::SuppressExhaust - the reentry patch's story,
++// told again for the engine flames). The gate lives HERE so both Scene call sites (the main
++// pass and the custom-camera pass) are covered by one line. ExhaustLength stays zero for a
++// suppressed vessel: nothing is rendered, so nothing downstream should size off it.
++extern bool gcIsExhaustSuppressed(OBJHANDLE hVessel);
++
+ bool vVessel::RenderExhaust()
+ {
+ 	ExhaustLength = 0.0f;
+ 	if (!active) return false;
++	if (gcIsExhaustSuppressed(Object())) return true;
+ 
+ 	DWORD nexhaust = vessel->GetExhaustCount();
+ 	if (!nexhaust) return true; // nothing to do
+@@ -1715,10 +1722,19 @@ void vVessel::AnimateComponent (ANIMATIONCOMP *comp, const D3DXMATRIX &T)
+ // ============================================================================================
+ //
+ 
++// ORO addon (2026): an addon may suppress the stock reentry billboards per vessel so it
++// can draw its own. Implemented in gcCore.cpp; declared here rather than in a header to keep
++// the patch to one bool. See gcCore::SuppressReentry for why this exists at all - in short,
++// this function honours neither vessel->reentry.do_render (which VESSEL::SetReentryTexture
++// sets, and which the INLINE renderer respects) nor the user's CfgVisualPrm.bReentryFlames
++// option, so without this there is no way to turn these billboards off under D3D9Client.
++extern bool gcIsReentrySuppressed(OBJHANDLE hVessel);
++
+ void vVessel::RenderReentry(LPDIRECT3DDEVICE9 dev)
+ {
+ 
+ 	if (defreentrytex == NULL || nmesh < 1) return;
++	if (gcIsReentrySuppressed(Object())) return;
+ 
+ 	double p = vessel->GetAtmDensity();
+ 	double v = vessel->GetAirspeed();
+diff --git a/OVP/D3D9Client/gcCore.cpp b/OVP/D3D9Client/gcCore.cpp
+index 76c0d04..8417f66 100644
+--- a/OVP/D3D9Client/gcCore.cpp
++++ b/OVP/D3D9Client/gcCore.cpp
+@@ -42,6 +42,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
+ 	if (strcmp(name,"RegisterSwap")==0) *ppFnc = &gcCore2::RegisterSwap;
+ 	if (strcmp(name,"FlipSwap")==0) *ppFnc = &gcCore2::FlipSwap;
+ 	if (strcmp(name,"GetRenderTarget")==0) *ppFnc = &gcCore2::GetRenderTarget;
++	if (strcmp(name,"GetBackBufferHandle")==0) *ppFnc = &gcCore2::GetBackBufferHandle;
++	if (strcmp(name,"CopyResource")==0) *ppFnc = &gcCore2::CopyResource;
++	if (strcmp(name,"SuppressReentry")==0) *ppFnc = &gcCore2::SuppressReentry;
++	if (strcmp(name,"SuppressExhaust")==0) *ppFnc = &gcCore2::SuppressExhaust;
++	if (strcmp(name,"ExemptNewStreams")==0) *ppFnc = &gcCore2::ExemptNewStreams;
++	if (strcmp(name,"SetVCShadows")==0) *ppFnc = &gcCore2::SetVCShadows;
+ 	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
+ 	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
+ 	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
+@@ -50,6 +56,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
+ 	if (strcmp(name,"SketchpadVersion")==0) *ppFnc = &gcCore2::SketchpadVersion;
+ 	if (strcmp(name,"CreatePoly")==0) *ppFnc = &gcCore2::CreatePoly;
+ 	if (strcmp(name,"CreateTriangles")==0) *ppFnc = &gcCore2::CreateTriangles;
++	if (strcmp(name,"CreateTrianglesDepth")==0) *ppFnc = &gcCore2::CreateTrianglesDepth;
++	if (strcmp(name,"HasDepthBuffer")==0) *ppFnc = &gcCore2::HasDepthBuffer;
++	if (strcmp(name,"CreateTrianglesTex")==0) *ppFnc = &gcCore2::CreateTrianglesTex;
++	if (strcmp(name,"UpdateTexture2D")==0) *ppFnc = &gcCore2::UpdateTexture2D;
++	if (strcmp(name,"GetRenderCam")==0) *ppFnc = &gcCore2::GetRenderCam;
++	if (strcmp(name,"GetRenderObjPos")==0) *ppFnc = &gcCore2::GetRenderObjPos;
+ 	if (strcmp(name,"DeletePoly")==0) *ppFnc = &gcCore2::DeletePoly;
+ 	if (strcmp(name,"GetTextLength")==0) *ppFnc = &gcCore2::GetTextLength;
+ 	if (strcmp(name,"GetCharIndexByPosition")==0) *ppFnc = &gcCore2::GetCharIndexByPosition;
+@@ -159,11 +171,159 @@ void gcCore::FlipSwap(HSWAP hSwap)
+ 
+ // ===============================================================================================
+ //
+-SURFHANDLE gcCore::GetRenderTarget(HSWAP hSwap) 
+-{ 
++SURFHANDLE gcCore::GetRenderTarget(HSWAP hSwap)
++{
+ 	return ((gcSwap*)hSwap)->hSurf;
+ }
+ 
++// ===============================================================================================
++// ORO addon (2026): expose the main backbuffer + a mid-scene-safe surface copy so a module
++// can resample the live frame through gcIPInterface (grey-out / blur / tilt).
++//
++SURFHANDLE gcCore::GetBackBufferHandle()
++{
++	return g_client->GetBackBufferHandle();
++}
++
++// ===============================================================================================
++//
++bool gcCore::CopyResource(SURFHANDLE tgt, SURFHANDLE src)
++{
++	if (!tgt || !src) return false;
++	LPDIRECT3DSURFACE9 pts = SURFACE(tgt)->GetSurface();
++	LPDIRECT3DSURFACE9 pss = SURFACE(src)->GetSurface();
++	if (!pts || !pss) return false;
++	// Direct device StretchRect - NO Begin/EndScene wrapper (cf. StretchRectInScene), so this
++	// is callable from inside a render callback. NULL rects = whole-surface copy (also the form
++	// that resolves a multisampled source into a plain texture).
++	return g_client->GetDevice()->StretchRect(pss, NULL, pts, NULL, D3DTEXF_LINEAR) == S_OK;
++}
++
++// ===============================================================================================
++// ORO addon (2026): let a module suppress this client's built-in reentry flames per vessel.
++//
++// WHY THIS EXISTS. Orbiter documents VESSEL::SetReentryTexture(NULL) as suppressing reentry
++// flames, and the inline renderer honours it - Src/Orbiter/Vvessel.cpp gates on
++// vessel->reentry.do_render AND the user's CfgVisualPrm.bReentryFlames option. D3D9Client's
++// vVessel::RenderReentry checks NEITHER: it gates only on its own globally-loaded
++// defreentrytex, so both the documented API and the user's own Launchpad setting are
++// silently ignored here. An addon that wants to REPLACE the reentry visuals therefore has
++// no way to turn the stock billboards off.
++//
++// The proper fix is for RenderReentry to honour do_render, but that flag lives in the
++// core-internal Vessel.h and is not reachable across the client DLL boundary. This is the
++// client-side equivalent: an explicit opt-in list an addon can manage.
++//
++static std::set<OBJHANDLE> g_gcReentrySuppressed;
++
++void gcCore::SuppressReentry(OBJHANDLE hVessel, bool bSuppress)
++{
++	if (!hVessel) return;
++	if (bSuppress) g_gcReentrySuppressed.insert(hVessel);
++	else           g_gcReentrySuppressed.erase(hVessel);
++}
++
++// --- ORO patch (f): virtual-cockpit shadow controls -------------------------------
++// Read by Scene::RenderMainScene's internal pass (declared extern there, the same
++// no-header-churn pattern as gcIsReentrySuppressed above). Defaults reproduce the
++// built-in behaviour, so a client nobody calls behaves exactly as if these did not exist.
++bool  g_gcVCShadows    = true;
++float g_gcVCShadowRad  = 2.2f;   // measured on the stock DeltaGlider, not guessed - the
++                                 // sharpest box that still holds its canopy structure
++
++// ORO patch (p): how much of the material AMBIENT the shadow takes with it, 0..1.
++// 0 = stock (the shadow scales the sun only, so a shadowed VC surface keeps all its
++// ambient and reads as a faint smudge); 1 = the shadow removes the ambient entirely
++// and only emissive plus cockpit lights survive. EMISSIVE IS NEVER SCALED - see the
++// shader comment. Cockpit pass only (Scene.cpp raises and clears it per frame), so
++// exterior shading is untouched at any setting.
++float g_gcVCShadowDep  = 0.0f;
++
++void gcCore::SetVCShadows(bool bEnable, float radius, float depth)
++{
++	g_gcVCShadows   = bEnable;
++	// Clamp rather than trust: the value reaches D3DXMatrixOrthoOffCenterRH, and a zero
++	// or negative box is a degenerate projection.
++	g_gcVCShadowRad = (radius < 0.25f) ? 0.25f : (radius > 50.0f ? 50.0f : radius);
++	// Clamped too, and for a sharper reason: the shader SUBTRACTS depth x ambient from
++	// a sum that also holds emissive, so a value outside 0..1 would either brighten the
++	// shadow or drive the term negative.
++	g_gcVCShadowDep = (depth < 0.0f) ? 0.0f : (depth > 1.0f ? 1.0f : depth);
++}
++
++// Queried by vVessel::RenderReentry (declared extern there - no header churn for one bool).
++bool gcIsReentrySuppressed(OBJHANDLE hVessel)
++{
++	return g_gcReentrySuppressed.find(hVessel) != g_gcReentrySuppressed.end();
++}
++
++// --- ORO patch (n): per-vessel ENGINE-EXHAUST suppression ------------------------
++// The reentry story again, for the exhaust family: an addon drawing its own exhaust
++// visuals (ORO's pressure-dependent plume overlay) has no route to the stock ones.
++// The exhaust list is reachable (GetExhaustCount/DelExhaust/AddExhaust) but rewriting
++// another vessel's list churns indices that vessel's own code may hold, and particle
++// streams are worse - DelExhaustStream needs the PSTREAM_HANDLE only the creating
++// vessel ever received. So the render side is gated here instead: billboards in
++// vVessel::RenderExhaust, stream EMISSION in ExhaustStream::Update (the patch-(e)
++// rule - in-flight particles expire naturally, so lifting suppression releases no
++// backlog burst). Same shape as the reentry set above.
++// SPLIT 2026-08-09: billboards and particle streams suppress INDEPENDENTLY.
++// One flag killed both, which is wrong the moment an addon replaces only one of
++// them - ORO's overlay replaces the billboards while its PARTICLES tab may or
++// may not be replacing the streams. GCEXH_BILLBOARD / GCEXH_STREAM (gcCore.h).
++static std::map<OBJHANDLE, DWORD> g_gcExhaustSuppressed;
++
++void gcCore::SuppressExhaust(OBJHANDLE hVessel, DWORD flags)
++{
++	if (!hVessel) return;
++	if (flags) g_gcExhaustSuppressed[hVessel] = flags;
++	else       g_gcExhaustSuppressed.erase(hVessel);
++}
++
++static DWORD gcExhaustFlags(OBJHANDLE hVessel)
++{
++	std::map<OBJHANDLE, DWORD>::const_iterator it = g_gcExhaustSuppressed.find(hVessel);
++	return (it == g_gcExhaustSuppressed.end()) ? 0 : it->second;
++}
++
++// Queried by vVessel::RenderExhaust (declared extern there): the BILLBOARDS only.
++bool gcIsExhaustSuppressed(OBJHANDLE hVessel)
++{
++	return (gcExhaustFlags(hVessel) & GCEXH_BILLBOARD) != 0;
++}
++
++// Queried by ExhaustStream::Update (declared extern there): the PARTICLE STREAMS only.
++bool gcIsExhaustStreamSuppressed(OBJHANDLE hVessel)
++{
++	return (gcExhaustFlags(hVessel) & GCEXH_STREAM) != 0;
++}
++
++// --- ORO patch (o): a LATCH marking new streams exempt from (n) ------------------
++// (n) is per VESSEL, which is right for hiding what a vessel author shipped and wrong
++// the moment an addon adds its OWN exhaust stream to that same vessel - the
++// replacement would be suppressed along with the thing it replaces. AddParticleStream
++// is not an escape route either: clbkCreateParticleStream is unimplemented in this
++// client, so every usable stream is an ExhaustStream and every ExhaustStream is gated.
++//
++// A LATCH, not a set of stream pointers: the addon raises it, creates its streams,
++// lowers it, and each ExhaustStream stamps a plain bool member at construction. The
++// pointer-set version of this patch did not work - D3D9ParticleStream has TWO base
++// classes, the addon holds a ParticleStream* and the gate runs with an ExhaustStream*,
++// so matching them is a bet on base-subobject offsets. A member cannot miss, and the
++// addon has nothing to clean up.
++static bool g_gcExemptLatch = false;
++
++void gcCore::ExemptNewStreams(bool bExempt)
++{
++	g_gcExemptLatch = bExempt;
++}
++
++// Read by the ExhaustStream constructors (declared extern there).
++bool gcExemptLatch()
++{
++	return g_gcExemptLatch;
++}
++
+ // ===============================================================================================
+ //
+ void gcCore::ReleaseSwap(HSWAP hSwap) 
+@@ -269,6 +429,109 @@ HPOLY gcCore::CreateTriangles(HPOLY hPoly, const gcCore::clrVtx *pt, int npt, DW
+ }
+ 
+ 
++// ORO patch (g): CreateTriangles with a per-vertex camera-space depth (pDepth) for the
++// depth-clip draw path. Identical lifecycle to CreateTriangles - create once, update in
++// place - just threading the depth array through to the vertex buffer's spare .l channel.
++HPOLY gcCore::CreateTrianglesDepth(HPOLY hPoly, const gcCore::clrVtx *pt, const float *pDepth, int npt, DWORD flags)
++{
++	LPDIRECT3DDEVICE9 pDev = g_client->GetDevice();
++	if (!hPoly) return new D3D9Triangle(pDev, pt, npt, flags, pDepth);
++	((D3D9Triangle *)hPoly)->Update(pt, npt, pDepth);
++	return hPoly;
++}
++
++
++// ORO patch (g): does the scene depth buffer exist this session (SunGlare on)?
++bool gcCore::HasDepthBuffer()
++{
++	Scene *pScene = g_client->GetScene();
++	return pScene && (pScene->GetDepthTexture() != NULL);
++}
++
++
++// ORO patch (l): CreateTriangles with TEXTURED vertices (texture x Gouraud colour per
++// fragment) + the optional per-vertex depth of patch (g). Same create-once/update-in-place
++// lifecycle as the other two. The texture is resolved to its D3D9 object here and stored
++// on the poly; DrawPoly binds it through the pad's own texture state machinery.
++HPOLY gcCore::CreateTrianglesTex(HPOLY hPoly, const gcCore::texVtx *pt, const float *pDepth, int npt, DWORD flags, SURFHANDLE hTex)
++{
++	LPDIRECT3DDEVICE9 pDev = g_client->GetDevice();
++	LPDIRECT3DTEXTURE9 pTex = (hTex && SURFACE(hTex)->IsTexture()) ? SURFACE(hTex)->GetTexture() : NULL;
++	if (!hPoly) {
++		D3D9Triangle *pT = new D3D9Triangle(pDev, NULL, npt, flags);
++		pT->SetTex(pTex);
++		if (pt) pT->UpdateTex(pt, npt, pDepth);
++		return pT;
++	}
++	D3D9Triangle *pT = (D3D9Triangle *)hPoly;
++	pT->SetTex(pTex);
++	pT->UpdateTex(pt, npt, pDepth);
++	return hPoly;
++}
++
++
++// ORO patch (l): CPU bytes -> texture surface, via a SYSTEMMEM staging texture and
++// UpdateTexture (the canonical D3D9 upload; the destination is the plain DEFAULT-pool
++// texture oapiCreateSurfaceEx(OAPISURFACE_TEXTURE) creates). Main thread only.
++bool gcCore::UpdateTexture2D(SURFHANDLE hSurf, const void* pBits, int w, int h)
++{
++	if (!hSurf || !pBits || w <= 0 || h <= 0) return false;
++	if (!SURFACE(hSurf)->IsTexture()) return false;
++	LPDIRECT3DTEXTURE9 pTex = SURFACE(hSurf)->GetTexture();
++	if (!pTex) return false;
++
++	D3DSURFACE_DESC desc;
++	if (pTex->GetLevelDesc(0, &desc) != S_OK) return false;
++	if ((int)desc.Width != w || (int)desc.Height != h) return false;
++	if (desc.Format != D3DFMT_X8R8G8B8 && desc.Format != D3DFMT_A8R8G8B8) return false;
++	if (desc.Usage & D3DUSAGE_RENDERTARGET) return false;   // UpdateTexture cannot target a RT
++
++	LPDIRECT3DDEVICE9 pDev = g_client->GetDevice();
++	LPDIRECT3DTEXTURE9 pStage = NULL;
++	// Staging matches the destination's full mip chain so UpdateTexture's level pairing
++	// holds; only level 0 is filled (create surfaces with OAPISURFACE_NOMIPMAPS).
++	if (pDev->CreateTexture(w, h, pTex->GetLevelCount(), 0, desc.Format, D3DPOOL_SYSTEMMEM, &pStage, NULL) != S_OK) return false;
++
++	bool ok = false;
++	D3DLOCKED_RECT lr;
++	if (pStage->LockRect(0, &lr, NULL, 0) == S_OK) {
++		for (int y = 0; y < h; y++)
++			memcpy((BYTE*)lr.pBits + (size_t)y * lr.Pitch, (const BYTE*)pBits + (size_t)y * w * 4, (size_t)w * 4);
++		pStage->UnlockRect(0);
++		ok = (pDev->UpdateTexture(pStage, pTex) == S_OK);
++	}
++	pStage->Release();
++	return ok;
++}
++
++// ===============================================================================================
++// ORO patch (k): the render camera, for CPU projection of world-anchored geometry from
++// inside a render callback. See gcCore.h for why the pre/post-step camera cannot serve.
++bool gcCore::GetRenderCam(VECTOR3* pos, MATRIX3* rot, double* tanAp)
++{
++	if (!pos || !rot || !tanAp) return false;
++	Scene *pScene = g_client->GetScene();
++	if (!pScene) return false;
++	pScene->GetRenderCam(pos, rot, tanAp);
++	return true;
++}
++
++// ===============================================================================================
++// ORO patch (k2): the render-epoch position of a body - the anchor companion to
++// GetRenderCam (see gcCore.h). vObject::gpos is refreshed from oapiGetGlobalPos at
++// render start, in the same breath as the camera, so it IS the frame's number.
++bool gcCore::GetRenderObjPos(OBJHANDLE hObj, VECTOR3* pos)
++{
++	if (!hObj || !pos) return false;
++	Scene *pScene = g_client->GetScene();
++	if (!pScene) return false;
++	vObject *vo = pScene->GetVisObject(hObj);
++	if (!vo) return false;
++	*pos = vo->GlobalPos();
++	return true;
++}
++
++
+ // ===============================================================================================
+ //
+ void gcCore::DeletePoly(HPOLY hPoly)
+diff --git a/OVP/D3D9Client/gcCore.h b/OVP/D3D9Client/gcCore.h
+index f8634ac..070e04a 100644
+--- a/OVP/D3D9Client/gcCore.h
++++ b/OVP/D3D9Client/gcCore.h
+@@ -16,6 +16,11 @@
+ 
+ using namespace oapi;
+ 
++// ORO patch (n) flags: billboards and exhaust particle streams suppress
++// INDEPENDENTLY. An addon typically replaces one and not the other.
++#define GCEXH_BILLBOARD 0x1   ///< hide the stock exhaust billboards
++#define GCEXH_STREAM    0x2   ///< stop the stock exhaust particle streams emitting
++
+ class gcCore;
+ class gcCore2;
+ 
+@@ -57,6 +62,7 @@ static class gcCore2 *pCoreInterface = NULL;
+ #define RENDERPROC_HUD_2ND				0x0002	///< Register a HUD callback to draw over Orbiter's main HUD
+ #define RENDERPROC_PLANETARIUM			0x0003	///< Register a HUD callback to draw into a planetarium view using perspective projection
+ #define RENDERPROC_EXTERIOR				0x0005  ///< Register a callback to draw into an exterior vessel view using perspective projection
++#define RENDERPROC_PRE_RESOLVE			0x0006  ///< ORO patch (i): fires after the complete scene (terrain, vessels, transparency, VC) but BEFORE the light-blur resolve/tonemap and the HUD. Art drawn here participates in HDR bloom when PostProcess=1 (the render target is still the fp16 offscreen buffer). Ortho pixel coordinates (NULL matrices), same contract as the HUD stages.
+ ///@}
+ 
+ 
+@@ -360,6 +366,15 @@ public:
+ 		DWORD color;
+ 	} clrVtx;
+ 
++	// ORO patch (l): a textured triangle vertex - clrVtx plus texture coordinates.
++	// u,v are in TEXELS of the bound texture (the Sketchpad multiplies by its inverse
++	// texture size internally, the same convention as its own blit paths).
++	typedef struct {
++		FVECTOR2 pos;
++		float u, v;
++		DWORD color;
++	} texVtx;
++
+ 
+ 	// ===========================================================================
+ 	/// \name Custom swap-chain management functions
+@@ -387,6 +402,94 @@ public:
+ 	*/
+ 	gc_interface SURFHANDLE GetRenderTarget(HSWAP hSwap);
+ 
++	/**
++	* \brief Get a handle to the main render window's backbuffer surface.
++	* \return SURFHANDLE wrapping the current backbuffer (non-owning; do not release).
++	* \note ORO addon (2026): exposes the client's existing D3D9Client::GetBackBufferHandle()
++	*  so a module can post-process the live frame through the image-processing pipeline
++	*  (use as the CopyResource source and as the gcIPInterface::SetOutput target).
++	*/
++	gc_interface SURFHANDLE GetBackBufferHandle();
++
++	/**
++	* \brief Copy one surface onto another (StretchRect), safe to call mid-scene.
++	* \param tgt destination surface (e.g. a render-target texture)
++	* \param src source surface (e.g. the backbuffer from GetBackBufferHandle)
++	* \return true on success.
++	* \note ORO addon (2026): unlike StretchRectInScene this issues the device StretchRect
++	*  directly WITHOUT a Begin/EndScene wrapper, so it works from inside a render callback
++	*  (which already runs between the device's BeginScene/EndScene). Full-surface copy
++	*  (whole src -> whole tgt); resolves multisampling if the backbuffer is AA'd.
++	*/
++	gc_interface bool CopyResource(SURFHANDLE tgt, SURFHANDLE src);
++
++	/**
++	* \brief Suppress this client's built-in reentry flames for one vessel.
++	* \param hVessel vessel to suppress (or re-enable)
++	* \param bSuppress true to hide the stock reentry billboards, false to restore them
++	* \note ORO addon (2026): Orbiter documents VESSEL::SetReentryTexture(NULL) as
++	*  suppressing reentry flames and the INLINE renderer honours it (plus the user's
++	*  CfgVisualPrm.bReentryFlames option). vVessel::RenderReentry honours neither - it
++	*  gates only on the client's own defreentrytex - so under D3D9Client both the
++	*  documented API and the user's Launchpad setting are silently ignored, and an addon
++	*  replacing the reentry visuals cannot turn the stock ones off.
++	* \note The proper fix is for RenderReentry to honour reentry.do_render, but that flag
++	*  is core-internal (Src/Orbiter/Vessel.h) and unreachable from a client DLL. This is
++	*  the client-side equivalent: an explicit per-vessel opt-in the addon manages.
++	* \note An addon MUST clear its suppressions on unload, or the vessel keeps its flames
++	*  hidden for the rest of the session.
++	*/
++	gc_interface void SuppressReentry(OBJHANDLE hVessel, bool bSuppress);
++
++	/**
++	* \brief Suppress this client's engine-exhaust rendering for one vessel (ORO patch n).
++	* \param hVessel vessel to suppress (or re-enable)
++	* \param bSuppress true to hide the stock exhaust billboards AND stop its exhaust
++	*  particle streams emitting, false to restore both
++	* \note ORO addon (2026): the reentry story again (see SuppressReentry) - an addon
++	*  drawing its own exhaust visuals has no route to the stock ones. The exhaust list is
++	*  reachable (GetExhaustCount/DelExhaust/AddExhaust) but rewriting another vessel's
++	*  list churns indices that vessel's own code may hold, and particle streams are worse:
++	*  DelExhaustStream needs the PSTREAM_HANDLE only the creating vessel ever received.
++	*  So the render side is gated here instead, per vessel, additively restorable.
++	* \note Suppression stops stream EMISSION only - particles already in flight expire
++	*  naturally (the patch-(e) rule, so lifting it never releases a backlog burst).
++	* \note An addon MUST clear its suppressions on unload, or the vessel keeps its
++	*  exhaust hidden for the rest of the session.
++	*/
++	gc_interface void SuppressExhaust(OBJHANDLE hVessel, DWORD flags);
++
++	/**
++	* rief ORO patch (o): exempt ONE particle stream from patch (n)'s per-vessel
++	*  exhaust suppression.
++	* \param hStream the stream handle returned by VESSEL::AddExhaustStream
++	* \param bExempt true to keep this stream emitting while its vessel is suppressed
++	* 
++ote (n) is per VESSEL, which is correct for hiding what a vessel author
++	*  shipped and wrong the moment an addon adds its OWN exhaust stream to that same
++	*  vessel - the replacement would be suppressed along with the thing it replaces.
++	*  AddParticleStream is not an escape route: clbkCreateParticleStream is
++	*  unimplemented in this client, so every usable stream is an ExhaustStream.
++	* 
++ote An addon MUST clear its exemptions on unload.
++	*/
++	gc_interface void ExemptNewStreams(bool bExempt);
++
++	/**
++	* \brief Tune the virtual-cockpit shadow pass (ORO patch f).
++	* \param bEnable false to skip the internal-pass shadow map entirely
++	* \param radius half-width [m] of the ortho box fitted around the eye
++	* \note The VC shadow map is fitted to the CABIN rather than the hull, because the
++	*  exterior box (the vessel's bounding sphere, ~20 m on a DeltaGlider) is ~1 cm per
++	*  texel at ShadowMapSize 2048 - invisible on a fuselage at fifty metres, and visible
++	*  stair-stepping on a panel forty centimetres from the eye. Smaller is sharper but
++	*  stops distant geometry casting into the cabin, so the right value is per-vessel
++	*  taste; this exposes it rather than guessing once for everyone.
++	* \note bEnable is a development/AB convenience. The pass is otherwise governed by
++	*  the user's ShadowMapMode setting, which stays the real switch.
++	*/
++	gc_interface void SetVCShadows(bool bEnable, float radius, float depth);
++
+ 	/**
+ 	* \brief Release a swap object after it's no longer needed.
+ 	* \param hSwap Handle to a swap object.
+@@ -487,6 +590,86 @@ public:
+ 	gc_interface HPOLY CreateTriangles(HPOLY hPoly, const clrVtx* pt, int npt, DWORD flags);
+ 
+ 
++	/**
++	* \brief [ORO patch (g) 2026] Like CreateTriangles, but each vertex also carries a
++	*   CAMERA-SPACE linear depth in pDepth[i]. Drawn with the 0x100 blend-state bit, the
++	*   Sketchpad clips fragments occluded by the scene (sampled from the client's GBUF_DEPTH),
++	*   so screen-space additive geometry sits behind the cockpit / hull / terrain instead of
++	*   painting over them. If the depth buffer is unavailable (SunGlare off) the clip silently
++	*   no-ops and the poly draws as a plain additive triangle list. pDepth length == npt.
++	* \note Exposes what the client already renders (RENDERPASS_NORMAL_DEPTH, cockpit included);
++	*   the same shape as GetBackBufferHandle - a handle onto an existing internal resource.
++	*/
++	gc_interface HPOLY CreateTrianglesDepth(HPOLY hPoly, const clrVtx* pt, const float* pDepth, int npt, DWORD flags);
++
++
++	/**
++	* \brief [ORO patch (g) 2026] True if the scene depth buffer exists this session (SunGlare
++	*   on), i.e. CreateTrianglesDepth will actually clip rather than fall back. Lets an addon
++	*   decide whether to lean on real depth or keep a geometric occlusion fallback.
++	*/
++	gc_interface bool HasDepthBuffer();
++
++
++	/**
++	* \brief [ORO patch (l) 2026] CreateTriangles with TEXTURED vertices: each fragment is
++	*   texture x per-vertex Gouraud colour (a MODULATE the stock Sketchpad texture path lacks -
++	*   its blits REPLACE colour with texture). Same lifecycle as CreateTriangles (create once,
++	*   NULL hPoly; update in place after), same full-creation-count update rule, and the same
++	*   optional per-vertex depth array as CreateTrianglesDepth - so textured geometry can be
++	*   depth-clipped against the scene with the 0x100 blend bit, exactly like the colour polys.
++	* \param hTex The texture (an OAPISURFACE_TEXTURE surface). Sampled LINEAR/CLAMP. The
++	*   surface must outlive the poly; the poly holds no reference. NULL = draw as plain
++	*   Gouraud (texture term becomes 1).
++	* \note Built for luminous world-effects that must take their per-pixel shape from real
++	*   data (a lightning flash lit by the planet's own cloud map), and the substrate the
++	*   textured-particle family needs (mipmapped smoke sprites).
++	*/
++	gc_interface HPOLY CreateTrianglesTex(HPOLY hPoly, const texVtx* pt, const float* pDepth, int npt, DWORD flags, SURFHANDLE hTex);
++
++
++	/**
++	* \brief [ORO patch (l) 2026] Fill a texture surface from CPU memory: w*h 32-bit
++	*   X8R8G8B8/A8R8G8B8 texels, tightly packed, top row first. The surface must be an
++	*   OAPISURFACE_TEXTURE of exactly w x h in a 32-bit format (oapiCreateSurfaceEx). Uploads
++	*   through a SYSTEMMEM staging texture + UpdateTexture - the canonical D3D9 path - so it
++	*   is main-thread only (resource creation), not for the render callback.
++	* \note Exists because no public oapi route can put CPU bytes into a texture at runtime,
++	*   and the flash textures are composited per event from cloud data already in memory.
++	*/
++	gc_interface bool UpdateTexture2D(SURFHANDLE hSurf, const void* pBits, int w, int h);
++
++	/**
++	* \brief [ORO patch (k) 2026] Snapshot of the camera the CURRENT frame is being rendered
++	*   with: global position, rotation matrix and tan(aperture), in the same conventions as
++	*   oapiCameraGlobalPos / oapiCameraRotationMatrix / tan(oapiCameraAperture()).
++	* \param pos Receives the camera's global position.
++	* \param rot Receives the camera's rotation matrix (camera->global; use tmul to project).
++	* \param tanAp Receives tan(aperture).
++	* \return true if a scene exists and the values were written.
++	* \note THE POINT: module clbkPreStep AND clbkPostStep both run before Orbiter updates
++	*   the camera for the frame, so any geometry a module projects there uses a camera one
++	*   full step stale. Vessel-anchored overlays never notice (a tracking camera holds the
++	*   vessel still on screen), but close-range WORLD-anchored geometry (the ORO reentry
++	*   trail) jumps by one frame of camera travel - ~120 m at entry speed. Calling this from
++	*   inside a render callback (the only place it is meaningful) returns the camera the
++	*   scene is ACTUALLY using, refreshed at the top of Scene::RenderMainScene.
++	*/
++	gc_interface bool GetRenderCam(VECTOR3* pos, MATRIX3* rot, double* tanAp);
++
++	/**
++	* \brief [ORO patch (k2) 2026] The global position the scene is rendering an object at
++	*   THIS frame (the object's vObject::GlobalPos, refreshed at render start together with
++	*   the camera). The render-epoch companion to GetRenderCam: an addon reconstructing
++	*   world-anchored geometry as "body position + offset" must anchor to the SAME body
++	*   position the renderer uses, or the whole reconstruction shifts by the body's velocity
++	*   times any epoch gap (~500 m/frame for an Earth-anchored trail - the barycentric frame
++	*   moves at 30 km/s) and jitters with frame pacing.
++	* \return true if the object has a visual this session and pos was written.
++	*/
++	gc_interface bool GetRenderObjPos(OBJHANDLE hObj, VECTOR3* pos);
++
++
+ 	/**
+ 	* \brief Deletes a polyline created with gcCreatePolyPolyline()
+ 	* \param hPoly Handle to a polyline to be deleted
+diff --git a/OVP/D3D9Client/shaders/D3D9Client.fx b/OVP/D3D9Client/shaders/D3D9Client.fx
+index 471df00..98d83cd 100644
+--- a/OVP/D3D9Client/shaders/D3D9Client.fx
++++ b/OVP/D3D9Client/shaders/D3D9Client.fx
+@@ -144,6 +144,16 @@ uniform extern float     gDistScale;
+ uniform extern float     gFogDensity;
+ uniform extern float     gTime;
+ uniform extern float     gMix;				// General purpose parameter (multible uses)
++// ORO patch (p): VC SHADOW DEPTH, 0..1. Stock self-shadowing multiplies the SUN
++// term only, so a fully shadowed pixel keeps its material AMBIENT and EMISSIVE - and
++// a virtual cockpit is authored with plenty of both, which is why VC shadows read as
++// a faint grey smudge no external setting can deepen. This lets the shadow take the
++// AMBIENT term with it, by a user-set fraction. EMISSIVE IS DELIBERATELY UNTOUCHED:
++// a lit instrument panel does not care what is between it and the sun, and dimming
++// MFDs as a canopy shadow sweeps over them reads as a bug. Scene.cpp raises this for
++// the COCKPIT PASS ONLY and clears it after, so exterior shading is bit-for-bit stock;
++// 0 is also exactly stock, so the whole patch is inert until an addon asks for it.
++uniform extern float     gVCShdDepth;
+ uniform extern float 	 gMtrlAlpha;
+ uniform extern float	 gGlowConst;
+ uniform extern float	 gNightTime;		// 1 for nighttime, 0 for daytime
+diff --git a/OVP/D3D9Client/shaders/Metalness.fx b/OVP/D3D9Client/shaders/Metalness.fx
+index 618ba0b..4b3bd73 100644
+--- a/OVP/D3D9Client/shaders/Metalness.fx
++++ b/OVP/D3D9Client/shaders/Metalness.fx
+@@ -283,8 +283,13 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// ======================================================================
+ 	// Add vessel self-shadows
+ 	// ======================================================================
++	float fAmbShd = 1.0f;         // ORO patch (p): ambient survival in shadow
+ #if SHDMAP > 0
+-	cSun *= smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
++	{
++		float fShd = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
++		cSun *= fShd;
++		fAmbShd = lerp(1.0f, fShd, gVCShdDepth);
++	}
+ #endif
+ 	
+ 
+@@ -345,7 +350,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// Add a faint diffuse hue for rough metals. Rough metal doesn't look good if it's totally black
+ 	fA += fRgh * fMetal * 0.05f;
+ 
+-	float3 zD = cDiff.rgb * fA * LightFXSq(Sq(cSun * fR * dLN) + cDiffLocal + Sq(cAmbient) + Sq(gMtrl.emissive.rgb));
++	float3 zD = cDiff.rgb * fA * LightFXSq(Sq(cSun * fR * dLN) + cDiffLocal + Sq(cAmbient * fAmbShd) + Sq(gMtrl.emissive.rgb));
+ 
+ 	// Combine specular terms
+ 	// float3 zS = cS * (cSun * dLN) + cSpec * LightFX(cSpecLocal) * 0.5f;
+diff --git a/OVP/D3D9Client/shaders/NewPlanet.hlsl b/OVP/D3D9Client/shaders/NewPlanet.hlsl
+index 5b43b27..4515075 100644
+--- a/OVP/D3D9Client/shaders/NewPlanet.hlsl
++++ b/OVP/D3D9Client/shaders/NewPlanet.hlsl
+@@ -633,6 +633,22 @@ float4 TerrainPS(TileVS frg) : COLOR
+ 
+ 	cNgt = cMsk.rgb * (1 - Const.CamSpace) * fNgt; // Nightlights surface texture illumination term
+ 	cNgt2 = cMsk.rgb * Const.CamSpace * 4.0f * fNgt; // Nightlights orbital visibility
++
++	// ORO patch (m), part 2: CLOUDS BLOT THE CITY LIGHTS UNDER THEM. The orbital
++	// lights are rendered 4x overbright into the fp16 chain and then bloomed, so the
++	// night-cloud veil (part 1, CloudPS) cannot visibly dim them - 0.26 x 4 is still
++	// ~1.0, and they punched through anything short of solid overcast. Attenuate at
++	// the SOURCE instead, with the same cloud alpha the day shadows sample (Surfmgr2
++	// now binds the cloud tiles for night tiles too). ~92% blocked under a solid
++	// deck; the remaining leak is the diffuse glow real cities show through cloud.
++#if defined(_CLOUDSHD)
++	if (Flow.bCloudShd) {
++		float fCld = saturate(vUVCld.x < 1.0 ? fChA : fChB);
++		float fBlot = 1.0f - fCld * 0.92f;
++		cNgt *= fBlot;
++		cNgt2 *= fBlot;
++	}
++#endif
+ #endif
+ 
+ 	float fNoise = (tex2Dlod(tNoise, float4(frg.texUV.xy * 4.0f * Prm.fTgtScale, 0, 0)).r - 0.5f) * ATMNOISE;
+@@ -712,6 +728,18 @@ float4 TerrainPS(TileVS frg) : COLOR
+ // Planet Cloud Renderer
+ // ============================================================================
+ 
++// ORO patch (m): NIGHT-SIDE CLOUD VISIBILITY, seen from above. Stock multiplies the
++// cloud alpha by the SQUARE of the twilight ramp (AmbientApprox: 1 day -> 0 night, no
++// floor), so night clouds render at alpha 0 - fully invisible - and city lights shine
++// through cloud decks that should blot them out. Real night clouds are conspicuous
++// from orbit precisely as HOLES in the city-light field (and as the canvas lightning
++// lights up). This floors the term with a smooth LERP - day side exactly unchanged
++// (factor 1), night side settling at ORO_NIGHT_CLOUD, no slope kink at the
++// terminator. The cloud RGB stays sun-lit (near black at night), so what appears is a
++// dark veil that dims what is behind it - the real look. Tune by editing the constant
++// and restarting the session (this file compiles at session start; no rebuild).
++#define ORO_NIGHT_CLOUD 0.45f
++
+ CldVS CloudVS(TILEVERTEX vrt)
+ {
+ 	// Zero output.
+@@ -878,8 +906,11 @@ float4 CloudPS(CldVS frg) : COLOR
+ 		cTex.rgb += sct.ray.rgb;
+ 		cTex.rgb *= fECL;
+ 
+-		return float4(sqr(HDR(cTex.rgb * 4.0f)), cTex.a * cAmb.a * cAmb.a);
+-	}	
++		// ORO patch (m): stock was cTex.a * cAmb.a * cAmb.a - alpha 0 past the
++		// terminator, night clouds invisible from above. See the note at CloudVS.
++		float fNight = ORO_NIGHT_CLOUD + (1.0f - ORO_NIGHT_CLOUD) * cAmb.a * cAmb.a;
++		return float4(sqr(HDR(cTex.rgb * 4.0f)), cTex.a * fNight);
++	}
+ }
+ 
+ 
+diff --git a/OVP/D3D9Client/shaders/PBR.fx b/OVP/D3D9Client/shaders/PBR.fx
+index e09b23c..421bcf6 100644
+--- a/OVP/D3D9Client/shaders/PBR.fx
++++ b/OVP/D3D9Client/shaders/PBR.fx
+@@ -194,8 +194,13 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// Add vessel self-shadows
+ 	// ----------------------------------------------------------------------
+ 
++	float fAmbShd = 1.0f;         // ORO patch (p): ambient survival in shadow
+ #if SHDMAP > 0
+-	cSun *= smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
++	{
++		float fShd = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
++		cSun *= fShd;
++		fAmbShd = lerp(1.0f, fShd, gVCShdDepth);
++	}
+ #endif
+ 
+ 
+@@ -254,7 +259,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
+ 
+ 	// Bake material props and lights together
+-	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient);
++	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*fAmbShd);
+ 
+ #if LMODE > 0
+ 	cSun = Light_fx(cSun + cSpecLocal);	// Add local light sources
+@@ -472,7 +477,8 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+ 		float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
+ 		cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
+ 
+-		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient) + gMtrl.emissive.rgb );
++		// ORO patch (p): fShadow is already in hand here (it scaled dLN above).
++		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient*lerp(1.0f, fShadow, gVCShdDepth)) + gMtrl.emissive.rgb );
+ 
+ 		float3 CamD = normalize(frg.camW);
+ 		float3 HlfW = normalize(CamD - gSun.Dir);
+diff --git a/OVP/D3D9Client/shaders/Sketchpad.fx b/OVP/D3D9Client/shaders/Sketchpad.fx
+index 5cae620..af8fe33 100644
+--- a/OVP/D3D9Client/shaders/Sketchpad.fx
++++ b/OVP/D3D9Client/shaders/Sketchpad.fx
+@@ -56,6 +56,8 @@ uniform extern bool      gShade;
+ uniform extern bool      gClipEn;
+ uniform extern bool		 gClearEn;			// Unused
+ uniform extern bool		 gEffectsEn;
++uniform extern bool		 gDepthClip;		// ORO patch (g): clip fragments occluded by the scene
++uniform extern texture   gDepthTex;			// ORO patch (g): GBUF_DEPTH (camera-space depth in .a)
+ 
+ 
+ // ColorKey tolarance
+@@ -93,6 +95,17 @@ sampler NoiseS : register(s2) = sampler_state
+ 	AddressV = WRAP;
+ };
+ 
++// ORO patch (g): the scene depth buffer, point-sampled (no filtering across depth edges).
++sampler DepthS : register(s3) = sampler_state
++{
++	Texture = <gDepthTex>;
++	MinFilter = POINT;
++	MagFilter = POINT;
++	MipFilter = NONE;
++	AddressU = CLAMP;
++	AddressV = CLAMP;
++};
++
+ 
+ struct InputVS
+ {
+@@ -215,6 +228,11 @@ OutputVS OrthoVS(InputVS v)
+ 
+ 	outVS.tex = float4(v.dir.xy * gSize.xy, v.dir.xy * gSize.zw);
+ 
++	// ORO patch (g): carry the vertex's camera depth (POSITION0.z) UNCONDITIONALLY in the
++	// otherwise-unused posW.x (ortho has no clipper), so the depth clip does not depend on
++	// the fnc-gated len branch above.
++	outVS.posW = float4(v.pos.z, 0, 0, 0);
++
+ 	return outVS;
+ }
+ 
+@@ -239,6 +257,11 @@ float4 SketchpadPS(float4 sc : VPOS, OutputVS frg) : COLOR
+ 	float4 c = frg.color;
+ 	if (frg.sw[TSW] > 0.2f) c = gPen;
+ 	if (frg.sw[TSW] > 0.8f) c = t;
++	// ORO patch (l): MODULATE - texture x per-vertex Gouraud colour (SKPSW_TEXMODUL,
++	// byte 26 -> 0.102). The band 0.06..0.14 is occupied by no stock value (0x00 fragment,
++	// 0x80 pen, 0xFF texture), and an unbound texture leaves t = 1, degrading to plain
++	// Gouraud. Placed after the pen/texture lines so it overrides both for its band.
++	if (frg.sw[TSW] > 0.06f && frg.sw[TSW] < 0.14f) c = t * frg.color;
+ 	if (frg.sw[CSW] > 0.8f) c.a *= f;
+ 
+ 	// Color keying
+@@ -260,6 +283,22 @@ float4 SketchpadPS(float4 sc : VPOS, OutputVS frg) : COLOR
+ 		if ((dot(gPos2, posN) > gCov.z) && (frg.posW.w > gCov.w)) clip(-1);
+ 	}
+ 
++	// ORO patch (g): depth clip. frg.len carries this fragment's CAMERA distance (from the
++	// vertex's spare POSITION0.z); GBUF_DEPTH.a holds the scene's camera distance at this
++	// pixel (0 = sky/nothing - only vessels + cockpit are drawn into it). Discard where the
++	// scene surface is nearer than us, so screen-space additive geometry is occluded by the
++	// cockpit and hull. duv = sc.xy / gTarget.zw : gTarget.zw is the SCREEN SIZE (gTarget.xy
++	// is 2/size, for NDC line widths - not the UV scale). The 0.997 slack absorbs fp16 depth
++	// precision and prevents grazing z-fight.
++	if (gDepthClip) {
++		float2 duv = sc.xy / gTarget.zw;             // fragment screen UV (.zw = screen size)
++		float  sd  = tex2D(DepthS, duv).a;           // scene camera-distance at this pixel (0 = sky)
++		// frg.posW.x carries this fragment's camera DISTANCE (POSITION0.z, set unconditionally
++		// in OrthoVS). Discard where the scene surface is nearer, so screen-space additive
++		// geometry sits behind the cockpit / hull. 0.997 absorbs fp16 precision.
++		if (sd > 0.1f && sd < frg.posW.x * 0.997f) clip(-1);
++	}
++
+ 	if (gEffectsEn) {
+ 
+ 		// Apply color matrix
+diff --git a/OVP/D3D9Client/shaders/Vessel.fx b/OVP/D3D9Client/shaders/Vessel.fx
+index ea4691f..5a1a1a1 100644
+--- a/OVP/D3D9Client/shaders/Vessel.fx
++++ b/OVP/D3D9Client/shaders/Vessel.fx
+@@ -123,7 +123,14 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// ----------------------------------------------------------------------
+ 
+ #if SHDMAP > 0
+-	cSun.rgb *= ComputeShadow(frg.shdH, dLN, sc);
++	{
++		float fShd = ComputeShadow(frg.shdH, dLN, sc);
++		cSun.rgb *= fShd;
++		// ORO patch (p): let the shadow eat the AMBIENT share of Base too. Base is
++		// (ambient + emissive), so subtracting at most the ambient part can never take
++		// Base below emissive and never goes negative.
++		Base -= (gMtrl.ambient.rgb * gSun.Ambient) * ((1.0f - fShd) * gVCShdDepth);
++	}
+ #endif
+ 
+ 

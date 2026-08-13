@@ -1,0 +1,29 @@
+diff --git a/OVP/D3D9Client/Particle.cpp b/OVP/D3D9Client/Particle.cpp
+index 6bc93d1..96ea26c 100644
+--- a/OVP/D3D9Client/Particle.cpp
++++ b/OVP/D3D9Client/Particle.cpp
+@@ -779,6 +779,13 @@ void ReentryStream::SetMaterial (D3DCOLORVALUE &col)
+ 	col.b = 0.5f;
+ }
+ 
++// ORO patch (e): the per-vessel reentry suppression (gcCore.cpp) must cover the
++// reentry PARTICLE streams too - the core hands EVERY vessel a default "plasmastream"
++// (Vessel::SetDefaultReentryStream), and vessels like Atlantis add their own, so an
++// addon replacing the reentry visuals gets orphan puffs from ~95 km without this.
++// Suppression stops EMISSION only: particles already in flight expire naturally.
++extern bool gcIsReentrySuppressed(OBJHANDLE hVessel);
++
+ void ReentryStream::Update ()
+ {
+ 	D3D9ParticleStream::Update ();
+@@ -816,7 +823,9 @@ void ReentryStream::Update ()
+ 		}
+ 	}
+ 
+-	if (friction > 0 && (alpha0 = Atm2Alpha (friction)) > 0.01) {
++	if (friction > 0 && !gcIsReentrySuppressed(hRef) && (alpha0 = Atm2Alpha (friction)) > 0.01) {
++		// (suppressed vessels fall through to the else, which resets t0 - so lifting
++		// the suppression does not release a burst of backlogged particles)
+ 		if (simt > t0+interval) {
+ 			VECTOR3 vp, vv, av;
+ 			vessel->GetGlobalPos (vp);

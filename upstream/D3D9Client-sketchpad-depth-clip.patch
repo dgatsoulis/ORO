@@ -1,0 +1,105 @@
+diff --git a/OVP/D3D9Client/D3D9Pad2.cpp b/OVP/D3D9Client/D3D9Pad2.cpp
+index 7568bcd..954d931 100644
+--- a/OVP/D3D9Client/D3D9Pad2.cpp
++++ b/OVP/D3D9Client/D3D9Pad2.cpp
+@@ -962,12 +962,12 @@ void D3D9PolyLine::Update(const FVECTOR2 *_pt, int _npt, bool bConnect)
+ 
+ 
+ 
+-D3D9Triangle::D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int _style) : D3D9PolyBase(1)
++D3D9Triangle::D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int _style, const float *pDepth) : D3D9PolyBase(1)
+ {
+ 	nPt = npt;
+ 	style = _style;
+ 	HR(pDev->CreateVertexBuffer(nPt * sizeof(SkpVtx), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &pVB, NULL));
+-	if (pt) Update(pt, npt);
++	if (pt) Update(pt, npt, pDepth);
+ }
+ 
+ 
+@@ -1000,7 +1000,7 @@ void D3D9Triangle::Draw(D3D9Pad* pSkp, LPDIRECT3DDEVICE9 pDev)
+ 
+ // ===============================================================================================
+ //
+-void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt)
++void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt, const float *pDepth)
+ {
+ 	SkpVtx *Vtx = NULL;
+ 	HR(pVB->Lock(0, 0, (LPVOID*)&Vtx, D3DLOCK_DISCARD));
+@@ -1010,6 +1010,10 @@ void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt)
+ 	for (int i = 0; i < npt; i++) {
+ 		Vtx[i].x = pt[i].pos.x;
+ 		Vtx[i].y = pt[i].pos.y;
++		// ORO patch (g): l is POSITION0.z in the vertex decl and reaches the pixel shader
++		// as frg.len (OrthoVS). Unused (0) for a plain colour triangle; the camera-space
++		// depth when the caller wants depth clipping. Zero is harmless (never occludes).
++		Vtx[i].l = pDepth ? pDepth[i] : 0.0f;
+ 		Vtx[i].clr = pt[i].color;
+ 		Vtx[i].fnc = SKPSW_CENTER | SKPSW_FRAGMENT;
+ 	}
+diff --git a/OVP/D3D9Client/shaders/Sketchpad.fx b/OVP/D3D9Client/shaders/Sketchpad.fx
+index 5cae620..eb3a880 100644
+--- a/OVP/D3D9Client/shaders/Sketchpad.fx
++++ b/OVP/D3D9Client/shaders/Sketchpad.fx
+@@ -56,6 +56,8 @@ uniform extern bool      gShade;
+ uniform extern bool      gClipEn;
+ uniform extern bool		 gClearEn;			// Unused
+ uniform extern bool		 gEffectsEn;
++uniform extern bool		 gDepthClip;		// ORO patch (g): clip fragments occluded by the scene
++uniform extern texture   gDepthTex;			// ORO patch (g): GBUF_DEPTH (camera-space depth in .a)
+ 
+ 
+ // ColorKey tolarance
+@@ -93,6 +95,17 @@ sampler NoiseS : register(s2) = sampler_state
+ 	AddressV = WRAP;
+ };
+ 
++// ORO patch (g): the scene depth buffer, point-sampled (no filtering across depth edges).
++sampler DepthS : register(s3) = sampler_state
++{
++	Texture = <gDepthTex>;
++	MinFilter = POINT;
++	MagFilter = POINT;
++	MipFilter = NONE;
++	AddressU = CLAMP;
++	AddressV = CLAMP;
++};
++
+ 
+ struct InputVS
+ {
+@@ -215,6 +228,11 @@ OutputVS OrthoVS(InputVS v)
+ 
+ 	outVS.tex = float4(v.dir.xy * gSize.xy, v.dir.xy * gSize.zw);
+ 
++	// ORO patch (g): carry the vertex's camera depth (POSITION0.z) UNCONDITIONALLY in the
++	// otherwise-unused posW.x (ortho has no clipper), so the depth clip does not depend on
++	// the fnc-gated len branch above.
++	outVS.posW = float4(v.pos.z, 0, 0, 0);
++
+ 	return outVS;
+ }
+ 
+@@ -260,6 +278,22 @@ float4 SketchpadPS(float4 sc : VPOS, OutputVS frg) : COLOR
+ 		if ((dot(gPos2, posN) > gCov.z) && (frg.posW.w > gCov.w)) clip(-1);
+ 	}
+ 
++	// ORO patch (g): depth clip. frg.len carries this fragment's CAMERA distance (from the
++	// vertex's spare POSITION0.z); GBUF_DEPTH.a holds the scene's camera distance at this
++	// pixel (0 = sky/nothing - only vessels + cockpit are drawn into it). Discard where the
++	// scene surface is nearer than us, so screen-space additive geometry is occluded by the
++	// cockpit and hull. duv = sc.xy / gTarget.zw : gTarget.zw is the SCREEN SIZE (gTarget.xy
++	// is 2/size, for NDC line widths - not the UV scale). The 0.997 slack absorbs fp16 depth
++	// precision and prevents grazing z-fight.
++	if (gDepthClip) {
++		float2 duv = sc.xy / gTarget.zw;             // fragment screen UV (.zw = screen size)
++		float  sd  = tex2D(DepthS, duv).a;           // scene camera-distance at this pixel (0 = sky)
++		// frg.posW.x carries this fragment's camera DISTANCE (POSITION0.z, set unconditionally
++		// in OrthoVS). Discard where the scene surface is nearer, so screen-space additive
++		// geometry sits behind the cockpit / hull. 0.997 absorbs fp16 precision.
++		if (sd > 0.1f && sd < frg.posW.x * 0.997f) clip(-1);
++	}
++
+ 	if (gEffectsEn) {
+ 
+ 		// Apply color matrix

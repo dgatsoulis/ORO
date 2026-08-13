@@ -1,0 +1,20 @@
+// ORO dialog resources.
+// The template is an EMPTY captioned dialog: every control is owner-drawn in
+// OroDialog.cpp (WM_PAINT + mouse handling). Orbiter skins the caption bar
+// itself (dark bar + red close button, cf. DLG_CAPTIONCLOSE), so the native
+// frame already matches the dark theme.
+#include "resource.h"
+#include <windows.h>
+
+// Size note: this DLU size is only a STARTING GUESS and is deliberately not the
+// source of truth. DLU -> px depends on the shell font metrics, which vary per
+// machine and DPI: 333 x 369 DLU is 500 x 600 px at the textbook (6,13) base
+// units, but on the author's box the same numbers came out ~33% larger. So
+// OroDialog.cpp forces the CLIENT area to DLG_W x DLG_H px in WM_INITDIALOG.
+// Change the size THERE, not here.
+IDD_ORO_CONTROL DIALOGEX 0, 0, 333, 369
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "ORO - effects control"
+FONT 8, "MS Shell Dlg"
+BEGIN
+END

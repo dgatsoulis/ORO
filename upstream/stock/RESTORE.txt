@@ -1,0 +1,66 @@
+RESTORING YOUR STOCK ORBITER 2024 GRAPHICS CLIENT
+=================================================
+
+ORO needs a patched D3D9Client. Installing it REPLACED seven files that ship with
+Orbiter 2024. This folder contains the originals, so you can put your installation
+back exactly as it was at any time. Nothing else ORO installs touches a stock file -
+everything else lives in folders of its own and can simply be deleted.
+
+WHAT WAS REPLACED
+-----------------
+  Modules\Plugin\D3D9Client.dll        the graphics client itself
+  Modules\D3D9Client\D3D9Client.fx     ) six shaders, which the client compiles
+  Modules\D3D9Client\Vessel.fx         ) at RUN TIME - so they must always match
+  Modules\D3D9Client\PBR.fx            ) the DLL. Never mix a patched DLL with
+  Modules\D3D9Client\Metalness.fx      ) stock shaders, or the other way round:
+  Modules\D3D9Client\Sketchpad.fx      ) that combination is not tested and can
+  Modules\D3D9Client\NewPlanet.hlsl    ) fail in confusing ways.
+
+TO RESTORE
+----------
+1. Close Orbiter.
+2. Copy the six .fx / .hlsl files from this folder into
+      <OrbiterRoot>\Modules\D3D9Client\
+   overwriting what is there.
+3. Restore the client DLL. Your original was backed up during installation as
+      <OrbiterRoot>\Modules\Plugin\D3D9Client.dll.orig-241231
+   Rename it back to D3D9Client.dll (replacing the patched one).
+   If that backup is missing, reinstalling Orbiter 2024 over the top restores both
+   the DLL and the shaders without touching your scenarios or configs.
+4. Optional cleanup - delete these, they are ORO's own and stock Orbiter never
+   looks at them:
+      Modules\Plugin\ORO.dll
+      Modules\ORO\
+      Meshes\ORO\
+      Textures\ORO\
+      Config\ORO.cfg  and  Config\ORO\
+
+TO GO BACK TO ORO
+-------------------
+Re-run the ORO installation (unzip over <OrbiterRoot> again). Restoring the stock
+files does not delete any of your ORO settings.
+
+HOW TO TELL WHICH CLIENT IS LOADED
+----------------------------------
+Start a scenario and open Orbiter.log in the Orbiter root. Near the top:
+   Module D3D9Client.dll ........ [Build 241231, API 241231]   <- STOCK
+   Module D3D9Client.dll ........ [Build 260809, API 241231]   <- PATCHED
+ORO also logs which of its capabilities the running client provides, one line each,
+a few lines further down. On a stock client ORO loads but stays inert.
+
+WHY A PATCHED CLIENT AT ALL
+---------------------------
+Stock Orbiter 2024's D3D9Client crashes the moment ANY addon registers a HUD render
+callback, which is the mechanism ORO draws through - so the very first patch is a
+crash fix, not a feature. The rest expose things the client already renders internally
+(the frame buffer, the depth buffer, its shadow map) or let an addon switch off stock
+visuals it is replacing. All of it is additive: with ORO uninstalled the patched
+client behaves like the stock one.
+
+LICENCE AND SOURCE
+------------------
+D3D9Client is part of the Orbiter Visualisation Project, (C) 2006-2016 Martin
+Schweiger and 2012-2016 Jarmo Nikkanen, dual licensed under GPL v3 and LGPL v3. The
+build shipped with ORO is a MODIFIED version of it. Every change is documented, and
+the corresponding source is available on request - see BUILDING.md, which lists each
+patch, the files it touches and the exact rebuild recipe from the upstream 2024 tag.

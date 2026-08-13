@@ -1,0 +1,98 @@
+--- a/OVP/D3D9Client/gcCore.h
++++ b/OVP/D3D9Client/gcCore.h
+@@ -409,6 +409,24 @@
+ 	gc_interface bool CopyResource(SURFHANDLE tgt, SURFHANDLE src);
+ 
+ 	/**
++	* \brief Suppress this client's built-in reentry flames for one vessel.
++	* \param hVessel vessel to suppress (or re-enable)
++	* \param bSuppress true to hide the stock reentry billboards, false to restore them
++	* \note ORO addon (2026): Orbiter documents VESSEL::SetReentryTexture(NULL) as
++	*  suppressing reentry flames and the INLINE renderer honours it (plus the user's
++	*  CfgVisualPrm.bReentryFlames option). vVessel::RenderReentry honours neither - it
++	*  gates only on the client's own defreentrytex - so under D3D9Client both the
++	*  documented API and the user's Launchpad setting are silently ignored, and an addon
++	*  replacing the reentry visuals cannot turn the stock ones off.
++	* \note The proper fix is for RenderReentry to honour reentry.do_render, but that flag
++	*  is core-internal (Src/Orbiter/Vessel.h) and unreachable from a client DLL. This is
++	*  the client-side equivalent: an explicit per-vessel opt-in the addon manages.
++	* \note An addon MUST clear its suppressions on unload, or the vessel keeps its flames
++	*  hidden for the rest of the session.
++	*/
++	gc_interface void SuppressReentry(OBJHANDLE hVessel, bool bSuppress);
++
++	/**
+ 	* \brief Release a swap object after it's no longer needed.
+ 	* \param hSwap Handle to a swap object.
+ 	*/
+--- a/OVP/D3D9Client/gcCore.cpp
++++ b/OVP/D3D9Client/gcCore.cpp
+@@ -44,6 +44,7 @@
+ 	if (strcmp(name,"GetRenderTarget")==0) *ppFnc = &gcCore2::GetRenderTarget;
+ 	if (strcmp(name,"GetBackBufferHandle")==0) *ppFnc = &gcCore2::GetBackBufferHandle;
+ 	if (strcmp(name,"CopyResource")==0) *ppFnc = &gcCore2::CopyResource;
++	if (strcmp(name,"SuppressReentry")==0) *ppFnc = &gcCore2::SuppressReentry;
+ 	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
+ 	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
+ 	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
+@@ -190,6 +191,36 @@
+ }
+ 
+ // ===============================================================================================
++// ORO addon (2026): let a module suppress this client's built-in reentry flames per vessel.
++//
++// WHY THIS EXISTS. Orbiter documents VESSEL::SetReentryTexture(NULL) as suppressing reentry
++// flames, and the inline renderer honours it - Src/Orbiter/Vvessel.cpp gates on
++// vessel->reentry.do_render AND the user's CfgVisualPrm.bReentryFlames option. D3D9Client's
++// vVessel::RenderReentry checks NEITHER: it gates only on its own globally-loaded
++// defreentrytex, so both the documented API and the user's own Launchpad setting are
++// silently ignored here. An addon that wants to REPLACE the reentry visuals therefore has
++// no way to turn the stock billboards off.
++//
++// The proper fix is for RenderReentry to honour do_render, but that flag lives in the
++// core-internal Vessel.h and is not reachable across the client DLL boundary. This is the
++// client-side equivalent: an explicit opt-in list an addon can manage.
++//
++static std::set<OBJHANDLE> g_gcReentrySuppressed;
++
++void gcCore::SuppressReentry(OBJHANDLE hVessel, bool bSuppress)
++{
++	if (!hVessel) return;
++	if (bSuppress) g_gcReentrySuppressed.insert(hVessel);
++	else           g_gcReentrySuppressed.erase(hVessel);
++}
++
++// Queried by vVessel::RenderReentry (declared extern there - no header churn for one bool).
++bool gcIsReentrySuppressed(OBJHANDLE hVessel)
++{
++	return g_gcReentrySuppressed.find(hVessel) != g_gcReentrySuppressed.end();
++}
++
++// ===============================================================================================
+ //
+ void gcCore::ReleaseSwap(HSWAP hSwap) 
+ { 
+diff --git a/OVP/D3D9Client/VVessel.cpp b/OVP/D3D9Client/VVessel.cpp
+index bb0ab52..0a1fd87 100644
+--- a/OVP/D3D9Client/VVessel.cpp
++++ b/OVP/D3D9Client/VVessel.cpp
+@@ -1715,10 +1715,19 @@ void vVessel::AnimateComponent (ANIMATIONCOMP *comp, const D3DXMATRIX &T)
+ // ============================================================================================
+ //
+ 
++// ORO addon (2026): an addon may suppress the stock reentry billboards per vessel so it
++// can draw its own. Implemented in gcCore.cpp; declared here rather than in a header to keep
++// the patch to one bool. See gcCore::SuppressReentry for why this exists at all - in short,
++// this function honours neither vessel->reentry.do_render (which VESSEL::SetReentryTexture
++// sets, and which the INLINE renderer respects) nor the user's CfgVisualPrm.bReentryFlames
++// option, so without this there is no way to turn these billboards off under D3D9Client.
++extern bool gcIsReentrySuppressed(OBJHANDLE hVessel);
++
+ void vVessel::RenderReentry(LPDIRECT3DDEVICE9 dev)
+ {
+ 
+ 	if (defreentrytex == NULL || nmesh < 1) return;
++	if (gcIsReentrySuppressed(Object())) return;
+ 
+ 	double p = vessel->GetAtmDensity();
+ 	double v = vessel->GetAirspeed();

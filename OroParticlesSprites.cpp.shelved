@@ -1,0 +1,799 @@
+// ==============================================================
+// OroParticlesSprites.cpp.shelved
+// Part of ORO - Orbiter Realism Overhaul
+// Dual licensed under GPL v3 and LGPL v3
+// Copyright (C) 2026 Dimitris "dgatsoulis" Gatsoulis
+// ==============================================================
+
+// ============================================================================
+// ORO - EXHAUST PARTICLES: the detached phenomena (2026-08-09)
+// ----------------------------------------------------------------------------
+// CONSUMER 3 of the plume model (invariant 23a - the table exists FOR this).
+// The jet geometry is rebuilt attached to the nozzle every frame, which is
+// exactly why it cannot draw the half of an exhaust that LEAVES: the cloud that
+// boils off a launch pad, the column that hangs in the air marking a climb, the
+// sheet of regolith a lander throws to the horizon. Two spawners, one pool:
+//
+//   GROUND BILLOW - the plume meets a surface and stops being a jet. It spreads
+//     radially along the ground, then buoyancy takes over and it boils upward.
+//   SHED WAKE     - puffs torn off the jet's downstream end, left in the air as
+//     the vessel pulls away from them.
+//
+// ONE AMBIENT-DENSITY BLEND CARRIES THREE WORLDS, no switch anywhere - the same
+// discipline as the plume's own pressure regime:
+//   dense air (a sea-level pad) - big, slow, near-opaque, buoyant, expanding.
+//     The reference is the Shuttle: 350,000 gallons of deluge water in 41 s
+//     starting 7 s before SRB ignition, so most of that white is STEAM; what
+//     exhaust there is comes from the SRBs, ~30% aluminium oxide by deposition,
+//     molten alumina condensing out WHITE (the SSMEs burn hydrogen to water
+//     vapour and are essentially invisible). Hence a near-white default tint and
+//     a high per-puff alpha: a pad cloud is not the grey wisp of a generic smoke
+//     effect, it is opaque and it swallows the pad.
+//   thin air (Mars) - some billow, collapsing early; 0.02 kg/m^3 buys almost no
+//     buoyancy. Tan is a tint away.
+//   vacuum (the Apollo sheet) - the opposite of a billow in every respect. Dust
+//     appears around 100 ft and intensifies to touchdown; the fine fraction
+//     leaves at 0.6-1.5 miles/s and the smallest grains fly clean over the
+//     horizon and never come back. So: FLAT, RADIAL, FAST, no rise, no
+//     expansion, ballistic arcs under real gravity, and it never settles. We
+//     draw it at a few hundred m/s rather than three thousand, because a
+//     correctly-scaled grain crosses the screen inside one frame - film of the
+//     real thing reads at about our speed anyway.
+//
+// SUBSTRATE: textured sprites on client patch (l), with a PROCEDURALLY BAKED
+// atlas - 16 soft-puff variants in one 512^2 texture, synthesized once at
+// session start, no shipped asset (see BakeAtlas). Alpha-blended and drawn
+// BEFORE the additive layers: this is G11's smoke-BEHIND-content recipe, the
+// exact inverse of the soot streaks, which are IN the jet and draw after it.
+// Without patch (l) the whole section greys out (invariant 18b) rather than
+// falling back to flat-shaded fans - which would be precisely the stock look the
+// thruster system exists to replace.
+//
+// THE MOTION LAW, and why it is G10-clean - see OroModule.h's Particle block.
+// Every particle is a pure function of (birth state, age). Only `age` advances.
+// Per-particle expiry AND no accumulated state to go stale, and warp-stable by
+// construction: a 0.2 s frame at 10x just samples a later t, which is where the
+// trail's shed cadence silently collapsed (G10).
+//
+// MAIN THREAD spawns and ages (UpdateParticles, clbkPreStep, after
+// BuildPlumeModel). The RENDER PATH projects (ProjectParticles) with patch (k)'s
+// camera and patch (k2)'s anchors, because this geometry is WORLD-ANCHORED and
+// invariant 21b's epoch law applies to all of it.
+// ============================================================================
+
+#include "OroModule.h"
+#include "OroState.h"
+#include "gcCoreAPI.h"       // patch (l): CreateTrianglesTex / UpdateTexture2D
+#include <math.h>
+#include <string.h>
+
+namespace {
+
+	// --- tuning constants ---------------------------------------------------
+	const double PRT_RATE      = 7.0;    // puffs/s per engine at full throttle, Amount 1
+	const double PRT_LIFE_BASE = 24.0;   // [s] at Life 1.0 (the hanging ascent column)
+	const int    PRT_BURST_MAX = 10;     // per engine per frame: a warp step thins the
+	                                     //   column rather than dumping a clump
+	const double PRT_REACH     = 2.0;    // ground contact counts out to this x jet length
+	const float  PRT_AIR_FULL  = 0.30f;  // [kg/m^3] full "billow" behaviour at/above this
+	                                     //   (Earth ~9 km; Mars 0.02 lands at 0.07, i.e.
+	                                     //   mostly dust-like, which is correct)
+
+	const double ZNEAR = 1.05;           // just past ProjPx's z >= 1 floor
+
+	inline float  clampf(float x, float a, float b) { return x < a ? a : (x > b ? b : x); }
+	inline double clampd(double x, double a, double b) { return x < a ? a : (x > b ? b : x); }
+	inline float  sstepf(float t) { t = clampf(t, 0.0f, 1.0f); return t * t * (3.0f - 2.0f * t); }
+	inline float  hashf(float s) { float t = sinf(s * 12.9898f) * 43758.547f; return t - floorf(t); }
+
+	// Projection: the established per-file copy (reentry / shimmer / aurora / plume).
+	struct CamCtx { VECTOR3 pos; MATRIX3 rot; double tanAp; };
+	void GetCam(CamCtx& c)
+	{
+		oapiCameraGlobalPos(&c.pos);
+		oapiCameraRotationMatrix(&c.rot);
+		c.tanAp = tan(oapiCameraAperture());
+	}
+	bool ProjPx(const CamCtx& cc, const VECTOR3& gpos, DWORD vw, DWORD vh,
+	            float& px, float& py, double& z)
+	{
+		const VECTOR3 c = tmul(cc.rot, gpos - cc.pos);
+		if (c.z < 1.0) return false;
+		z = c.z;
+		const double aspect = vh ? (double)vw / (double)vh : 1.0;
+		px = (float)((0.5 + 0.5 * (c.x / c.z) / (cc.tanAp * aspect)) * vw);
+		py = (float)((0.5 - 0.5 * (c.y / c.z) /  cc.tanAp) * vh);
+		return true;
+	}
+
+	inline DWORD ACol(int r, int g, int b, int a)      // 0xAABBGGRR (invariant 5)
+	{
+		if (a < 0) a = 0; else if (a > 255) a = 255;
+		if (r < 0) r = 0; else if (r > 255) r = 255;
+		if (g < 0) g = 0; else if (g > 255) g = 255;
+		if (b < 0) b = 0; else if (b > 255) b = 255;
+		return ((DWORD)a << 24) | ((DWORD)b << 16) | ((DWORD)g << 8) | (DWORD)r;
+	}
+	inline void UnpackCR(DWORD c, int& r, int& g, int& b)   // COLORREF 0x00BBGGRR
+	{
+		r = (int)( c        & 0xFF);
+		g = (int)((c >>  8) & 0xFF);
+		b = (int)((c >> 16) & 0xFF);
+	}
+
+	// --- the atlas ----------------------------------------------------------
+	// 4x4 slots of 128^2. RGB carries mild interior lumpiness (self-shadow the
+	// vertex Gouraud cannot give); ALPHA carries the soft puff mask with a warped,
+	// ragged rim, so no two puffs share a silhouette and an overlapping mass never
+	// reads as a pile of discs. Baked ONCE per session - no shipped asset, and
+	// nothing to author.
+	DWORD s_atlas[512 * 512];
+
+	inline float vhash2(int x, int y, int s)
+	{
+		int n = x * 374761393 + y * 668265263 + s * 1274126177;
+		n = (n ^ (n >> 13)) * 1274126177;
+		return (float)((n ^ (n >> 16)) & 0xFFFF) / 65535.0f;
+	}
+	float vnoise(float x, float y, int s)
+	{
+		const int xi = (int)floorf(x), yi = (int)floorf(y);
+		const float xf = x - xi, yf = y - yi;
+		const float u = xf * xf * (3.0f - 2.0f * xf), v = yf * yf * (3.0f - 2.0f * yf);
+		const float a = vhash2(xi,     yi,     s), b = vhash2(xi + 1, yi,     s);
+		const float c = vhash2(xi,     yi + 1, s), d = vhash2(xi + 1, yi + 1, s);
+		return (a + (b - a) * u) + ((c + (d - c) * u) - (a + (b - a) * u)) * v;
+	}
+	float fbm(float x, float y, int s)
+	{
+		return 0.53f * vnoise(x, y, s)
+		     + 0.29f * vnoise(x * 2.07f + 11.3f, y * 2.07f - 7.1f, s + 91)
+		     + 0.18f * vnoise(x * 4.13f - 5.7f,  y * 4.13f + 3.9f, s + 173);
+	}
+
+	void BakeAtlas()
+	{
+		for (int slot = 0; slot < 16; slot++) {
+			const int ox = (slot & 3) * 128, oy = (slot >> 2) * 128;
+			const int sd = slot * 977 + 13;
+			for (int y = 0; y < 128; y++) {
+				for (int x = 0; x < 128; x++) {
+					const float nx = ((float)x + 0.5f) / 64.0f - 1.0f;
+					const float ny = ((float)y + 0.5f) / 64.0f - 1.0f;
+					float r = sqrtf(nx * nx + ny * ny);
+					// A RAGGED RIM: warp the radius by low-frequency noise, so the
+					// silhouette is lumpy the way a convective puff is, not circular.
+					const float w = fbm(nx * 1.9f + 4.0f, ny * 1.9f - 2.0f, sd);
+					r *= (1.0f + 0.42f * (w - 0.5f));
+					// Soft mask, zero well inside the tile edge (no bleed at the slot
+					// boundary even with bilinear filtering).
+					float a = clampf((0.94f - r) / 0.62f, 0.0f, 1.0f);
+					a = a * a * (3.0f - 2.0f * a);                 // smoothstep shoulder
+					// Internal density variation - holes and thick places.
+					const float d = fbm(nx * 3.3f - 8.0f, ny * 3.3f + 6.0f, sd + 41);
+					a *= 0.58f + 0.62f * d;
+					if (a > 1.0f) a = 1.0f;
+					// Interior brightness lumps: the self-shadow a flat sprite lacks.
+					const float lum = 0.70f + 0.30f * fbm(nx * 2.6f + 1.7f, ny * 2.6f - 4.4f, sd + 89);
+					const int L = (int)(clampf(lum, 0.0f, 1.0f) * 255.0f);
+					const int A = (int)(a * 255.0f);
+					// ARGB, matching the lightning atlas's packing (the destination
+					// surface's own format; gcCore::UpdateTexture2D copies raw bytes).
+					s_atlas[(oy + y) * 512 + (ox + x)] =
+						((DWORD)A << 24) | ((DWORD)L << 16) | ((DWORD)L << 8) | (DWORD)L;
+				}
+			}
+		}
+	}
+
+	// --- per-step frame data, gathered on the main thread -------------------
+	// The render path makes no oapi calls (invariant 1), so everything the
+	// projection needs about the world is captured here.
+	// The star, by TYPE - never by index (the lightning's FindStar, verbatim).
+	OBJHANDLE FindStar()
+	{
+		const DWORD n = oapiGetGbodyCount();
+		for (DWORD i = 0; i < n; i++) {
+			OBJHANDLE h = oapiGetGbodyByIndex((int)i);
+			if (h && oapiGetObjectType(h) == OBJTP_STAR) return h;
+		}
+		return oapiGetGbodyByIndex(0);
+	}
+
+	// (The class constants are private, so the file statics carry their own copies;
+	//  the member functions static_assert them into agreement.)
+	const int S_MAX_REF = 4;                 // == OroModule::PRT_MAX_REF
+	const int S_MAX_ENG = 6;                 // == OroModule::MAX_PLUMES
+
+	VECTOR3   s_sunPos   = _V(0, 0, 0);      // the Sun, global
+	CamCtx    s_postCam;                     // fallback camera (no patch k)
+	bool      s_postCamOK = false;
+	OBJHANDLE s_ref[S_MAX_REF] = {};
+	VECTOR3   s_refPos[S_MAX_REF];
+	int       s_refN = 0;
+
+	// Spawn accumulators, matched to the model BY EXHAUST IDENTITY (e.exIdx) so a
+	// reshuffle of the strongest-6 sort cannot hand one engine's fractional puff to
+	// another. Fractional carry is what keeps the rate honest at any frame length.
+	// (x2: the ground billow and the shed wake keep separate carries per engine.)
+	DWORD s_accIdx[S_MAX_ENG * 2] = {};
+	float s_accVal[S_MAX_ENG * 2] = {};
+	int   s_accN = 0;
+	// OVERDRAW TELEMETRY. Near-opaque sprites the size of a launch cloud are a
+	// fill-rate bet, and "it felt slow" is not a number. The projection accumulates
+	// the painted screen area it asked for (as a multiple of the viewport) and the
+	// main thread logs it on a throttle - so a performance report arrives already
+	// diagnosed, without spending a fly-and-report round to measure it.
+	float s_fillEst  = 0.0f;
+	int   s_fillN    = 0;
+	float s_fillPeak = 0.0f;
+	double s_fillLog = -1e9;
+
+	// Monotonic spawn ordinal - the hash seed for every newborn. NOT animT: after an
+	// hour aloft animT*91.7 is ~3e5 and sinf's argument is large enough that the
+	// hash's low bits stop being random, which would quietly turn sixteen distinct
+	// puffs into one repeated puff. A counter keeps the seed small and fresh forever.
+	DWORD s_born = 0;
+
+	float& SpawnAcc(DWORD exIdx)
+	{
+		for (int i = 0; i < s_accN; i++) if (s_accIdx[i] == exIdx) return s_accVal[i];
+		if (s_accN < S_MAX_ENG * 2) {
+			s_accIdx[s_accN] = exIdx;
+			s_accVal[s_accN] = 0.0f;
+			return s_accVal[s_accN++];
+		}
+		return s_accVal[0];
+	}
+}
+
+// ----------------------------------------------------------------------------
+// MAIN THREAD: age, expire, spawn. Ageing runs UNCONDITIONALLY (the transient
+// discipline - a gated effect must still let its events finish and free their
+// slots, or a disarm strands the pool full); only SPAWNING is gated.
+// ----------------------------------------------------------------------------
+void OroModule::UpdateParticles(double simdt)
+{
+	static_assert(S_MAX_REF == PRT_MAX_REF, "anon-namespace ref cap out of step");
+	static_assert(S_MAX_ENG == MAX_PLUMES,  "anon-namespace engine cap out of step");
+	static_assert(sizeof(TexVtxP) == sizeof(gcCore::texVtx),
+	              "TexVtxP layout must match gcCore::texVtx (DrawParticlePoly casts)");
+
+	// ---- age + expire ------------------------------------------------------
+	const float dtS = (float)simdt;
+	int live = 0;
+	for (int i = 0; i < PRT_MAX; i++) {
+		Particle& p = prt[i];
+		if (p.age < 0.0f) continue;
+		p.age += dtS;
+		if (p.age >= p.life) { p.age = -1.0f; continue; }
+		live++;
+	}
+	g_fx.prtCount = live;
+
+	// ---- the anchors + the fallback camera, for the render path -------------
+	// BEFORE every spawn gate, deliberately. A cloud outlives the burn that made
+	// it: gate this behind "engines are lit" and the moment the engines cut, the
+	// anchor positions freeze at that instant - and since the reconstruction is
+	// (body position + rpos), a frozen anchor on a client without patch (k2) sends
+	// the whole cloud off at the planet's 30 km/s barycentric velocity. Same class
+	// of bug as invariant 17's "identify the world BEFORE the draw gate".
+	if (live > 0) {
+		s_refN = 0;
+		for (int i = 0; i < PRT_MAX && s_refN < S_MAX_REF; i++) {
+			if (prt[i].age < 0.0f || !prt[i].hRef) continue;
+			bool have = false;
+			for (int q = 0; q < s_refN; q++) if (s_ref[q] == prt[i].hRef) { have = true; break; }
+			if (!have) {
+				s_ref[s_refN] = prt[i].hRef;
+				oapiGetGlobalPos(prt[i].hRef, &s_refPos[s_refN]);
+				s_refN++;
+			}
+		}
+		oapiGetGlobalPos(FindStar(), &s_sunPos);
+		GetCam(s_postCam);
+		s_postCamOK = true;
+	} else {
+		s_refN = 0;
+	}
+
+	// ---- one-shot capability probe (invariant 18a: probe by BINDING) -------
+	if (!prtTexTried && pCore) {
+		prtTexTried = true;
+		if (pCore->CanDrawTexPoly()) {
+			hPrtAtlas = oapiCreateSurfaceEx(512, 512, OAPISURFACE_TEXTURE | OAPISURFACE_NOMIPMAPS);
+			if (hPrtAtlas) {
+				BakeAtlas();
+				if (!pCore->UpdateTexture2D(hPrtAtlas, s_atlas, 512, 512)) {
+					oapiWriteLog("ORO: exhaust-particle atlas upload FAILED - particles disabled this session.");
+					hPrtAtlas = NULL;
+				}
+			}
+		}
+		prtTexMode = (hPrtAtlas != NULL);
+		oapiWriteLogV("ORO: exhaust particles (patch l) %s.",
+		              prtTexMode ? "available - 16 procedural puff variants baked"
+		                         : "NOT available - section greyed out");
+	}
+
+	// ---- spawn gates -------------------------------------------------------
+	if (!prtTexMode) {
+		strcpy_s(g_fx.prtInfo, "needs client patch (l) - textured sprites");
+		return;
+	}
+	if (!(g_fx.masterArmed && g_fx.prtEnabled) || g_fx.prtAmount <= 0.001f) {
+		s_accN = 0;
+		strcpy_s(g_fx.prtInfo, live ? "off - the air is clearing" : "off");
+		return;
+	}
+	if (plmModelN <= 0) {
+		s_accN = 0;
+		strcpy_s(g_fx.prtInfo, live ? "engines off - the air is clearing" : "engines off");
+		return;
+	}
+	if (simdt <= 0.0) return;                    // paused: nothing new, nothing ages
+
+	// ---- the world, once per step ------------------------------------------
+	OBJHANDLE hObj = oapiCameraTarget();
+	if (!hObj || oapiGetObjectType(hObj) != OBJTP_VESSEL) hObj = oapiGetFocusObject();
+	if (!hObj || oapiGetObjectType(hObj) != OBJTP_VESSEL) return;
+	VESSEL* v = oapiGetVesselInterface(hObj);
+	if (!v) return;
+	OBJHANDLE hRef = v->GetSurfaceRef();
+	if (!hRef) return;
+
+	VECTOR3 refPos, refVel, vesPos, vesVel, vaG;
+	oapiGetGlobalPos(hRef, &refPos);
+	oapiGetGlobalVel(hRef, &refVel);
+	v->GetGlobalPos(vesPos);
+	v->GetGlobalVel(vesVel);
+	if (!v->GetAirspeedVector(FRAME_GLOBAL, vaG)) vaG = _V(0, 0, 0);
+
+	// THE FRAME TERM. vesVel - vaG is the velocity of the AIR at the vessel in the
+	// global frame; minus the planet's own barycentric velocity makes it planet-
+	// relative. This is the term round 6 measured as "98% frame-keeping, 2% wind"
+	// and rejected for the trail - here it is exactly right, because near-surface
+	// smoke really does ride a rotating atmosphere. Without it a pad cloud walks
+	// 465 m/s downrange and is 7 km away in fifteen seconds.
+	const VECTOR3 vAir = (vesVel - vaG) - refVel;
+	const double  airSpd = length(vaG);            // the bead-string guard reads it
+
+	const VECTOR3 rVes = vesPos - refPos;
+	const double  rLen = length(rVes);
+	if (rLen < 1.0) return;
+	const VECTOR3 up = rVes / rLen;
+	const double  altGnd = v->GetAltitude(ALTMODE_GROUND);
+	const double  gAcc = GGRAV * oapiGetMass(hRef) / (rLen * rLen);
+	const double  rho  = plmRho;
+	const float   airF = clampf((float)(rho / PRT_AIR_FULL), 0.0f, 1.0f);
+
+	const float kAmount = clampf(g_fx.prtAmount, 0.0f, 2.0f);
+	const float kSize   = clampf(g_fx.prtSize,   0.05f, 2.0f);
+	const float kLife   = clampf(g_fx.prtLife,   0.05f, 2.0f);
+
+	int nGround = 0;
+
+	for (int e = 0; e < plmModelN; e++) {
+		const PlumeModel& m = plmModel[e];
+		const double lvl = m.level;
+		if (lvl < 0.05) continue;
+
+		// ---- does this jet reach a surface? --------------------------------
+		// The nozzle's own height above ground = the vessel's, plus its offset
+		// along the local vertical (exact for a rigid stack, which is what a
+		// docked launch stack is). Then descend along the FLOW axis.
+		const double altRoot = altGnd + dotp(m.rootG - vesPos, up);
+		const double cd = -dotp(m.dirG, up);              // >0 = pointing downward
+		double dHit = -1.0;
+		if (cd > 0.10 && altRoot > 0.0) {
+			const double d = altRoot / cd;
+			if (d < m.L * PRT_REACH) dHit = d;
+		}
+
+		// A bigger engine throws more, further, and in bigger lumps.
+		const double sizeF = clampd(0.55 + 0.55 * m.wRef, 0.55, 2.4);
+
+		// ================= SPAWNER 1: THE GROUND BILLOW =====================
+		if (dHit >= 0.0) {
+			nGround++;
+			// Contact strength: full when the jet plainly reaches, tapering out as
+			// the impingement point slides past the visible jet's own length.
+			const float impF = 1.0f - sstepf((float)((dHit / (m.L * PRT_REACH) - 0.55) / 0.45));
+			const double rate = PRT_RATE * kAmount * lvl * impF * sizeF;
+			float& acc = SpawnAcc(m.exIdx);
+			acc += (float)(rate * simdt);
+			int n = (int)acc;
+			if (n > PRT_BURST_MAX) { n = PRT_BURST_MAX; acc = 0.0f; }
+			else acc -= (float)n;
+
+			const VECTOR3 impG = m.rootG + m.dirG * dHit;
+			// A radial basis in the ground plane.
+			VECTOR3 e1 = crossp(up, m.dirG);
+			if (length(e1) < 1e-3) e1 = crossp(up, _V(0, 0, 1));
+			if (length(e1) < 1e-3) e1 = crossp(up, _V(1, 0, 0));
+			e1 = unit(e1);
+			const VECTOR3 e2 = unit(crossp(up, e1));
+
+			for (int k = 0; k < n; k++) {
+				// Birth time spread ACROSS the step, so a long warp frame lays a
+				// dashed line rather than stacking every puff at one instant.
+				const float bAge = (float)simdt * ((float)(n - 1 - k) + 0.5f) / (float)n;
+				// INTEGER hash for the birth seed, not the sin-based one: its argument
+				// would grow without bound and sinf's low bits stop being random long
+				// before a long flight ends - sixteen distinct puffs quietly becoming
+				// one repeated puff. The derived hashes take [0,1) arguments and are fine.
+				const float h0 = vhash2((int)(s_born++), e, 7);
+				const float h1 = hashf(h0 * 51.3f + 2.1f);
+				const float h2 = hashf(h1 * 33.7f + 5.9f);
+				const float h3 = hashf(h2 * 17.9f + 8.3f);
+
+				Particle& p = prt[prtHead];
+				prtHead = (prtHead + 1) % PRT_MAX;          // oldest-first eviction
+
+				const double az = h0 * PI2;
+				const VECTOR3 rad = e1 * cos(az) + e2 * sin(az);
+				// ELEVATION and SPEED are where the three worlds diverge, and the
+				// blend is the only thing that decides which one you get: a low fast
+				// sheet in vacuum, a lofted slow billow in thick air.
+				const double elev = (2.0 + 8.0 * h1) * (1.0 - airF) + (12.0 + 28.0 * h1) * airF;
+				const double spdV = (70.0 + 180.0 * h2) * sizeF;
+				const double spdA = (9.0 + 20.0 * h2 * lvl) * sizeF;
+				const double spd  = spdV * (1.0 - airF) + spdA * airF;
+				const VECTOR3 dirOut = unit(rad * cos(RAD * elev) + up * sin(RAD * elev));
+
+				p.rpos0 = (impG - refPos) + rad * (m.wRef * (0.2 + 0.8 * h3));
+				p.hRef  = hRef;
+				p.vLin  = vAir;
+				p.vDrag = dirOut * spd;
+				// In vacuum nothing decays it and gravity owns the arc; in air it
+				// coasts to a stop in a second or two and then simply rises.
+				p.tau   = 1.0e5f * (1.0f - airF) + (0.9f + 1.6f * h1) * airF;
+				p.vBuoy = up * ((2.5 + 4.0 * h2) * airF * (0.35 + 0.65 * lvl));
+				p.tauB  = 2.5f + 2.0f * h3;
+				p.acc   = up * (-gAcc);
+				p.r0    = (float)(m.wRef * (1.6 + 1.9 * h3) * kSize * (0.6 + 0.4 * airF));
+				p.grow  = p.r0 * (0.02f + 0.13f * airF);
+				p.life  = (float)(PRT_LIFE_BASE * kLife * (0.75 + 0.5 * h1)
+				                  * (0.35 + 0.65 * airF));   // dust leaves; smoke lingers
+				p.a0    = (0.50f + 0.16f * h2) * (0.55f + 0.45f * airF);
+				p.glowP = m.rootG - refPos;
+				p.glowS = (float)(lvl * clampd(m.wRef * 1.5, 0.4, 3.0));
+				p.seed  = h0;
+				p.slot  = (BYTE)((int)(h3 * 16.0f) & 15);
+				p.age   = bAge;
+			}
+		}
+
+		// ================= SPAWNER 2: THE SHED WAKE =========================
+		// Only where there is air to hold it: in vacuum the exhaust simply leaves,
+		// and drawing a hanging column there would be the day-side-lightning
+		// mistake (a stylised effect where the physics says nothing is visible).
+		if (airF > 0.04f && lvl > 0.12) {
+			const double rate = PRT_RATE * 0.55 * kAmount * lvl * airF * sizeF;
+			// ⚠ THE BEAD-STRING GUARD. Puffs are shed at a fixed RATE, so at speed
+			// their spacing is airspeed/rate - 20 m apart at 200 m/s - and a chain of
+			// non-overlapping blobs is graveyard G2 restated ("disconnected sprites
+			// never fuse"). Size the wake puff to at least cover its own gap, capped
+			// so a fast pass cannot inflate it absurdly. The ground billow needs no
+			// such guard: its source does not move.
+			const double gapR = (rate > 0.1) ? (airSpd / rate) * 0.60 : 0.0;
+			float& acc = SpawnAcc(m.exIdx | 0x40000000u);      // its own accumulator
+			acc += (float)(rate * simdt);
+			int n = (int)acc;
+			if (n > PRT_BURST_MAX) { n = PRT_BURST_MAX; acc = 0.0f; }
+			else acc -= (float)n;
+
+			VECTOR3 w1 = crossp(m.dirG, up);
+			if (length(w1) < 1e-3) w1 = crossp(m.dirG, _V(0, 0, 1));
+			if (length(w1) < 1e-3) w1 = crossp(m.dirG, _V(1, 0, 0));
+			w1 = unit(w1);
+			const VECTOR3 w2 = unit(crossp(m.dirG, w1));
+
+			for (int k = 0; k < n; k++) {
+				const float bAge = (float)simdt * ((float)(n - 1 - k) + 0.5f) / (float)n;
+				const float h0 = vhash2((int)(s_born++), e, 23);
+				const float h1 = hashf(h0 * 27.7f + 1.3f);
+				const float h2 = hashf(h1 * 61.1f + 7.7f);
+				const float h3 = hashf(h2 * 13.3f + 4.1f);
+
+				Particle& p = prt[prtHead];
+				prtHead = (prtHead + 1) % PRT_MAX;
+
+				const double along = m.L * (0.70 + 0.45 * h0);
+				const double latR  = m.wRef * (0.3 + 1.1 * h1);
+				const double latA  = h2 * PI2;
+				p.rpos0 = (m.rootG - refPos) + m.dirG * along
+				        + (w1 * cos(latA) + w2 * sin(latA)) * latR;
+				p.hRef  = hRef;
+				p.vLin  = vAir;
+				// It leaves along the flow and is stopped by the air in well under a
+				// second - which IS the effect: the vessel walks away from its own
+				// smoke and the column is what is left standing.
+				p.vDrag = m.dirG * ((12.0 + 26.0 * h1) * sizeF);
+				p.tau   = 0.35f + 0.45f * h2;
+				p.vBuoy = up * (1.2 * airF * (0.3 + 0.7 * h3));
+				p.tauB  = 3.5f;
+				p.acc   = _V(0, 0, 0);
+				const double rBase = m.wRef * (1.1 + 1.3 * h3) * kSize;
+				p.r0    = (float)clampd(gapR, rBase, rBase * 6.0);
+				p.grow  = p.r0 * 0.09f;
+				p.life  = (float)(PRT_LIFE_BASE * kLife * (0.8 + 0.45 * h1));
+				p.a0    = (0.30f + 0.14f * h2) * airF;
+				p.glowP = m.rootG - refPos;
+				p.glowS = (float)(lvl * clampd(m.wRef * 1.2, 0.3, 2.5));
+				p.seed  = h0;
+				p.slot  = (BYTE)((int)(h1 * 16.0f) & 15);
+				p.age   = bAge;
+			}
+		}
+	}
+
+	// Newborns may have introduced an anchor the pre-gate sweep above did not see
+	// (first puff of a burn, or a change of surface reference). One catch-up pass.
+	for (int i = 0; i < PRT_MAX && s_refN < S_MAX_REF; i++) {
+		if (prt[i].age < 0.0f || !prt[i].hRef) continue;
+		bool have = false;
+		for (int q = 0; q < s_refN; q++) if (s_ref[q] == prt[i].hRef) { have = true; break; }
+		if (!have) {
+			s_ref[s_refN] = prt[i].hRef;
+			oapiGetGlobalPos(prt[i].hRef, &s_refPos[s_refN]);
+			s_refN++;
+		}
+	}
+	if (!s_postCamOK) { oapiGetGlobalPos(FindStar(), &s_sunPos); GetCam(s_postCam); s_postCamOK = true; }
+
+	// ---- the readout (the reentryHeat discipline) --------------------------
+	// "No smoke" has several honest causes and exactly one dishonest one. The
+	// count separates a saturated pool from a dead effect at a glance.
+	// Overdraw telemetry, every ~6 s while anything is drawing (main thread - the
+	// projection may make no oapi calls, so it only stashes the numbers).
+	if (s_fillN > 0 && animT - s_fillLog > 6.0) {
+		s_fillLog = animT;
+		oapiWriteLogV("ORO: exhaust particles - %d live, %d drawn, fill %.2fx viewport (peak %.2fx).",
+		              live, s_fillN, s_fillEst, s_fillPeak);
+		s_fillPeak = 0.0f;
+	}
+
+	const char* regime = (airF > 0.6f) ? "billowing" : (airF > 0.08f ? "thin air" : "vacuum dust");
+	if (nGround)
+		sprintf_s(g_fx.prtInfo, "%s - %d engine%s on the surface, %d puffs",
+		          regime, nGround, nGround == 1 ? "" : "s", live);
+	else if (airF > 0.04f)
+		sprintf_s(g_fx.prtInfo, "%s wake - no surface contact, %d puffs", regime, live);
+	else
+		sprintf_s(g_fx.prtInfo, "vacuum, no surface contact - nothing to raise");
+}
+
+// ----------------------------------------------------------------------------
+// RENDER PATH: project the pool, shade it, sort it, emit it. Called from the
+// render callbacks immediately before DrawParticlePoly.
+// INVARIANT-1 AUDIT: zero oapi calls. gcCore::GetRenderCam / GetRenderObjPos are
+// client calls (the CopyResource precedent), viewW/viewH are the cached copies,
+// and everything else is arithmetic over the main thread's snapshot.
+// ----------------------------------------------------------------------------
+void OroModule::ProjectParticles()
+{
+	prtVtxN = 0;
+	if (!prtTexMode || !hPrtAtlas) return;
+	if (!(g_fx.masterArmed && g_fx.prtEnabled)) return;
+	if (!(extGate || vcGate) || viewW == 0 || viewH == 0) return;
+
+	// THE camera (patch k), else the post-step snapshot - degraded, not broken.
+	CamCtx cc;
+	VECTOR3 cp; MATRIX3 cr; double ct;
+	if (pCore && pCore->CanGetRenderCam() && pCore->GetRenderCam(&cp, &cr, &ct)) {
+		cc.pos = cp; cc.rot = cr; cc.tanAp = ct;
+	} else if (s_postCamOK) {
+		cc = s_postCam;
+	} else return;
+
+	// THE anchors, render-epoch (patch k2). Same law as the trail: camera and
+	// anchor must come from ONE epoch or the whole cloud shifts by the body's
+	// barycentric motion across the gap and jitters with frame pacing.
+	VECTOR3 refPos[PRT_MAX_REF];
+	for (int q = 0; q < s_refN; q++) {
+		refPos[q] = s_refPos[q];
+		if (pCore && pCore->CanGetRenderObjPos()) {
+			VECTOR3 rp;
+			if (pCore->GetRenderObjPos(s_ref[q], &rp)) refPos[q] = rp;
+		}
+	}
+	if (s_refN <= 0) return;
+
+	int rT, gT, bT, jR, jG, jB;
+	UnpackCR(g_fx.prtColour,   rT, gT, bT);
+	UnpackCR(g_fx.plumeColJet, jR, jG, jB);
+
+	for (int i = 0; i < PRT_BUCKETS; i++) prtBkHead[i] = -1;
+	int nScr = 0;
+	double zMin = 1e30, zMax = 0.0;
+
+	for (int i = 0; i < PRT_MAX; i++) {
+		const Particle& p = prt[i];
+		if (p.age < 0.0f || p.life <= 0.0f) continue;
+
+		// The anchor this particle is hung on.
+		int q = -1;
+		for (int k = 0; k < s_refN; k++) if (s_ref[k] == p.hRef) { q = k; break; }
+		if (q < 0) continue;
+
+		// ---- THE MOTION LAW - the whole of it, in five terms ---------------
+		const double t = p.age;
+		const double fD = (p.tau  > 1e-4) ? p.tau  * (1.0 - exp(-t / p.tau))  : 0.0;
+		const double fB = (p.tauB > 1e-4) ? (t - p.tauB * (1.0 - exp(-t / p.tauB))) : 0.0;
+		const VECTOR3 rp = p.rpos0 + p.vLin * t + p.vDrag * fD + p.vBuoy * fB
+		                 + p.acc * (0.5 * t * t);
+		const VECTOR3 gp = refPos[q] + rp;
+
+		float sx, sy; double sz;
+		if (!ProjPx(cc, gp, viewW, viewH, sx, sy, sz)) continue;
+
+		// CLAMPED: at extreme warp one step can exceed a short vacuum lifetime, and a
+		// particle born already past its life would hand powf() a negative base and
+		// paint NaN across the frame. u >= 1 simply fades to nothing next frame.
+		const float u = clampf((float)(t / p.life), 0.0f, 1.0f);
+		const double rWorld = p.r0 + p.grow * t;
+		const float  rPx = (float)(rWorld / (sz * cc.tanAp) * (viewH * 0.5));
+		if (rPx < 1.2f) continue;                        // too small to be worth a quad
+		// Off-screen reject with a full radius of margin.
+		if (sx + rPx < 0.0f || sx - rPx > (float)viewW ||
+		    sy + rPx < 0.0f || sy - rPx > (float)viewH) continue;
+
+		// Fade out rather than pop when the camera enters a puff, and across the
+		// near plane (a sprite the eye is inside covers the frame for no gain).
+		float nearF = sstepf((float)((sz - ZNEAR) / 3.0));
+		if (sz < rWorld) nearF *= sstepf((float)(sz / (rWorld + 0.01)));
+		if (nearF <= 0.01f) continue;
+
+		float a = p.a0 * sstepf(u / 0.05f) * powf(1.0f - u, 1.3f) * nearF;
+		if (a <= 0.004f) continue;
+
+		// ---- LIGHTING ------------------------------------------------------
+		// A puff has no normal, so the phase angle does the work. BACKSCATTER, not
+		// forward: this cloud is optically THICK, so it is brightest with the sun
+		// behind the viewer (the whole lit face is presented) and darkest looking
+		// into the sun, where a real launch cloud goes to a grey silhouette. The
+		// thin-cloud silver-lining case is the opposite and is not what we are
+		// drawing. Then a day/night term from the sun's elevation at the particle,
+		// and the ENGINE-LIT term - the thing that makes a night launch light its
+		// own smoke, and the reason glowP is carried per particle.
+		const VECTOR3 sd = unit(s_sunPos - gp);
+		const VECTOR3 cd = unit(gp - cc.pos);
+		const float bs   = (float)(0.5 - 0.5 * dotp(cd, sd));   // 1 = sun behind you
+		const float upd  = (float)dotp(unit(rp), sd);
+		const float day  = sstepf((upd + 0.09f) / 0.20f);
+		const float lum  = 0.16f + day * (0.35f + 0.65f * bs);
+
+		const double gd = length(rp - p.glowP);
+		const double gr = 45.0 + 40.0 * p.glowS;
+		const float  gl = clampf((float)(p.glowS / (1.0 + (gd / gr) * (gd / gr))), 0.0f, 1.25f);
+
+		const int cr_ = (int)(rT * lum + jR * gl);
+		const int cg_ = (int)(gT * lum + jG * gl);
+		const int cb_ = (int)(bT * lum + jB * gl);
+
+		PrtScr& s = prtScr[nScr];
+		s.x = sx; s.y = sy; s.r = rPx; s.slot = p.slot;
+		// Patch (g) wants EUCLIDEAN camera distance, not the camera-space z the
+		// projection produced - they diverge toward the screen edges, and a puff
+		// clipped by the wrong depth would vanish into terrain it is clear of.
+		s.d = (float)length(gp - cc.pos);
+		// A per-puff orientation plus a slow spin: sixteen variants stop reading as
+		// sixteen variants once each one can arrive at any angle.
+		s.rot = p.seed * 6.2831853f + (float)t * (0.10f + 0.16f * p.seed) * (p.seed > 0.5f ? 1.0f : -1.0f);
+		s.c = ACol(cr_, cg_, cb_, (int)(a * 255.0f));
+		prtScrZ[nScr] = s.d;                 // sort on the same distance we clip on
+		if (s.d < zMin) zMin = s.d;
+		if (s.d > zMax) zMax = s.d;
+		nScr++;
+		if (nScr >= PRT_MAX) break;
+	}
+	if (nScr <= 0) return;
+
+	// ---- DEPTH SORT (O(n) buckets) -----------------------------------------
+	// Alpha blending is order-dependent: draw near-before-far and the near puff
+	// writes its own edge over the one behind it, which reads as hard-edged discs
+	// punched into the cloud - the exact "reads as blobs" failure of G2/G13, and
+	// here it would be a sorting bug rather than a substrate one.
+	const double zSpan = (zMax > zMin) ? (zMax - zMin) : 1.0;
+	for (int i = 0; i < nScr; i++) {
+		int b = (int)((prtScrZ[i] - zMin) / zSpan * (PRT_BUCKETS - 1));
+		if (b < 0) b = 0; else if (b >= PRT_BUCKETS) b = PRT_BUCKETS - 1;
+		prtBkNext[i] = prtBkHead[b];
+		prtBkHead[b] = i;
+	}
+
+	// ---- EMIT, far bucket first --------------------------------------------
+	auto emitVtx = [&](float x, float y, float u, float vv, DWORD c, float d) {
+		prtVtx[prtVtxN].x = x; prtVtx[prtVtxN].y = y;
+		prtVtx[prtVtxN].u = u; prtVtx[prtVtxN].v = vv;
+		prtVtx[prtVtxN].c = c;
+		prtDepth[prtVtxN] = d;
+		prtVtxN++;
+	};
+	for (int b = PRT_BUCKETS - 1; b >= 0; b--) {
+		for (int i = prtBkHead[b]; i >= 0; i = prtBkNext[i]) {
+			if (prtVtxN + 6 > PRT_MAX_TRI * 3) { b = -1; break; }   // full: drop silently
+			const PrtScr& s = prtScr[i];
+			const float ca = cosf(s.rot) * s.r, sa = sinf(s.rot) * s.r;
+			// Corners of the rotated square: (-1,-1) (+1,-1) (+1,+1) (-1,+1).
+			const float x0 = s.x - ca + sa, y0 = s.y - sa - ca;
+			const float x1 = s.x + ca + sa, y1 = s.y + sa - ca;
+			const float x2 = s.x + ca - sa, y2 = s.y + sa + ca;
+			const float x3 = s.x - ca - sa, y3 = s.y - sa + ca;
+			// UVs in TEXELS (patch l's contract), half-texel inset per slot.
+			const float ou = (float)((s.slot & 3) * 128), ov = (float)((s.slot >> 2) * 128);
+			const float u0 = ou + 0.5f, u1 = ou + 127.5f;
+			const float v0 = ov + 0.5f, v1 = ov + 127.5f;
+			const float d = s.d;
+			emitVtx(x0, y0, u0, v0, s.c, d);
+			emitVtx(x1, y1, u1, v0, s.c, d);
+			emitVtx(x2, y2, u1, v1, s.c, d);
+			emitVtx(x0, y0, u0, v0, s.c, d);
+			emitVtx(x2, y2, u1, v1, s.c, d);
+			emitVtx(x3, y3, u0, v1, s.c, d);
+		}
+	}
+
+	// Overdraw estimate for the log (see s_fillEst): sum of the sprite areas we
+	// actually emitted, over one viewport. 1.0 = the cloud painted the screen once.
+	{
+		double area = 0.0;
+		for (int i = 0; i < nScr; i++) area += 3.1416 * (double)prtScr[i].r * prtScr[i].r;
+		const double vp = (double)viewW * (double)viewH;
+		s_fillEst = (float)(vp > 0.0 ? area / vp : 0.0);
+		s_fillN   = nScr;
+		if (s_fillEst > s_fillPeak) s_fillPeak = s_fillEst;
+	}
+
+	// Invariant 3: the client draws its CREATION count and Locks with
+	// D3DLOCK_DISCARD - zero-pad the tail or uninitialised VRAM strobes.
+	if (prtVtxN > 0 && prtVtxN < PRT_MAX_TRI * 3) {
+		memset(&prtVtx[prtVtxN],   0, sizeof(TexVtxP) * (PRT_MAX_TRI * 3 - prtVtxN));
+		memset(&prtDepth[prtVtxN], 0, sizeof(float)   * (PRT_MAX_TRI * 3 - prtVtxN));
+	}
+}
+
+// ----------------------------------------------------------------------------
+// The draw. ALPHA-BLENDED, never additive: this is matter, not light - it must
+// darken the sky and the terrain behind it. Drawn BEFORE the additive layers so
+// the jet, the plasma and the trail all glow THROUGH it (G11's recipe).
+// ----------------------------------------------------------------------------
+void OroModule::DrawParticlePoly(oapi::Sketchpad* pSkp)
+{
+	if (prtVtxN <= 0 || !pCore || !hPrtAtlas) return;
+	if (!hPartPoly) {
+		static gcCore::texVtx zero[PRT_MAX_TRI * 3];    // zero-init: degenerate, alpha 0
+		hPartPoly = pCore->CreateTrianglesTex(NULL, zero, NULL, PRT_MAX_TRI * 3,
+		                                      PF_TRIANGLES, hPrtAtlas);
+	}
+	if (!hPartPoly) return;
+
+	pCore->CreateTrianglesTex(hPartPoly, (const gcCore::texVtx*)prtVtx,
+	                          depthClipOK ? prtDepth : NULL, PRT_MAX_TRI * 3,
+	                          PF_TRIANGLES, hPrtAtlas);
+	DWORD blend = (DWORD)oapi::Sketchpad::BlendState::ALPHABLEND;
+	if (depthClipOK) blend |= 0x100;                    // patch (g), per-pixel scene clip
+	pSkp->SetBlendState((oapi::Sketchpad::BlendState)blend);
+	pSkp->DrawPoly(hPartPoly);
+	pSkp->SetBlendState(oapi::Sketchpad::BlendState::ALPHABLEND);   // leave the pad as found
+}
+
+// ----------------------------------------------------------------------------
+// Device resources + pool. Called from clbkSimulationEnd and the destructor,
+// alongside the other polys. Safe to call twice.
+// ----------------------------------------------------------------------------
+void OroModule::ReleaseParticles()
+{
+	for (int i = 0; i < PRT_MAX; i++) prt[i].age = -1.0f;
+	prtHead = 0;
+	prtVtxN = 0;
+	s_refN  = 0;
+	s_accN  = 0;
+	s_postCamOK = false;
+	g_fx.prtCount = 0;
+	if (hPrtAtlas) { oapiDestroySurface(hPrtAtlas); hPrtAtlas = NULL; }
+	prtTexMode  = false;
+	prtTexTried = false;      // re-probe next session (the atlas is a device resource)
+	hPartPoly   = NULL;       // released by the shared poly teardown in OroModule.cpp
+}

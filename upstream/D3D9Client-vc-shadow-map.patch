@@ -1,0 +1,262 @@
+﻿diff --git a/OVP/D3D9Client/Mesh.cpp b/OVP/D3D9Client/Mesh.cpp
+index decef76..85e43d9 100644
+--- a/OVP/D3D9Client/Mesh.cpp
++++ b/OVP/D3D9Client/Mesh.cpp
+@@ -2777,7 +2777,28 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
+ 	{
+ 		if (Grp[g].UsrFlag & 0x2) continue;
+ 		if (Grp[g].UsrFlag & 0x1) continue;
+-		
++
++		// --- ORO patch (f), part 2: TRANSPARENT MATERIALS MUST NOT CAST OPAQUE SHADOWS
++		// A group escapes the shadow map today only by carrying UsrFlag 0x1 (no-shadow)
++		// or 0x2 (skip), and it can only shadow SOFTLY through the OIT path, which needs
++		// UsrFlag 0x20 AND a texture. A mesh that sets none of those - which is most of
++		// them - has every group rasterised as fully opaque no matter how transparent its
++		// material is.
++		//
++		// The stock DeltaGlider is the worked example: deltaglider.msh contains ZERO FLAG
++		// lines, so every UsrFlag is 0, while its `cockpitglass` material carries diffuse
++		// alpha 0.5 (visor 0.5, HUD_glass 0.4) and no texture. The canopy therefore casts
++		// a SOLID shadow - onto its own fuselage in exterior views, and (with part 1 of
++		// this patch feeding the map to the internal pass) across the entire cabin, so no
++		// sunlight can reach the virtual cockpit through the windows at all.
++		//
++		// A binary shadow map cannot express partial occlusion without OIT, so the honest
++		// approximation is: a material that is clearly not opaque does not cast. The
++		// threshold is deliberately high - only genuinely translucent materials are
++		// excused, and a 0.95-alpha decal still shadows as before.
++		if (opt != 1 && Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
++		    && Mtrl[Grp[g].MtrlIdx].Diffuse.w < 0.9f) continue;
++
+ 		MeshShader::ps_bools.bOIT = (Grp[g].UsrFlag & 0x20) != 0;
+ 
+ 		if (MeshShader::ps_bools.bOIT) {
+diff --git a/OVP/D3D9Client/Scene.cpp b/OVP/D3D9Client/Scene.cpp
+index ebed069..b171998 100644
+--- a/OVP/D3D9Client/Scene.cpp
++++ b/OVP/D3D9Client/Scene.cpp
+@@ -1956,6 +1956,60 @@ void Scene::RenderMainScene()
+ 
+ 	if (oapiCameraInternal() && vFocus) {
+ 
++		// --- ORO patch (f): SHADOWS IN THE VIRTUAL COCKPIT --------------------
++		// The VC never received shadows, and nothing was actually missing to make it
++		// work. The focus vessel's shadow map is rendered above; then, before the
++		// "remaining vessels" loop, smap.pShadowMap is set to NULL - and THIS pass,
++		// the internal one, runs after that. vVessel::Render binds the map only while
++		// shd->pShadowMap is non-NULL, so gShadowsEnabled was false for every VC draw
++		// and Common.hlsl's ComputeShadow() early-returned "fully lit" for the whole
++		// cabin. An ordering consequence, not an absent feature.
++		//
++		// Re-rendering here rather than stashing the earlier map is deliberate: smap
++		// carries the light's matrices as well as the texture, and with
++		// ShadowMapMode >= 2 the loop above may have left those describing some OTHER
++		// vessel while reusing the same per-LOD render target. Pairing the focus
++		// vessel's texture with a stranger's matrices would project garbage. One extra
++		// shadow pass - only while the camera is inside - refills the whole struct
++		// consistently. (If the cost ever shows, the optimisation is to stash the
++		// entire smap struct after the first call and prove the LOD was not reused.)
++		//
++		// The caster set needs no work whatsoever: RENDERPASS_SHADOWMAP forces
++		// bCockpit = bVC = false in vVessel::Render, so what lands in the map is the
++		// ship's EXTERIOR hull. Sunlight reaching the cabin is therefore cut by the
++		// vessel's own skin and arrives through the window apertures - no window
++		// identification, no per-addon heuristic, just geometry the client already
++		// rasterises every frame. Transparent panes are handled too: the shadow pass
++		// has an OIT variant (SHADER_SHADOWMAP_OIT).
++		//
++		// FIT THE MAP TO THE CABIN, NOT THE HULL. The exterior pass sizes its ortho box
++		// to the vessel's bounding sphere - about 20 m across on a DeltaGlider, which at
++		// ShadowMapSize 2048 is ~1 cm per texel. That is invisible on a fuselage seen from
++		// fifty metres and glaring on a panel forty centimetres from your eye: it is what
++		// makes VC shadow edges stair-step. The camera sits at the ORIGIN of this space
++		// (vObject::mWorld carries the camera-relative translation), so centring there and
++		// shrinking the box to a few metres puts the texels where the eye actually is -
++		// ~4 mm each - while still comfortably containing the canopy frames and nose
++		// structure that do the casting. Shrinking the box also shrinks gSHD[0], hence the
++		// slope-scaled bias in ComputeShadow(), so edges tighten twice over. Geometry
++		// further out stops casting into the cabin, which costs nothing: at 1 cm texels it
++		// was not resolving anything meaningful anyway.
++		// The box half-width and an on/off are exposed through gcCore::SetVCShadows (see
++		// gcCore.cpp) so an addon can A/B the pass and tune the radius per vessel without
++		// a rebuild. Both default to the values below, so a client nobody calls behaves
++		// exactly as if the entry point did not exist.
++		extern bool  g_gcVCShadows;
++		extern float g_gcVCShadowRad;
++		if (Config->ShadowMapMode >= 1 && g_gcVCShadows) {
++			D3DXVECTOR3 ld  = sunLight.Dir;
++			float       rad = min(vFocus->GetBoundingSphereRadius(), g_gcVCShadowRad);
++			// Deliberately NOT the exact origin: RenderShadowMap divides by |pos| to pick
++			// the LOD, and log2f(size / (inf * 1.5f)) would hand int(round(-inf)) straight
++			// to the psShmRT[] index. A centimetre off-centre on a metres-wide box is free.
++			D3DXVECTOR3 pos(0.0f, 0.0f, 0.01f);
++			RenderShadowMap(pos, ld, rad);
++		}
++
+ 		// switch cockpit lights on, external-only lights off
+ 		//
+ 		if (bLocalLight) {
+diff --git a/OVP/D3D9Client/gcCore.cpp b/OVP/D3D9Client/gcCore.cpp
+index 76c0d04..775b2f3 100644
+--- a/OVP/D3D9Client/gcCore.cpp
++++ b/OVP/D3D9Client/gcCore.cpp
+@@ -42,6 +42,10 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
+ 	if (strcmp(name,"RegisterSwap")==0) *ppFnc = &gcCore2::RegisterSwap;
+ 	if (strcmp(name,"FlipSwap")==0) *ppFnc = &gcCore2::FlipSwap;
+ 	if (strcmp(name,"GetRenderTarget")==0) *ppFnc = &gcCore2::GetRenderTarget;
++	if (strcmp(name,"GetBackBufferHandle")==0) *ppFnc = &gcCore2::GetBackBufferHandle;
++	if (strcmp(name,"CopyResource")==0) *ppFnc = &gcCore2::CopyResource;
++	if (strcmp(name,"SuppressReentry")==0) *ppFnc = &gcCore2::SuppressReentry;
++	if (strcmp(name,"SetVCShadows")==0) *ppFnc = &gcCore2::SetVCShadows;
+ 	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
+ 	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
+ 	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
+@@ -159,11 +163,80 @@ void gcCore::FlipSwap(HSWAP hSwap)
+ 
+ // ===============================================================================================
+ //
+-SURFHANDLE gcCore::GetRenderTarget(HSWAP hSwap) 
+-{ 
++SURFHANDLE gcCore::GetRenderTarget(HSWAP hSwap)
++{
+ 	return ((gcSwap*)hSwap)->hSurf;
+ }
+ 
++// ===============================================================================================
++// ORO addon (2026): expose the main backbuffer + a mid-scene-safe surface copy so a module
++// can resample the live frame through gcIPInterface (grey-out / blur / tilt).
++//
++SURFHANDLE gcCore::GetBackBufferHandle()
++{
++	return g_client->GetBackBufferHandle();
++}
++
++// ===============================================================================================
++//
++bool gcCore::CopyResource(SURFHANDLE tgt, SURFHANDLE src)
++{
++	if (!tgt || !src) return false;
++	LPDIRECT3DSURFACE9 pts = SURFACE(tgt)->GetSurface();
++	LPDIRECT3DSURFACE9 pss = SURFACE(src)->GetSurface();
++	if (!pts || !pss) return false;
++	// Direct device StretchRect - NO Begin/EndScene wrapper (cf. StretchRectInScene), so this
++	// is callable from inside a render callback. NULL rects = whole-surface copy (also the form
++	// that resolves a multisampled source into a plain texture).
++	return g_client->GetDevice()->StretchRect(pss, NULL, pts, NULL, D3DTEXF_LINEAR) == S_OK;
++}
++
++// ===============================================================================================
++// ORO addon (2026): let a module suppress this client's built-in reentry flames per vessel.
++//
++// WHY THIS EXISTS. Orbiter documents VESSEL::SetReentryTexture(NULL) as suppressing reentry
++// flames, and the inline renderer honours it - Src/Orbiter/Vvessel.cpp gates on
++// vessel->reentry.do_render AND the user's CfgVisualPrm.bReentryFlames option. D3D9Client's
++// vVessel::RenderReentry checks NEITHER: it gates only on its own globally-loaded
++// defreentrytex, so both the documented API and the user's own Launchpad setting are
++// silently ignored here. An addon that wants to REPLACE the reentry visuals therefore has
++// no way to turn the stock billboards off.
++//
++// The proper fix is for RenderReentry to honour do_render, but that flag lives in the
++// core-internal Vessel.h and is not reachable across the client DLL boundary. This is the
++// client-side equivalent: an explicit opt-in list an addon can manage.
++//
++static std::set<OBJHANDLE> g_gcReentrySuppressed;
++
++void gcCore::SuppressReentry(OBJHANDLE hVessel, bool bSuppress)
++{
++	if (!hVessel) return;
++	if (bSuppress) g_gcReentrySuppressed.insert(hVessel);
++	else           g_gcReentrySuppressed.erase(hVessel);
++}
++
++// --- ORO patch (f): virtual-cockpit shadow controls -------------------------------
++// Read by Scene::RenderMainScene's internal pass (declared extern there, the same
++// no-header-churn pattern as gcIsReentrySuppressed above). Defaults reproduce the
++// built-in behaviour, so a client nobody calls behaves exactly as if these did not exist.
++bool  g_gcVCShadows    = true;
++float g_gcVCShadowRad  = 2.2f;   // measured on the stock DeltaGlider, not guessed - the
++                                 // sharpest box that still holds its canopy structure
++
++void gcCore::SetVCShadows(bool bEnable, float radius)
++{
++	g_gcVCShadows   = bEnable;
++	// Clamp rather than trust: the value reaches D3DXMatrixOrthoOffCenterRH, and a zero
++	// or negative box is a degenerate projection.
++	g_gcVCShadowRad = (radius < 0.25f) ? 0.25f : (radius > 50.0f ? 50.0f : radius);
++}
++
++// Queried by vVessel::RenderReentry (declared extern there - no header churn for one bool).
++bool gcIsReentrySuppressed(OBJHANDLE hVessel)
++{
++	return g_gcReentrySuppressed.find(hVessel) != g_gcReentrySuppressed.end();
++}
++
+ // ===============================================================================================
+ //
+ void gcCore::ReleaseSwap(HSWAP hSwap) 
+diff --git a/OVP/D3D9Client/gcCore.h b/OVP/D3D9Client/gcCore.h
+index f8634ac..3314338 100644
+--- a/OVP/D3D9Client/gcCore.h
++++ b/OVP/D3D9Client/gcCore.h
+@@ -387,6 +387,60 @@ public:
+ 	*/
+ 	gc_interface SURFHANDLE GetRenderTarget(HSWAP hSwap);
+ 
++	/**
++	* \brief Get a handle to the main render window's backbuffer surface.
++	* \return SURFHANDLE wrapping the current backbuffer (non-owning; do not release).
++	* \note ORO addon (2026): exposes the client's existing D3D9Client::GetBackBufferHandle()
++	*  so a module can post-process the live frame through the image-processing pipeline
++	*  (use as the CopyResource source and as the gcIPInterface::SetOutput target).
++	*/
++	gc_interface SURFHANDLE GetBackBufferHandle();
++
++	/**
++	* \brief Copy one surface onto another (StretchRect), safe to call mid-scene.
++	* \param tgt destination surface (e.g. a render-target texture)
++	* \param src source surface (e.g. the backbuffer from GetBackBufferHandle)
++	* \return true on success.
++	* \note ORO addon (2026): unlike StretchRectInScene this issues the device StretchRect
++	*  directly WITHOUT a Begin/EndScene wrapper, so it works from inside a render callback
++	*  (which already runs between the device's BeginScene/EndScene). Full-surface copy
++	*  (whole src -> whole tgt); resolves multisampling if the backbuffer is AA'd.
++	*/
++	gc_interface bool CopyResource(SURFHANDLE tgt, SURFHANDLE src);
++
++	/**
++	* \brief Suppress this client's built-in reentry flames for one vessel.
++	* \param hVessel vessel to suppress (or re-enable)
++	* \param bSuppress true to hide the stock reentry billboards, false to restore them
++	* \note ORO addon (2026): Orbiter documents VESSEL::SetReentryTexture(NULL) as
++	*  suppressing reentry flames and the INLINE renderer honours it (plus the user's
++	*  CfgVisualPrm.bReentryFlames option). vVessel::RenderReentry honours neither - it
++	*  gates only on the client's own defreentrytex - so under D3D9Client both the
++	*  documented API and the user's Launchpad setting are silently ignored, and an addon
++	*  replacing the reentry visuals cannot turn the stock ones off.
++	* \note The proper fix is for RenderReentry to honour reentry.do_render, but that flag
++	*  is core-internal (Src/Orbiter/Vessel.h) and unreachable from a client DLL. This is
++	*  the client-side equivalent: an explicit per-vessel opt-in the addon manages.
++	* \note An addon MUST clear its suppressions on unload, or the vessel keeps its flames
++	*  hidden for the rest of the session.
++	*/
++	gc_interface void SuppressReentry(OBJHANDLE hVessel, bool bSuppress);
++
++	/**
++	* \brief Tune the virtual-cockpit shadow pass (ORO patch f).
++	* \param bEnable false to skip the internal-pass shadow map entirely
++	* \param radius half-width [m] of the ortho box fitted around the eye
++	* \note The VC shadow map is fitted to the CABIN rather than the hull, because the
++	*  exterior box (the vessel's bounding sphere, ~20 m on a DeltaGlider) is ~1 cm per
++	*  texel at ShadowMapSize 2048 - invisible on a fuselage at fifty metres, and visible
++	*  stair-stepping on a panel forty centimetres from the eye. Smaller is sharper but
++	*  stops distant geometry casting into the cabin, so the right value is per-vessel
++	*  taste; this exposes it rather than guessing once for everyone.
++	* \note bEnable is a development/AB convenience. The pass is otherwise governed by
++	*  the user's ShadowMapMode setting, which stays the real switch.
++	*/
++	gc_interface void SetVCShadows(bool bEnable, float radius);
++
+ 	/**
+ 	* \brief Release a swap object after it's no longer needed.
+ 	* \param hSwap Handle to a swap object.

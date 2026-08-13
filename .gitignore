@@ -1,0 +1,36 @@
+# Visual Studio build output & intermediates
+Release/
+Debug/
+x64/
+.vs/
+
+# Per-user / IDE state
+*.user
+*.suo
+*.aps
+*.VC.db
+*.VC.opendb
+
+# Claude Code per-user permission grants (machine-specific paths, not shared)
+.claude/settings.local.json
+
+# Stray build artifacts at project root
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.res
+
+# stray backups
+.claude/*.bak
+
+# Beta packaging output: the staged tree and the zip. Not source, and it
+# carries a 920 KB third-party binary (the stock D3D9Client.dll).
+beta/dist/
+
+# The mock Orbiter tree beta/acceptance.ps1 builds and tears down each run.
+beta/_testtmp/
+
+# Private to the development repository - never published. See
+# tools/publish_public.ps1, which is what stages this tree.
+CLAUDE.md
