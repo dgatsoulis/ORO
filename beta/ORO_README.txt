@@ -529,8 +529,22 @@ Then please send me:
   * The scenario you were flying and roughly what you were doing.
   * Your GPU, and your frame rate armed vs disarmed.
 
-To remove ORO, run ORO_Uninstall.bat in the ORO_beta folder. It restores
-your original graphics client and shaders and deletes ORO's files.
+To remove ORO, CLOSE ORBITER AND THE LAUNCHPAD, then run ORO_Uninstall.bat in
+the ORO_beta folder. It restores your original graphics client and shaders and
+deletes ORO's files.
+
+Closing Orbiter first is not politeness - both Orbiter and the Launchpad hold
+the graphics client file open, and it cannot be replaced underneath them. The
+uninstaller now checks for this and refuses to run rather than trying anyway.
+
+IT PUTS YOUR CLIENT BACK BEFORE IT REMOVES ANYTHING, and reads the file back
+to confirm it arrived intact. If that check fails it stops and removes nothing,
+so you are left with ORO still installed and working rather than with neither.
+If it ever stops that way, close anything still running and try again.
+
+IF ORBITER WILL NOT START after a failed uninstall - the Launchpad dies a line
+or two into loading - run ORO_Uninstall.bat again. It will spot that your
+graphics client is missing or damaged and offer to repair it on the spot.
 
 IT WILL NOT DELETE ANYTHING YOU TUNED. A file is removed only if it is
 byte-for-byte what ORO shipped; anything you changed or added - a vessel you

@@ -190,11 +190,22 @@ one-line change). A size comparison would have shipped both stale.
 
 ## After building the zip — verify
 
-**The mechanical half is automated: `beta/acceptance.ps1`** — 8 cases, 44
+**The mechanical half is automated: `beta/acceptance.ps1`** — 11 cases, 59
 assertions, run against the SHIPPED zip extracted into a mock Orbiter 2024 tree.
 Not-Orbiter refusal, 2016-dated refusal, **old-PULSE-installed refusal**, cancel,
-install, double-install, tuned-file preservation + uninstall, double-uninstall.
-Last run 2026-08-12 on `ORO-beta-260812.zip`: **44 passed, 0 failed.**
+install, double-install, tuned-file preservation + uninstall, double-uninstall,
+**a client restore that cannot succeed**, **repairing an already-broken install**,
+and **both scripts refusing while Orbiter is running**.
+It picks the NEWEST `dist\ORO-beta-*.zip` rather than a hardcoded name, which used
+to go stale every release, and it exits on its own result rather than on the last
+`.bat`'s exit code.
+Last run 2026-08-15 on `ORO-beta-260815.zip`: **59 passed, 0 failed.**
+
+⚠️ **Cases I, J and K exist because this suite passed 44/44 on the build that
+bricked a tester's Orbiter** (2026-08-15). Every case up to then ran against a
+tree where the restore could always SUCCEED, so "your client was put back" was
+never once a claim under test. **A destructive script tested only along its happy
+paths is not tested at all** — the case that hurts someone is the failing one.
 
 ⚠️ **Two traps it is built to avoid, both bought with real time:**
 - **Drive the .bat by FULL PATH.** A bare name after `cd /d` silently fails to resolve,

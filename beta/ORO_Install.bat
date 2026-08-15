@@ -37,6 +37,30 @@ echo   Orbiter folder detected as:
 echo     %ROOT%
 echo.
 
+rem --- 0. Orbiter must not be running ----------------------------------------
+rem  Added 2026-08-15 after a tester's uninstall broke their installation.
+rem  Orbiter AND the Launchpad both hold Modules\Plugin\D3D9Client.dll open -
+rem  the Launchpad loads the graphics client to build its Video and Modules
+rem  tabs. Every copy below is already checked, so this would be caught either
+rem  way; catching it HERE means we stop before touching anything instead of
+rem  failing part way through and leaving a tree to clean up.
+call :checkRunning
+if defined RUNNING (
+  color 0C
+  echo   ** ORBITER IS STILL RUNNING - !RUNNING! **
+  echo.
+  echo   Nothing has been changed.
+  echo.
+  echo   Please close Orbiter AND the Orbiter Launchpad completely, then run
+  echo   this again. Both keep the graphics client file open, and replacing
+  echo   it underneath them is how an installation gets broken.
+  echo.
+  echo   If no Orbiter window is open, one may be stuck: press
+  echo   CTRL+SHIFT+ESC, find !RUNNING! in the list and end it.
+  echo.
+  goto :fail
+)
+
 rem --- 1. is this actually an Orbiter 2024 installation? ----------------------
 rem  Structure alone is NOT enough to tell 2024 from 2016: the D3D9 client and
 rem  XRSound can both be dropped into a modded 2016 install, so their presence
@@ -226,6 +250,22 @@ echo.
 pause
 exit /b 0
 
+rem ===========================================================================
+rem  checkRunning - is Orbiter or its Launchpad up?
+rem
+rem  Locale-safe: tasklist's "no tasks" message is translated, but it can never
+rem  contain the image name, so matching on the name works in any language.
+rem  Fails OPEN - if tasklist is unavailable we carry on, because every copy
+rem  below is checked anyway and will catch the same problem.
+rem ===========================================================================
+:checkRunning
+set "RUNNING="
+for %%P in (Orbiter.exe Orbiter_ng.exe) do (
+  tasklist /FI "IMAGENAME eq %%P" 2>nul | find /I "%%P" >nul 2>&1
+  if not errorlevel 1 set "RUNNING=%%P"
+)
+goto :eof
+
 :notorbiter
 color 0C
 echo.
@@ -258,8 +298,10 @@ echo   installed somewhere Windows protects (Program Files). Close Orbiter and
 echo   the Launchpad and try again; if Orbiter lives in Program Files, right
 echo   click this file and choose "Run as administrator".
 echo.
-echo   Your Orbiter installation has NOT been left half-patched: run
-echo   ORO_Uninstall.bat to restore anything that did get copied.
+echo   SOME FILES MAY ALREADY HAVE BEEN COPIED, so this installation could be
+echo   part patched. Run ORO_Uninstall.bat to put everything back - it
+echo   restores your client from the backup taken a moment ago and verifies
+echo   it - then fix the cause above and install again.
 echo.
 goto :fail
 

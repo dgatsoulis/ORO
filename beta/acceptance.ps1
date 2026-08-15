@@ -1,15 +1,27 @@
-# ORO beta acceptance test - 8 cases against a MOCK Orbiter 2024 tree.
+# ORO beta acceptance test - 11 cases against a MOCK Orbiter 2024 tree.
 #
 # Two traps this test exists to avoid, both on record from the PULSE run:
 #  (1) drive the .bat by FULL PATH - a bare name after cd /d silently fails to resolve;
 #  (2) READ THE OUTPUT. A run that never invoked the installer leaves the tree
 #      untouched and passes every "nothing changed" assertion TRIVIALLY. So every
 #      case asserts on a SIGNATURE STRING proving the installer actually ran.
-$ErrorActionPreference = "Stop"
+#
+# CASES I, J, K WERE ADDED 2026-08-15, after a beta tester's uninstall left their
+# Orbiter unbootable. This test passed 44/44 on the build that did it - because
+# every case ran against a tree where the restore could always SUCCEED. The
+# failure mode was never exercised, so "the client was restored" was never a
+# claim under test. A test suite that only walks happy paths through a
+# destructive script is not testing the thing that can hurt someone.
+#
+# NOT 'Stop': the scripts under test can legitimately produce native stderr, and
+# PowerShell 5.1 turns a native command's stderr into a terminating error.
+$ErrorActionPreference = "Continue"
 $SP   = "$PSScriptRoot\_testtmp"
-$ZIP  = "$PSScriptRoot\dist\ORO-beta-260813.zip"
+# newest zip, rather than a hardcoded date that silently goes stale each release
+$ZIP  = (Get-ChildItem "$PSScriptRoot\dist\ORO-beta-*.zip" | Sort-Object Name -Descending | Select-Object -First 1).FullName
 $MOCK = "$SP\mock"
 $pass = 0; $fail = 0
+"using zip: $(Split-Path $ZIP -Leaf)"
 
 function Reset-Mock([string]$exeDate, [bool]$withPulse) {
   if (Test-Path $MOCK) { Remove-Item $MOCK -Recurse -Force }
@@ -33,7 +45,16 @@ function Run-Bat([string]$bat, [string]$stdin) {
   # FULL PATH, always. Capture everything.
   $full = "$MOCK\ORO_beta\$bat"
   if (-not (Test-Path $full)) { return "!!! BAT NOT FOUND: $full" }
-  return ($stdin | & cmd.exe /c "`"$full`"" 2>&1 | Out-String)
+  # MEASURED 2026-08-15: `fc` CONSUMES PIPED STDIN - all of it. The uninstaller's
+  # repair path runs `fc /b` to decide whether the client needs restoring BEFORE
+  # it prompts, so a piped answer is already gone when `set /p` runs. That is an
+  # artifact of piping into cmd; a user typing at a console is unaffected, and a
+  # genuinely redirected run just auto-cancels, which changes nothing.
+  # So seed the answer in the environment too: `set /p` overwrites it when stdin
+  # has data and leaves it alone at EOF, so both routes give the same answer.
+  $env:GO = $stdin
+  try     { return ($stdin | & cmd.exe /c "`"$full`"" 2>&1 | Out-String) }
+  finally { Remove-Item Env:GO -ErrorAction SilentlyContinue }
 }
 
 function Check($name, $cond, $evidence) {
@@ -124,11 +145,72 @@ Check "G7 tester's own cfg KEPT"       (Test-Path "$MOCK\Config\ORO\MyOwnShip.cf
 Check "G8 untouched shipped cfg gone"  (-not (Test-Path "$MOCK\Config\ORO\Atlantis.cfg")) "left behind"
 
 # --- H: double uninstall -----------------------------------------------------
+# H2 is deliberately narrow. Since 2026-08-15 there are TWO "ORO is not here"
+# branches - the clean one and the repair offer - and the loose old pattern
+# matched both, so it could not tell them apart. This asserts the CLEAN one.
 "[H] refuses a second uninstall"
 $o = Run-Bat "ORO_Uninstall.bat" "Y"
 Check "H1 uninstaller actually ran"    ($o -match 'ORO') "output len $($o.Length)"
-Check "H2 said not installed"          ($o -match 'not installed|NOT INSTALLED|nothing to') $o
+Check "H2 said nothing to uninstall"   ($o -match 'ORO IS NOT PRESENT') $o
+Check "H3 offered no bogus repair"     ($o -notmatch 'REPAIRED|NOT THE ORIGINAL') $o
+
+# --- I: THE ONE THAT WAS MISSING - a restore that cannot succeed --------------
+# A tester's uninstall failed to write the client back and the script carried on
+# regardless, deleting ORO and printing a green success screen. Read-only stands
+# in for the real cause (Orbiter holding the file open).
+"[I] a failed client restore aborts and removes NOTHING"
+Reset-Mock "20241231" $false
+Run-Bat "ORO_Install.bat" "Y" | Out-Null
+attrib +R "$MOCK\Modules\Plugin\D3D9Client.dll"
+$o = Run-Bat "ORO_Uninstall.bat" "Y"
+attrib -R "$MOCK\Modules\Plugin\D3D9Client.dll"
+Check "I1 uninstaller actually ran"    ($o -match 'ORO') "output len $($o.Length)"
+Check "I2 stopped loudly"              ($o -match 'STOPPED|could not be restored') $o
+Check "I3 did NOT claim success"       ($o -notmatch 'ORO REMOVED') $o
+Check "I4 ORO.dll NOT deleted"         (Test-Path "$MOCK\Modules\Plugin\ORO.dll") "deleted after a failed restore!"
+Check "I5 ORO shader NOT deleted"      (Test-Path "$MOCK\Modules\ORO\orofx.hlsl") "deleted!"
+Check "I6 settings NOT deleted"        (Test-Path "$MOCK\Config\ORO.cfg") "deleted!"
+
+# --- J: repairing an install that is already broken ---------------------------
+# The state the tester was left in: ORO's files gone, client missing, Orbiter
+# dying a line or two into startup. The old script said "nothing to uninstall".
+"[J] repairs a half-uninstalled tree whose client is missing"
+Reset-Mock "20241231" $false
+Run-Bat "ORO_Install.bat" "Y" | Out-Null
+Remove-Item "$MOCK\Modules\Plugin\ORO.dll","$MOCK\Modules\ORO\orofx.hlsl" -Force
+Remove-Item "$MOCK\Modules\Plugin\D3D9Client.dll" -Force
+$o = Run-Bat "ORO_Uninstall.bat" "Y"
+Check "J1 uninstaller actually ran"    ($o -match 'ORO') "output len $($o.Length)"
+Check "J2 spotted the broken client"   ($o -match 'NOT THE ORIGINAL|MISSING altogether') $o
+Check "J3 repaired it"                 ($o -match 'REPAIRED') $o
+Check "J4 client is back"              ((Get-Content "$MOCK\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK CLIENT') "not restored"
+
+# --- K: neither script runs while Orbiter has the client open -----------------
+"[K] both scripts refuse while Orbiter is running"
+Reset-Mock "20241231" $false
+Run-Bat "ORO_Install.bat" "Y" | Out-Null
+$fake = "$SP\Orbiter.exe"
+Copy-Item "$env:SystemRoot\System32\cmd.exe" $fake -Force
+$proc = Start-Process $fake -ArgumentList '/c','ping -n 40 127.0.0.1 >nul' -WindowStyle Hidden -PassThru
+try {
+  Start-Sleep -Milliseconds 700
+  $up = ((tasklist /FI "IMAGENAME eq Orbiter.exe" | Out-String) -match 'Orbiter\.exe')
+  Check "K1 setup: Orbiter.exe is running" $up "tasklist cannot see it - K is inconclusive"
+  $o = Run-Bat "ORO_Uninstall.bat" "Y"
+  Check "K2 uninstaller refused"       ($o -match 'STILL RUNNING') $o
+  Check "K3 removed nothing"           (Test-Path "$MOCK\Modules\Plugin\ORO.dll") "removed while Orbiter ran!"
+  $o = Run-Bat "ORO_Install.bat" "Y"
+  Check "K4 installer refused"         ($o -match 'STILL RUNNING') $o
+} finally {
+  if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+  Start-Sleep -Milliseconds 300
+  Remove-Item $fake -Force -ErrorAction SilentlyContinue
+}
 
 ""
 "================ $pass passed, $fail failed ================"
-if ($fail -gt 0) { "SOME CASES FAILED - read the FAIL lines above" }
+# Exit on OUR result, not on $LASTEXITCODE - the last thing run is a .bat that
+# correctly returns 1 when it refuses, which would otherwise report a clean
+# suite as a failure.
+if ($fail -gt 0) { "SOME CASES FAILED - read the FAIL lines above"; exit 1 }
+exit 0
