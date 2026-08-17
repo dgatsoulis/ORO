@@ -23,7 +23,7 @@ $MOCK = "$SP\mock"
 $pass = 0; $fail = 0
 "using zip: $(Split-Path $ZIP -Leaf)"
 
-function Reset-Mock([string]$exeDate, [bool]$withPulse) {
+function Reset-Mock([string]$exeDate, [bool]$withPulse, [bool]$withPulseBackup) {
   if (Test-Path $MOCK) { Remove-Item $MOCK -Recurse -Force }
   New-Item -ItemType Directory -Path "$MOCK\Config\Vessels","$MOCK\Modules\Plugin","$MOCK\Modules\D3D9Client" -Force | Out-Null
   Set-Content "$MOCK\Orbiter.exe"    "mock orbiter binary"       -NoNewline
@@ -37,11 +37,38 @@ function Reset-Mock([string]$exeDate, [bool]$withPulse) {
     (Get-Item "$MOCK\Orbiter.exe").LastWriteTime    = [datetime]::ParseExact($exeDate,'yyyyMMdd',$null)
     (Get-Item "$MOCK\Orbiter_ng.exe").LastWriteTime = [datetime]::ParseExact($exeDate,'yyyyMMdd',$null)
   }
-  if ($withPulse) { Set-Content "$MOCK\Modules\Plugin\PULSE.dll" "the old beta's dll" }
+  # A REALISTIC PULSE FOOTPRINT, not just the DLL. The installer detects seven
+  # separate things because a half-finished uninstall leaves some and not others,
+  # and "whatever is left" is exactly the case worth testing.
+  # ⚠ The on-disk client is PULSE's PATCHED one, because PULSE required a patched
+  # client - it was a hard dependency. That is what makes the poisoned-backup case
+  # real: if ORO backed THAT up as "your original", a later ORO uninstall would
+  # restore a patched client and truthfully report success.
+  if ($withPulse) {
+    New-Item -ItemType Directory -Force -Path `
+      "$MOCK\Modules\PULSE","$MOCK\Config\PULSE","$MOCK\Meshes\PULSE",`
+      "$MOCK\Textures\PULSE","$MOCK\Scenarios\PULSE_beta" | Out-Null
+    Set-Content "$MOCK\Modules\Plugin\PULSE.dll"          "the old beta's dll"
+    Set-Content "$MOCK\Modules\PULSE\pulsefx.hlsl"        "old shader"
+    Set-Content "$MOCK\Config\PULSE.cfg"                  "old global settings"
+    Set-Content "$MOCK\Config\PULSE\DeltaGlider.cfg"      "old class settings"
+    Set-Content "$MOCK\Meshes\PULSE\DG-S_bell.msh"        "old mesh"
+    Set-Content "$MOCK\Textures\PULSE\bell_glow.dds"      "old texture"
+    Set-Content "$MOCK\Scenarios\PULSE_beta\demo.scn"     "old scenario"
+    Set-Content "$MOCK\Modules\Plugin\D3D9Client.dll"     "PULSE PATCHED CLIENT"
+  }
+  if ($withPulseBackup) {
+    New-Item -ItemType Directory -Force -Path `
+      "$MOCK\PULSE_beta\backup\Modules\Plugin","$MOCK\PULSE_beta\backup\Modules\D3D9Client" | Out-Null
+    Set-Content "$MOCK\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "STOCK CLIENT DLL"
+    foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl') {
+      Set-Content "$MOCK\PULSE_beta\backup\Modules\D3D9Client\$s" "STOCK SHADER $s"
+    }
+  }
   Expand-Archive -Path $ZIP -DestinationPath $MOCK -Force
 }
 
-function Run-Bat([string]$bat, [string]$stdin) {
+function Run-Bat([string]$bat, [string]$stdin, [string]$rmp) {
   # FULL PATH, always. Capture everything.
   $full = "$MOCK\ORO_beta\$bat"
   if (-not (Test-Path $full)) { return "!!! BAT NOT FOUND: $full" }
@@ -52,9 +79,20 @@ function Run-Bat([string]$bat, [string]$stdin) {
   # genuinely redirected run just auto-cancels, which changes nothing.
   # So seed the answer in the environment too: `set /p` overwrites it when stdin
   # has data and leaves it alone at EOF, so both routes give the same answer.
+  # A PULSE-present install asks TWO questions - remove PULSE? then install?
+  # ⚠ MEASURED 2026-08-17: PIPING TWO ANSWERS DOES NOT WORK. A `set /p` inside a
+  # parenthesised block consumes the whole remaining stream rather than one line,
+  # so the first prompt swallows both answers and the second reads EMPTY - which
+  # silently sends the run down the DECLINE path and made every removal assertion
+  # fail. Seed the environment and feed EOF instead: `set /p` overwrites the
+  # variable when stdin has data and leaves it alone at EOF, so at EOF both
+  # prompts read their seeded answer. Verified with a standalone probe before
+  # being used here.
   $env:GO = $stdin
-  try     { return ($stdin | & cmd.exe /c "`"$full`"" 2>&1 | Out-String) }
-  finally { Remove-Item Env:GO -ErrorAction SilentlyContinue }
+  $feed   = $stdin
+  if ($PSBoundParameters.ContainsKey('rmp')) { $env:RMP = $rmp; $feed = "" }
+  try     { return ($feed | & cmd.exe /c "`"$full`"" 2>&1 | Out-String) }
+  finally { Remove-Item Env:GO,Env:RMP -ErrorAction SilentlyContinue }
 }
 
 function Check($name, $cond, $evidence) {
@@ -83,14 +121,75 @@ Check "B2 refused on date"             ($o -match '2016|dated|2024-12-31') $o
 Check "B3 no ORO.dll installed"        (-not (Test-Path "$MOCK\Modules\Plugin\ORO.dll")) "ORO.dll present!"
 Check "B4 client untouched"            ((Get-Content "$MOCK\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK') "client replaced!"
 
-# --- C: the OLD PULSE beta still installed (NEW guard) -----------------------
-"[C] refuses when the old PULSE beta is still installed"
-Reset-Mock "20241231" $true
-$o = Run-Bat "ORO_Install.bat" "Y"
+# --- C: PULSE present, and the tester DECLINES removal -----------------------
+# Their installation, their call. Declining must change NOTHING and must hand
+# over the manual route - including the step that actually matters, which is
+# closing Orbiter before running PULSE's own uninstaller.
+"[C] PULSE present, removal declined - nothing changes"
+Reset-Mock "20241231" $true $true
+$o = Run-Bat "ORO_Install.bat" "Y" "N"
 Check "C1 installer actually ran"      ($o -match 'Orbiter 2024 installation confirmed') "no confirm line"
-Check "C2 named PULSE + uninstaller"   ($o -match 'PULSE' -and $o -match 'PULSE_Uninstall.bat') $o
-Check "C3 no ORO.dll installed"        (-not (Test-Path "$MOCK\Modules\Plugin\ORO.dll")) "ORO.dll present!"
-Check "C4 client untouched"            ((Get-Content "$MOCK\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK') "client replaced!"
+Check "C2 named PULSE and offered"     ($o -match 'PULSE' -and $o -match 'Type Y to remove PULSE') $o
+Check "C3 gave the manual steps"       ($o -match 'PULSE_Uninstall.bat' -and $o -match 'Close Orbiter') $o
+Check "C4 warned about the lock"       ($o -match 'does not check|report success anyway') $o
+Check "C5 no ORO.dll installed"        (-not (Test-Path "$MOCK\Modules\Plugin\ORO.dll")) "ORO.dll present!"
+Check "C6 PULSE.dll still there"       (Test-Path "$MOCK\Modules\Plugin\PULSE.dll") "PULSE deleted without consent!"
+Check "C7 PULSE settings still there"  (Test-Path "$MOCK\Config\PULSE\DeltaGlider.cfg") "settings deleted without consent!"
+Check "C8 client untouched"            ((Get-Content "$MOCK\Modules\Plugin\D3D9Client.dll" -Raw) -match 'PULSE PATCHED') "client changed!"
+
+# --- L: PULSE present, tester ACCEPTS removal, PULSE's backup survives --------
+# The whole point of the 2026-08-17 rework: we renamed the addon, so cleaning up
+# after that rename is OUR job, not a chore handed back to the tester along with
+# a script we know can fail.
+"[L] PULSE present, removal accepted - PULSE gone, ORO installed"
+Reset-Mock "20241231" $true $true
+$o = Run-Bat "ORO_Install.bat" "Y" "Y"
+Check "L1 installer actually ran"      ($o -match 'Orbiter 2024 installation confirmed') "no confirm line"
+Check "L2 said it removed PULSE"       ($o -match '\[ok\] PULSE removed') $o
+Check "L3 PULSE.dll gone"              (-not (Test-Path "$MOCK\Modules\Plugin\PULSE.dll")) "PULSE.dll left behind"
+Check "L4 Modules\PULSE gone"          (-not (Test-Path "$MOCK\Modules\PULSE")) "Modules\PULSE left behind"
+Check "L5 Config\PULSE.cfg gone"       (-not (Test-Path "$MOCK\Config\PULSE.cfg")) "Config\PULSE.cfg left behind"
+Check "L6 Config\PULSE gone"           (-not (Test-Path "$MOCK\Config\PULSE")) "Config\PULSE left behind"
+Check "L7 Meshes\PULSE gone"           (-not (Test-Path "$MOCK\Meshes\PULSE")) "Meshes\PULSE left behind"
+Check "L8 Textures\PULSE gone"         (-not (Test-Path "$MOCK\Textures\PULSE")) "Textures\PULSE left behind"
+Check "L9 Scenarios\PULSE_beta gone"   (-not (Test-Path "$MOCK\Scenarios\PULSE_beta")) "scenarios left behind"
+Check "L10 PULSE_beta folder KEPT"     (Test-Path "$MOCK\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll") "we deleted their backup!"
+Check "L11 ORO installed"              (Test-Path "$MOCK\Modules\Plugin\ORO.dll") "ORO.dll missing"
+# ⚠ THE ONE THAT MATTERS. The client on disk was PULSE's PATCHED copy. If that
+# got backed up as "your original files", a later ORO uninstall would restore a
+# patched client and report success - the silent-wrongness hole found on
+# 2026-08-17. The original must be recovered BEFORE the backup is taken.
+Check "L12 backup is NOT the patched client" `
+      ((Get-Content "$MOCK\ORO_beta\backup\Modules\Plugin\D3D9Client.dll" -Raw) -notmatch 'PULSE PATCHED') "POISONED BACKUP"
+Check "L13 backup is their real original" `
+      ((Get-Content "$MOCK\ORO_beta\backup\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK CLIENT') "backup is not stock"
+
+# --- M: PULSE present, accepted, but PULSE's own backup is GONE --------------
+# The half-uninstalled case. There is no original to recover from PULSE, so the
+# pristine copies we ship have to stand in - otherwise the patched client would
+# be backed up as theirs and L12's hole reopens by another route.
+"[M] PULSE present, its backup gone - shipped originals stand in"
+Reset-Mock "20241231" $true $false
+$o = Run-Bat "ORO_Install.bat" "Y" "Y"
+Check "M1 installer actually ran"      ($o -match 'Orbiter 2024 installation confirmed') "no confirm line"
+Check "M2 said the backup was gone"    ($o -match "PULSE's backup is gone|shipped originals") $o
+Check "M3 PULSE.dll gone"              (-not (Test-Path "$MOCK\Modules\Plugin\PULSE.dll")) "PULSE.dll left behind"
+Check "M4 ORO installed"               (Test-Path "$MOCK\Modules\Plugin\ORO.dll") "ORO.dll missing"
+Check "M5 backup is NOT the patched client" `
+      ((Get-Content "$MOCK\ORO_beta\backup\Modules\Plugin\D3D9Client.dll" -Raw) -notmatch 'PULSE PATCHED') "POISONED BACKUP"
+
+# --- N: only PULSE RESIDUE, no DLL - still detected --------------------------
+# A previous uninstall removed the marker file and left the rest. The old guard
+# keyed on PULSE.dll alone and would have sailed straight past this.
+"[N] PULSE residue with no DLL is still detected"
+Reset-Mock "20241231" $true $true
+Remove-Item "$MOCK\Modules\Plugin\PULSE.dll" -Force
+Set-Content "$MOCK\Modules\Plugin\D3D9Client.dll" "STOCK CLIENT DLL"
+$o = Run-Bat "ORO_Install.bat" "Y" "Y"
+Check "N1 installer actually ran"      ($o -match 'Orbiter 2024 installation confirmed') "no confirm line"
+Check "N2 spotted the residue"         ($o -match 'PULSE' -and $o -match 'Type Y to remove PULSE') $o
+Check "N3 residue removed"             (-not (Test-Path "$MOCK\Config\PULSE")) "Config\PULSE left behind"
+Check "N4 ORO installed"               (Test-Path "$MOCK\Modules\Plugin\ORO.dll") "ORO.dll missing"
 
 # --- D: cancel at the prompt -------------------------------------------------
 "[D] cancel leaves the tree untouched"

@@ -3,16 +3,26 @@
   Atmospheric, Physiological and Visual Immersion Suite
 ================================================================================
 
-  >>> IF YOU HAVE THE EARLIER BETA INSTALLED, UNINSTALL IT FIRST. <<<
+  >>> IF YOU HAVE THE EARLIER BETA (PULSE) INSTALLED, JUST RUN THE ORO <<<
+  >>> INSTALLER. IT WILL OFFER TO REMOVE PULSE FOR YOU.                <<<
 
-  This addon used to be called PULSE. Before installing ORO, go to your old
-  PULSE_beta folder and run PULSE_Uninstall.bat.
+  This addon used to be called PULSE. The ORO installer now detects PULSE -
+  including a half-removed one - lists exactly what it would delete, and asks
+  permission. Say yes and it removes PULSE, puts your original graphics client
+  back, and then installs ORO. Say no and nothing is touched; it prints the
+  manual steps instead.
 
-  This is not optional housekeeping. The ORO installer looks for ORO's files,
-  and every one of them has a different name now - so it cannot see PULSE's
-  files, cannot back them up, and cannot remove them. Skip this step and you
-  end up with BOTH addons installed and both listed in the Launchpad, which
-  will look like a bug in ORO. Section 2, step 1.
+  You do NOT need to find your old PULSE_beta folder, and you do not need to
+  run PULSE_Uninstall.bat. We renamed the addon, so cleaning up after that
+  rename is our job, not yours.
+
+  If you would rather do it by hand: close Orbiter AND the Launchpad
+  completely first, then run PULSE_Uninstall.bat, do not start Orbiter in
+  between, then run ORO_Install.bat. Closing the Launchpad matters - it holds
+  the graphics client file open, and PULSE's uninstaller does not check that
+  its restore succeeded, so with that file locked it fails and still reports
+  success. That is a bug in the version you have, and it is why the ORO
+  installer now offers to do the whole thing itself.
 
   Why the name changed: it started as G-force effects, which is what PULSE
   meant, and it long ago grew past that. ORO is "Orbiter Realism Overhaul".
@@ -60,6 +70,13 @@
   - Every thruster setting is now PER ENGINE GROUP, so a vacuum-rated main and
     sea-level hovers can be described separately. Your existing tuning is
     carried into every group untouched.
+
+  AND ONE WE OWED YOU:
+
+  - The ORO installer now removes PULSE itself, with your permission. Sending
+    you back to PULSE's uninstaller to clean up after OUR rename - using a
+    script we know can fail silently and which already cost one of you a
+    working Orbiter - was not a fair thing to ask.
 
   ONE REQUEST, AND IT MATTERS MORE THAN IT SOUNDS:
 
@@ -126,12 +143,14 @@ install at any time, in one click, and it will not touch anything you tuned.
 2. INSTALL
 --------------------------------------------------------------------------------
 
-1. UNINSTALL THE OLD PULSE BETA FIRST, if you have it.
-   Go to your PULSE_beta folder and run PULSE_Uninstall.bat. Let it finish and
-   read what it says - it keeps anything you tuned and tells you what it kept.
-   ORO's installer cannot do this for you: it looks for ORO's files, and none
-   of PULSE's files have those names any more.
-   If you never installed the earlier beta, skip to 2.
+1. HAVE THE OLD PULSE BETA? Do nothing about it - the ORO installer handles it.
+   It detects PULSE, including a half-removed one, lists exactly what it would
+   delete, and asks. Say yes and it removes PULSE, restores your original
+   graphics client - from PULSE's own backup if that still exists, otherwise
+   from the pristine originals shipped in this archive - and then installs ORO.
+   Say no and nothing is touched; it prints the manual steps instead.
+   Your PULSE_beta folder is left alone, since it holds that backup.
+   If you never installed the earlier beta, nothing here applies.
 2. Close Orbiter completely (the Launchpad too).
 3. Unzip this archive into your Orbiter root folder - the one that contains
    Orbiter.exe. It creates a single folder there called ORO_beta.

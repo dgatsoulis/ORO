@@ -141,30 +141,125 @@ if exist "%ROOT%\Modules\Plugin\ORO.dll" (
   goto :done_nochange
 )
 
-rem --- 3b. the OLD PULSE beta is still installed? -----------------------------
-rem This addon was called PULSE until 2026-08-12. Every file it owned has a
-rem different name now, so this installer cannot see them, cannot back them up
-rem and cannot remove them. Installing over the top leaves BOTH addons in the
-rem Launchpad, both loading, both writing settings - which reads as an ORO bug.
-if exist "%ROOT%\Modules\Plugin\PULSE.dll" (
+rem --- 3b. the OLD PULSE beta - offer to remove it ----------------------------
+rem This addon was called PULSE until 2026-08-12, and every file it owned has a
+rem different name now. Installing over the top would leave BOTH addons in the
+rem Launchpad, both loading and both writing settings, which reads as an ORO bug.
+rem
+rem  This block used to REFUSE and send you to PULSE_Uninstall.bat. That was
+rem  honest but it was not kind: PULSE's uninstaller has a defect we shipped -
+rem  it restores the graphics client without checking that the copy worked, so
+rem  with Orbiter or the Launchpad open it fails silently, reports success, and
+rem  removes PULSE anyway. One tester's installation was left unbootable that
+rem  way. Sending people back to that script to clean up after OUR rename is
+rem  asking them to pay for our mistake, so this installer now does it itself.
+rem
+rem  Detection is deliberately WIDER than PULSE.dll: a half-finished uninstall
+rem  leaves some of these behind and not others, and "whatever is left" is
+rem  exactly the case that needs helping.
+set "PULSEFOUND="
+if exist "%ROOT%\Modules\Plugin\PULSE.dll"  set "PULSEFOUND=1"
+if exist "%ROOT%\Modules\PULSE"             set "PULSEFOUND=1"
+if exist "%ROOT%\Config\PULSE.cfg"          set "PULSEFOUND=1"
+if exist "%ROOT%\Config\PULSE"              set "PULSEFOUND=1"
+if exist "%ROOT%\Meshes\PULSE"              set "PULSEFOUND=1"
+if exist "%ROOT%\Textures\PULSE"            set "PULSEFOUND=1"
+if exist "%ROOT%\Scenarios\PULSE_beta"      set "PULSEFOUND=1"
+
+if defined PULSEFOUND (
   color 0E
   echo.
-  echo   ** THE OLDER BETA - PULSE - IS STILL INSTALLED. **
+  echo   ** THE OLDER BETA - PULSE - IS STILL PRESENT. **
   echo.
-  echo   Nothing has been changed. ORO is the same addon under a new name, so
-  echo   please remove PULSE first:
+  echo   ORO is the same addon under a new name. PULSE has to go before ORO
+  echo   can be installed, or both will load and both will write settings.
   echo.
-  echo     1. Find your PULSE_beta folder and run PULSE_Uninstall.bat
-  echo     2. Then run this installer again.
+  echo   This installer can remove it for you. It would delete:
   echo.
-  echo   That restores your original graphics client from the backup PULSE
-  echo   made, and keeps anything you tuned.
+  if exist "%ROOT%\Modules\Plugin\PULSE.dll" echo       Modules\Plugin\PULSE.dll
+  if exist "%ROOT%\Modules\PULSE"            echo       Modules\PULSE\
+  if exist "%ROOT%\Config\PULSE.cfg"         echo       Config\PULSE.cfg
+  if exist "%ROOT%\Config\PULSE"             echo       Config\PULSE\           ^(PULSE's saved settings^)
+  if exist "%ROOT%\Meshes\PULSE"             echo       Meshes\PULSE\
+  if exist "%ROOT%\Textures\PULSE"           echo       Textures\PULSE\
+  if exist "%ROOT%\Scenarios\PULSE_beta"     echo       Scenarios\PULSE_beta\
   echo.
-  echo   If you no longer have the PULSE_beta folder, delete this file by hand
-  echo   and run this again:
-  echo     %ROOT%\Modules\Plugin\PULSE.dll
+  echo   Your PULSE_beta folder is NOT touched - it holds the backup of your
+  echo   original graphics client, which is worth keeping until you are happy.
+  echo   ORO ships its own tuned settings, so nothing you need is lost.
   echo.
-  goto :done_nochange
+  set /p "RMP=  Type Y to remove PULSE and continue installing ORO: "
+  rem  !RMP!, not %RMP% - we are inside a parenthesised block, where %VAR% is
+  rem  substituted when the block is PARSED and would always read empty here.
+  if /i not "!RMP!"=="Y" goto :pulsemanual
+
+  echo.
+  echo   Removing PULSE...
+  if exist "%ROOT%\Modules\Plugin\PULSE.dll" del /f /q "%ROOT%\Modules\Plugin\PULSE.dll" >nul 2>&1
+  if exist "%ROOT%\Modules\PULSE"            rd /s /q  "%ROOT%\Modules\PULSE"            >nul 2>&1
+  if exist "%ROOT%\Config\PULSE.cfg"         del /f /q "%ROOT%\Config\PULSE.cfg"         >nul 2>&1
+  if exist "%ROOT%\Config\PULSE"             rd /s /q  "%ROOT%\Config\PULSE"             >nul 2>&1
+  if exist "%ROOT%\Meshes\PULSE"             rd /s /q  "%ROOT%\Meshes\PULSE"             >nul 2>&1
+  if exist "%ROOT%\Textures\PULSE"           rd /s /q  "%ROOT%\Textures\PULSE"           >nul 2>&1
+  if exist "%ROOT%\Scenarios\PULSE_beta"     rd /s /q  "%ROOT%\Scenarios\PULSE_beta"     >nul 2>&1
+
+  rem  Check it actually went. A locked file fails DEL silently, and this is the
+  rem  whole lesson of the defect above - never report a removal you did not verify.
+  set "PULSELEFT="
+  if exist "%ROOT%\Modules\Plugin\PULSE.dll"  set "PULSELEFT=Modules\Plugin\PULSE.dll"
+  if exist "%ROOT%\Modules\PULSE"             set "PULSELEFT=Modules\PULSE\"
+  if exist "%ROOT%\Config\PULSE.cfg"          set "PULSELEFT=Config\PULSE.cfg"
+  if exist "%ROOT%\Config\PULSE"              set "PULSELEFT=Config\PULSE\"
+  if exist "%ROOT%\Meshes\PULSE"              set "PULSELEFT=Meshes\PULSE\"
+  if exist "%ROOT%\Textures\PULSE"            set "PULSELEFT=Textures\PULSE\"
+  if exist "%ROOT%\Scenarios\PULSE_beta"      set "PULSELEFT=Scenarios\PULSE_beta\"
+  if defined PULSELEFT (
+    color 0C
+    echo.
+    echo   ** COULD NOT REMOVE ALL OF PULSE. **
+    echo.
+    echo   Still there: !PULSELEFT!
+    echo.
+    echo   Nothing else has been changed and ORO has NOT been installed.
+    echo   Something is holding that file open - Orbiter, the Launchpad, or a
+    echo   file browser sitting in the folder. Close everything and run this
+    echo   again.
+    echo.
+    goto :fail
+  )
+  echo   [ok] PULSE removed
+  echo.
+  rem  ⚠ AND NOW THE CLIENT. PULSE required a PATCHED D3D9Client.dll - it was a
+  rem  hard dependency - so whatever is on disk right now is PULSE's patched
+  rem  copy, NOT the tester's original. Backing that up in step 5 as "your
+  rem  original files" would poison the backup and make a future ORO uninstall
+  rem  restore a patched client while truthfully reporting success. So the
+  rem  original is recovered here, BEFORE the backup is taken: from PULSE's own
+  rem  backup if it survived (that is genuinely their file), otherwise from the
+  rem  pristine originals we ship.
+  rem  ⚠ NO local variable for the PULSE backup path. `set` inside a parenthesised
+  rem  block does not take effect until the block finishes, so a %PBK% written and
+  rem  read here would expand to NOTHING at parse time, silently skip the tester's
+  rem  own original and fall through to the shipped copies. Caught by acceptance
+  rem  case L13. %ROOT% and %STOCK% are set before the block, so they are safe.
+  if exist "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" (
+    echo   Recovering your original graphics client from PULSE's backup...
+    copy /y "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl) do (
+      if exist "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" copy /y "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
+    )
+    echo   [ok] restored from PULSE's own backup
+  ) else if exist "%STOCK%\Modules\Plugin\D3D9Client.dll" (
+    echo   PULSE's backup is gone - using the pristine Orbiter 2024 originals
+    echo   shipped with this beta instead...
+    copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl) do (
+      if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
+    )
+    echo   [ok] restored from the shipped originals
+  )
+  echo.
+  color 0A
 )
 
 rem --- 4. say plainly what is about to happen, and ask ------------------------
@@ -309,6 +404,35 @@ goto :fail
 echo.
 pause
 exit /b 1
+
+rem  They declined to let us remove PULSE. Their call, and a fair one - it is
+rem  their installation. So hand over the manual route, including the step that
+rem  actually matters: PULSE's uninstaller restores the graphics client without
+rem  checking the copy worked, and Orbiter or the Launchpad holding that file
+rem  open is what makes it fail. Closed, it works correctly.
+:pulsemanual
+color 0E
+echo.
+echo   Understood - nothing has been changed.
+echo.
+echo   To remove PULSE yourself, in this order:
+echo.
+echo     1. Close Orbiter AND the Launchpad completely.
+echo     2. Run PULSE_Uninstall.bat from your old PULSE_beta folder.
+echo     3. Do NOT start Orbiter in between.
+echo     4. Run ORO_Install.bat again.
+echo.
+echo   Step 1 is the one that matters. PULSE's uninstaller puts your original
+echo   graphics client back but does not check that the copy succeeded, and
+echo   with Orbiter or the Launchpad open the file is locked and the copy is
+echo   refused - it will then report success anyway. With both closed it does
+echo   the right thing.
+echo.
+echo   If you no longer have the PULSE_beta folder, run this installer again
+echo   and let it remove PULSE for you - it does not need that folder.
+echo.
+pause
+exit /b 0
 
 :done_nochange
 echo.
