@@ -644,11 +644,53 @@ void OroLightning_Close()
 }
 
 // ----------------------------------------------------------------------------
-// Per frame, MAIN thread. Builds the flash discs into ltgVtx and sets ltgActive;
-// the render callback only pushes and draws (DrawLightningPoly).
+// THE SPLIT (2026-08-15, the pause fix). UpdateLightning runs on the MAIN thread and
+// does everything that needs oapi or the cloud-map file: the world, the districts, the
+// storm cells and the flash scheduling. BuildLightningGeometry runs in the RENDER PATH
+// and projects the discs. See ProjCam in OroModule.h for why.
 // ----------------------------------------------------------------------------
+namespace {
+	struct LtgSnap {
+		OBJHANDLE hP;      // planet handle, for the render-epoch anchor (invariant 21a)
+		VECTOR3 O;         // planet centre, global
+		double  R;         // planet radius
+		MATRIX3 Rp;        // planet rotation
+		VECTOR3 Sg;        // the star, for the night gate at each cell
+		double  crot;      // cloud-layer rotation this frame (invariant 22b)
+		double  Rdeck;     // radius of the deck the discs sit on
+		float   altFade;   // above-the-deck fade (v1 scope)
+		float   animNow;   // the real-time clock the envelopes are keyed to
+		int     nCell;     // cells in the visible cap, for the breadcrumb
+	};
+	LtgSnap s_ltg;
+	bool    s_ltgValid = false;
+	// The first-flash breadcrumb, deferred out of the render path (invariant 1: no oapi
+	// calls there). The build records; the next main-thread pass writes the line.
+	bool    s_ltgLogged   = false;
+	int     s_ltgLogVerts = 0;
+	bool    s_ltgLogTex   = false;
+	bool    s_ltgPoolFull   = false;
+	bool    s_ltgPoolLogged = false;
+}
+
 void OroModule::UpdateLightning(double simt)
 {
+	// The render path's deferred warning, written here where oapi is legal.
+	if (s_ltgPoolFull && !s_ltgPoolLogged) {
+		s_ltgPoolLogged = true;
+		oapiWriteLogV("ORO: lightning triangle pool FULL (%d tri) - flashes are being clipped.",
+		              LTG_MAX_TRI);
+	}
+
+	// The render path's deferred breadcrumb, written here where oapi is legal.
+	if (!s_ltgLogged && s_ltgLogVerts > 0) {
+		s_ltgLogged = true;
+		oapiWriteLogV("ORO: lightning first flash on screen - %d verts, %d cells in cap, %s mode.",
+		              s_ltgLogVerts, s_ltg.nCell,
+		              s_ltgLogTex ? "TEXTURED (cloud-lit)" : "Gouraud");
+	}
+
+	s_ltgValid = false;
 	const float animNow  = animT;
 	const float animPrev = ltgPrevAnim;
 	ltgPrevAnim = animNow;
@@ -909,7 +951,47 @@ void OroModule::UpdateLightning(double simt)
 		fired++;
 	}
 
-	// ---- GEOMETRY: one soft disc per live flash ----------------------------------
+	// ---- hand the world state to the render path and stop -------------------------
+	// The geometry moved out on 2026-08-15: clbkPreStep does not run while PAUSED, so a
+	// paused pan or zoom used to leave the discs projected for a camera that no longer
+	// existed ("lightning follows camera"). Everything above this line needs oapi or the
+	// cloud-map file and has to stay here; everything below is pure math.
+	// ⚠️ The CELL SELECTION stays here too, so while paused the visible-cap set is frozen.
+	// That is correct - storms do not move while the sim is stopped - and the alternative
+	// would be decoding cloud tiles from the render callback, which is not on the table.
+	s_ltg.hP = hP; s_ltg.O = O; s_ltg.R = R; s_ltg.Rp = Rp; s_ltg.Sg = Sg;
+	s_ltg.crot = crot; s_ltg.Rdeck = Rdeck;
+	s_ltg.altFade = altFade; s_ltg.animNow = animNow;
+	s_ltg.nCell = nCell;
+	s_ltgValid = true;
+}
+
+// ----------------------------------------------------------------------------
+// BuildLightningGeometry - THE RENDER PATH HALF (2026-08-15). One soft disc per live
+// flash, projected with the camera the frame is actually drawn with.
+//
+// INVARIANT-1 AUDIT: zero oapi calls. The world state arrives in s_ltg, the flash ring
+// and the atlas are members, gcCore::GetRenderCam is a client call (the CopyResource
+// precedent), and viewW/viewH are the cached copies.
+// ----------------------------------------------------------------------------
+void OroModule::BuildLightningGeometry()
+{
+	ltgVtxN   = 0;
+	ltgActive = false;
+	if (!s_ltgValid) return;
+	if (viewW == 0 || viewH == 0) return;
+
+	CamCtx cc;
+	if (!FillProjCam(cc.pos, cc.rot, cc.tanAp)) return;
+
+	// RENDER-EPOCH ANCHOR (invariant 21a) - sub-pixel at planetary scale, applied for
+	// uniformity so every render-path builder corrects its anchors the same way.
+	const VECTOR3 O = s_ltg.O + RenderEpochShift(s_ltg.hP, s_ltg.O);
+	const double R = s_ltg.R;
+	const MATRIX3 Rp = s_ltg.Rp; const VECTOR3 Sg = s_ltg.Sg;
+	const double crot = s_ltg.crot, Rdeck = s_ltg.Rdeck;
+	const float  altFade = s_ltg.altFade, animNow = s_ltg.animNow;
+
 	// Rings at 0 / 0.35 / 0.70 / 1.15 x radius, LTG_SEC sectors, Gouraud alpha
 	// falling outward. TEXTURED mode (patch l): the per-pixel cloud shape comes from
 	// the flash's baked atlas slot (texture x Gouraud in the pad's modulate band), so
@@ -1048,14 +1130,9 @@ void OroModule::UpdateLightning(double simt)
 	}
 
 	// Pool-full warning, once (the aurora's rule: a silently clipped effect looks
-	// like a bug report, a logged one is a budget).
-	{
-		static bool warned = false;
-		if (!warned && ltgVtxN >= LTG_MAX_TRI * 3) {
-			warned = true;
-			oapiWriteLogV("ORO: lightning triangle pool FULL (%d tri) - flashes are being clipped.", LTG_MAX_TRI);
-		}
-	}
+	// like a bug report, a logged one is a budget). DEFERRED like the breadcrumb -
+	// this is the RENDER PATH and it may not call oapi (invariant 1).
+	if (ltgVtxN >= LTG_MAX_TRI * 3) s_ltgPoolFull = true;
 
 	// Zero-pad the unused tail of the ACTIVE vertex array (invariant 3):
 	// D3DLOCK_DISCARD + full creation-count draw means an unwritten tail is random
@@ -1070,12 +1147,10 @@ void OroModule::UpdateLightning(double simt)
 
 	// One-shot breadcrumb, the DrawOverlay discipline: "the effect emitted at least
 	// once this run" - tells a dark night sky from a pipeline that never fired.
-	{
-		static bool logged = false;
-		if (!logged && ltgVtxN > 0) {
-			logged = true;
-			oapiWriteLogV("ORO: lightning first flash on screen - %d verts, %d cells in cap, %s mode.",
-			              ltgVtxN, nCell, texMode ? "TEXTURED (cloud-lit)" : "Gouraud");
-		}
+	// DEFERRED since the split: this runs in the RENDER PATH now, which may not call
+	// oapi (invariant 1). Record the numbers; the next main-thread pass writes the line.
+	if (!s_ltgLogged && ltgVtxN > 0) {
+		s_ltgLogVerts = ltgVtxN;
+		s_ltgLogTex   = texMode;
 	}
 }

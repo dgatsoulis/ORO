@@ -460,6 +460,7 @@ namespace {
 		{ "ShakeAmpY",        &g_fx.shakeAmpY,        ST_F },
 		{ "ShakeAmpZ",        &g_fx.shakeAmpZ,        ST_F },
 		{ "ShakeFreq",        &g_fx.shakeFreq,        ST_F },
+		{ "ShakePush",        &g_fx.shakePush,        ST_F },   // the lean, split from the buffet
 		// world - the ENABLES and the VC preference are the user's, not the ship's
 		{ "ShimmerOn",        &g_fx.shimmerEnabled,   ST_B },
 		{ "PlumeOn",          &g_fx.plumeEnabled,     ST_B },
@@ -511,6 +512,7 @@ namespace {
 		{ "GSuit",            &g_fx.gsuitOn,          ST_B },
 		{ "PilotPose",        &g_fx.pilotPose,        ST_I },
 		{ "GRefCamera",       &g_fx.gRefCamera,       ST_B },
+		{ "FxVCOnly",         &g_fx.fxVCOnly,         ST_B },
 		{ "GainBlackout",     &g_fx.gainBlackout,     ST_F },
 		{ "GainRedout",       &g_fx.gainRedout,       ST_F },
 		{ "GainTunnel",       &g_fx.gainTunnel,       ST_F },
@@ -541,6 +543,7 @@ namespace {
 		{ "PlumeBellGlow",    &g_fx.plumeBellGlow,    ST_F },   //   the bell-glow trim
 		{ "PlumeBellHeatT",   &g_fx.plumeBellHeatT,   ST_F },   //   + its two thermal
 		{ "PlumeBellCoolT",   &g_fx.plumeBellCoolT,   ST_F },   //   timescales [s],
+		{ "BellTint",         &g_fx.bellTint,         ST_I },   //   and its hue pick
 		{ "PlumeCells",       &g_fx.plumeCells,       ST_F },   //   the disc count,
 		{ "PlumeDiamond",     &g_fx.plumeDiamond,     ST_F },   //   strength + the shape
 		{ "PlumeSpacing",     &g_fx.plumeSpacing,     ST_F },   //   knobs + the two colour
@@ -567,6 +570,8 @@ namespace {
 		{ "PlasStreakLen",    &g_fx.plasStreakLen,    ST_F },
 		{ "PlasStreakWid",    &g_fx.plasStreakWid,    ST_F },
 		{ "PlasWander",       &g_fx.plasWander,       ST_F },
+		{ "PlasChurn",        &g_fx.plasChurn,        ST_F },   // how fast the wake lives
+		{ "PlasFinRake",      &g_fx.plasFinRake,      ST_F },   // ... and how far it splays
 		{ "PlasEdgeLight",    &g_fx.plasComa,         ST_F },
 		{ "PlasSpark",        &g_fx.plasSpark,        ST_F },
 		{ "PlasSparkLife",    &g_fx.plasSparkLife,    ST_F },
@@ -599,6 +604,14 @@ namespace {
 
 		{ "CopShift",         &g_fx.copShift,         ST_F },   // the most per-vessel
 		                                                        // number in the addon
+		{ "CopReentryOnly",   &g_fx.copReentryOnly,   ST_B },   // ... and WHEN it may act.
+		                                                        // ⚠️ A cfg written before
+		                                                        // 2026-08-15 has no such key,
+		                                                        // so it loads the DEFAULT -
+		                                                        // which is the gate. That is
+		                                                        // deliberate: the shipped
+		                                                        // cfgs are exactly the ones
+		                                                        // that caused the PIO report.
 		// VC shadow box: how big the cabin is, which is a property of the HULL
 		{ "VCShadowRadius",   &g_fx.vcShadowRadius,   ST_F },
 		{ "VCShadowDepth",    &g_fx.vcShadowDepth,    ST_F },   // patch (p): the ambient bite
@@ -816,6 +829,10 @@ bool OroSettings_BodyHasFile(const char* name)
 // rewrites another's numbers. A scope with nothing to write yet (no focus class, no body
 // in range) is skipped silently rather than failing: there is nothing wrong with saving
 // the pilot's settings before you have flown anything.
+// Defined further down, beside the per-group table they walk.
+static void ThrWriteGroups(FILEHANDLE f);
+static void ThrReadGroups(FILEHANDLE f);
+
 bool OroSettings_SaveScope(int mask)
 {
 	bool ok = true;
@@ -855,6 +872,7 @@ bool OroSettings_SaveScope(int mask)
 			oapiWriteLine(fc, K("; whenever a vessel of this class becomes the focus vessel."));
 			oapiWriteLine(fc, K(""));
 			WriteTable(fc, CLASSSET, NCLASSSET);
+			ThrWriteGroups(fc);      // ... and every thruster group's own set
 			oapiCloseFile(fc, FILE_OUT);
 		}
 	}
@@ -908,6 +926,269 @@ void OroSettings_Load()
 	oapiWriteLogV("ORO: global settings loaded (%d of %d items).", n, NSETTINGS);
 }
 
+// ----------------------------------------------------------------------------
+// THE PANEL'S OWN HEIGHT (2026-08-16). The dialog is vertically resizable now, and it has
+// to come back the size you left it or you resize it every single session.
+//
+// ⚠️ ITS OWN FILE, AND THAT IS THE WHOLE POINT. The obvious home is a key in the global
+// table, which would be one line - and it would be wrong. Orbiter's config writer has no
+// notion of updating a single key: oapiOpenFile(FILE_OUT) TRUNCATES, so persisting the
+// height through the global table means rewriting Config\ORO.cfg in full. Dragging the
+// window would then silently commit every slider the user had moved and not saved, which
+// breaks the one promise the panel makes out loud - the readme says in as many words that
+// nothing is permanent until you press SAVE. A window size is chrome, not tuning; it does
+// not belong inside that contract and it does not get to write that file.
+// So: Config\ORO\window.cfg, written on the resize itself, read when the dialog opens.
+// It is also why this pair does NOT live in the SETTINGS table and has no SAVE button.
+// It holds THREE numbers now (the help window joined it 2026-08-16), and because the
+// writer truncates, every save writes all three - so they are kept in file-scope statics
+// that are primed by the first load and updated by whichever window moved.
+static const char* WINDOW_FILE = "ORO\\window.cfg";
+static int s_dlgH = 0, s_helpW = 0, s_helpH = 0;   // 0 = "no saved value, use the default"
+
+static void WindowCfgRead()
+{
+	static bool tried = false;
+	if (tried) return;
+	tried = true;
+	FILEHANDLE f = oapiOpenFile(WINDOW_FILE, FILE_IN_ZEROONFAIL, CONFIG);
+	if (!f) return;                         // never saved: every caller keeps its default
+	int v = 0;
+	if (oapiReadItem_int(f, K("DialogHeight"), v)) s_dlgH  = v;
+	if (oapiReadItem_int(f, K("HelpWidth"),    v)) s_helpW = v;
+	if (oapiReadItem_int(f, K("HelpHeight"),   v)) s_helpH = v;
+	oapiCloseFile(f, FILE_IN_ZEROONFAIL);
+}
+
+static void WindowCfgWrite()
+{
+	CreateDirectoryA("Config\\ORO", NULL);  // harmless if it already exists
+	FILEHANDLE f = oapiOpenFile(WINDOW_FILE, FILE_OUT, CONFIG);
+	if (!f) { oapiWriteLogV("ORO: could not write Config\\%s", WINDOW_FILE); return; }
+	oapiWriteLine(f, K("; ORO - window geometry. Written whenever you finish resizing the"));
+	oapiWriteLine(f, K("; panel or the help window, so each reopens the size you left it."));
+	oapiWriteLine(f, K("; Deliberately NOT in Config\\ORO.cfg: writing that file rewrites every"));
+	oapiWriteLine(f, K("; setting in it, and resizing a window must never commit tuning you"));
+	oapiWriteLine(f, K("; have not saved. Delete this file to get the default sizes back."));
+	oapiWriteLine(f, K("; (Note there is no 'help window was open' flag, on purpose - the help"));
+	oapiWriteLine(f, K(";  window never reopens by itself, only its SIZE is remembered.)"));
+	oapiWriteLine(f, K(""));
+	if (s_dlgH  > 0) oapiWriteItem_int(f, K("DialogHeight"), s_dlgH);
+	if (s_helpW > 0) oapiWriteItem_int(f, K("HelpWidth"),    s_helpW);
+	if (s_helpH > 0) oapiWriteItem_int(f, K("HelpHeight"),   s_helpH);
+	oapiCloseFile(f, FILE_OUT);
+}
+
+int  OroSettings_LoadDlgHeight()       { WindowCfgRead(); return s_dlgH; }
+void OroSettings_SaveDlgHeight(int h)  { if (h > 0) { WindowCfgRead(); s_dlgH = h; WindowCfgWrite(); } }
+
+void OroSettings_LoadHelpSize(int& w, int& h) { WindowCfgRead(); w = s_helpW; h = s_helpH; }
+void OroSettings_SaveHelpSize(int w, int h)
+{
+	if (w <= 0 || h <= 0) return;
+	WindowCfgRead();                        // never write a file we have not read: it would
+	s_helpW = w; s_helpH = h;               // drop the panel height saved in a past session
+	WindowCfgWrite();
+}
+
+// ----------------------------------------------------------------------------
+// PER-THRUSTER-GROUP plumbing (2026-08-16). The rules live above OroThrusterFx in
+// OroState.h; this is the mechanism. The two Sync functions are deliberately dumb
+// field-for-field copies rather than a memcpy of the struct, because the flat fields
+// and the struct are two DIFFERENT types that merely happen to share names - a memcpy
+// would compile today and corrupt state the moment either gains a field.
+// ----------------------------------------------------------------------------
+#define ORO_THR_FIELDS(A, B) \
+	A.shimmerEnabled = B.shimmerEnabled;   A.shimmer = B.shimmer;                 \
+	A.shimmerOfs = B.shimmerOfs;           A.plumeEnabled = B.plumeEnabled;       \
+	A.plume = B.plume;                     A.plumePhysics = B.plumePhysics;       \
+	A.plumeExpHi = B.plumeExpHi;           A.plumeExpLo = B.plumeExpLo;           \
+	A.plumeWidth = B.plumeWidth;           A.plumeLen = B.plumeLen;               \
+	A.plumeCells = B.plumeCells;           A.plumeDiamond = B.plumeDiamond;       \
+	A.plumeSpacing = B.plumeSpacing;       A.plumeBloomWid = B.plumeBloomWid;     \
+	A.plumeBloomBri = B.plumeBloomBri;     A.plumeThroatOfs = B.plumeThroatOfs;   \
+	A.plumeThroat = B.plumeThroat;         A.plumeSootRate = B.plumeSootRate;     \
+	A.plumeSoot = B.plumeSoot;             A.plumeColJet = B.plumeColJet;         \
+	A.plumeColBloom = B.plumeColBloom;     A.plumeBellOn = B.plumeBellOn;         \
+	A.plumeBellGlow = B.plumeBellGlow;     A.plumeBellHeatT = B.plumeBellHeatT;   \
+	A.plumeBellCoolT = B.plumeBellCoolT;   A.bellTint = B.bellTint;               \
+	A.prtEnabled = B.prtEnabled;           A.prtOffset = B.prtOffset;             \
+	A.prtSize = B.prtSize;                 A.prtLifetime = B.prtLifetime;         \
+	A.prtRate = B.prtRate;                 A.prtSpeed = B.prtSpeed;               \
+	A.prtSpread = B.prtSpread;             A.prtGrowth = B.prtGrowth;             \
+	A.prtSlowdown = B.prtSlowdown;         A.prtDiffuse = B.prtDiffuse;           \
+	A.prtAirFade = B.prtAirFade;           A.prtColour = B.prtColour;
+
+// ----------------------------------------------------------------------------
+// THE PER-GROUP CONFIG KEYS. One table, walked four times with a prefix, rather than
+// 152 hand-written entries. Offsets into OroThrusterFx so a field can never be paired
+// with the wrong key by a copy-paste slip.
+//
+// ⚠️ MIGRATION, AND IT IS THE WHOLE REASON THIS IS NOT JUST A RENAME. Every class cfg
+// written before 2026-08-16 carries UNPREFIXED keys (PlumeWidth, PrtRate, ...) from
+// when one set of numbers served the whole ship. Those are read FIRST, by the ordinary
+// flat table, into the edit buffer - and then copied into ALL FOUR GROUPS here before
+// any prefixed key is looked at. So an old file lands every group exactly where the
+// user's existing tuning was, nothing is lost, and nothing looks different until they
+// cycle and change something. A prefixed key, when present, then overrides its group.
+// ----------------------------------------------------------------------------
+struct ThrKey { const char* key; size_t off; int type; };
+static const ThrKey THRSET[] = {
+	{ "ShimmerOn",      offsetof(OroThrusterFx, shimmerEnabled), ST_B },
+	{ "Shimmer",        offsetof(OroThrusterFx, shimmer),        ST_F },
+	{ "ShimmerOfs",     offsetof(OroThrusterFx, shimmerOfs),     ST_F },
+	{ "PlumeOn",        offsetof(OroThrusterFx, plumeEnabled),   ST_B },
+	{ "Plume",          offsetof(OroThrusterFx, plume),          ST_F },
+	{ "PlumePhysics",   offsetof(OroThrusterFx, plumePhysics),   ST_B },
+	{ "PlumeExpHi",     offsetof(OroThrusterFx, plumeExpHi),     ST_F },
+	{ "PlumeExpLo",     offsetof(OroThrusterFx, plumeExpLo),     ST_F },
+	{ "PlumeWidth",     offsetof(OroThrusterFx, plumeWidth),     ST_F },
+	{ "PlumeLen",       offsetof(OroThrusterFx, plumeLen),       ST_F },
+	{ "PlumeCells",     offsetof(OroThrusterFx, plumeCells),     ST_F },
+	{ "PlumeDiamond",   offsetof(OroThrusterFx, plumeDiamond),   ST_F },
+	{ "PlumeSpacing",   offsetof(OroThrusterFx, plumeSpacing),   ST_F },
+	{ "PlumeBloomWid",  offsetof(OroThrusterFx, plumeBloomWid),  ST_F },
+	{ "PlumeBloomBri",  offsetof(OroThrusterFx, plumeBloomBri),  ST_F },
+	{ "PlumeThroatOfs", offsetof(OroThrusterFx, plumeThroatOfs), ST_F },
+	{ "PlumeThroat",    offsetof(OroThrusterFx, plumeThroat),    ST_F },
+	{ "PlumeSootRate",  offsetof(OroThrusterFx, plumeSootRate),  ST_F },
+	{ "PlumeSoot",      offsetof(OroThrusterFx, plumeSoot),      ST_F },
+	{ "PlumeColJet",    offsetof(OroThrusterFx, plumeColJet),    ST_I },
+	{ "PlumeColBloom",  offsetof(OroThrusterFx, plumeColBloom),  ST_I },
+	{ "PlumeBellOn",    offsetof(OroThrusterFx, plumeBellOn),    ST_B },
+	{ "PlumeBellGlow",  offsetof(OroThrusterFx, plumeBellGlow),  ST_F },
+	{ "PlumeBellHeatT", offsetof(OroThrusterFx, plumeBellHeatT), ST_F },
+	{ "PlumeBellCoolT", offsetof(OroThrusterFx, plumeBellCoolT), ST_F },
+	{ "BellTint",       offsetof(OroThrusterFx, bellTint),       ST_I },
+	{ "PrtOn",          offsetof(OroThrusterFx, prtEnabled),     ST_B },
+	{ "PrtOffset",      offsetof(OroThrusterFx, prtOffset),      ST_F },
+	{ "PrtSize",        offsetof(OroThrusterFx, prtSize),        ST_F },
+	{ "PrtLifetime",    offsetof(OroThrusterFx, prtLifetime),    ST_F },
+	{ "PrtRate",        offsetof(OroThrusterFx, prtRate),        ST_F },
+	{ "PrtSpeed",       offsetof(OroThrusterFx, prtSpeed),       ST_F },
+	{ "PrtSpread",      offsetof(OroThrusterFx, prtSpread),      ST_F },
+	{ "PrtGrowth",      offsetof(OroThrusterFx, prtGrowth),      ST_F },
+	{ "PrtSlowdown",    offsetof(OroThrusterFx, prtSlowdown),    ST_F },
+	{ "PrtDiffuse",     offsetof(OroThrusterFx, prtDiffuse),     ST_B },
+	{ "PrtAirFade",     offsetof(OroThrusterFx, prtAirFade),     ST_B },
+	{ "PrtColour",      offsetof(OroThrusterFx, prtColour),      ST_I },
+};
+static const int NTHRSET = (int)(sizeof(THRSET) / sizeof(THRSET[0]));
+
+static void ThrWriteGroups(FILEHANDLE f)
+{
+	char key[96];
+	for (int gi = 0; gi < ORO_THR_N; gi++) {
+		char* base = (char*)&g_fx.thr[gi];
+		oapiWriteLine(f, K(""));
+		sprintf_s(key, "; --- %s engines ---", OroThr_Name(gi));
+		oapiWriteLine(f, key);
+		for (int i = 0; i < NTHRSET; i++) {
+			sprintf_s(key, "%s%s", OroThr_Name(gi), THRSET[i].key);
+			void* p = base + THRSET[i].off;
+			switch (THRSET[i].type) {
+			case ST_F: oapiWriteItem_float(f, K(key), (double)*(float*)p); break;
+			case ST_B: oapiWriteItem_bool (f, K(key), *(bool*)p);          break;
+			case ST_I: oapiWriteItem_int  (f, K(key), (int)*(DWORD*)p);    break;
+			}
+		}
+	}
+}
+
+static void ThrReadGroups(FILEHANDLE f)
+{
+	// STEP 1 - the migration: whatever the flat table just loaded (an old file's
+	// unprefixed keys, or the built-in defaults for a new one) becomes every group's
+	// starting point. See the ⚠️ above.
+	for (int gi = 0; gi < ORO_THR_N; gi++) {
+		const int save = g_fx.thrSel;
+		g_fx.thrSel = gi;
+		OroThr_SyncOut();
+		g_fx.thrSel = save;
+	}
+	// STEP 2 - then a prefixed key, where one exists, overrides its own group.
+	char key[96];
+	for (int gi = 0; gi < ORO_THR_N; gi++) {
+		char* base = (char*)&g_fx.thr[gi];
+		for (int i = 0; i < NTHRSET; i++) {
+			sprintf_s(key, "%s%s", OroThr_Name(gi), THRSET[i].key);
+			void* p = base + THRSET[i].off;
+			switch (THRSET[i].type) {
+			case ST_F: { double d; if (oapiReadItem_float(f, K(key), d)) *(float*)p = (float)d; break; }
+			case ST_B: { bool   b; if (oapiReadItem_bool (f, K(key), b)) *(bool*)p  = b;        break; }
+			case ST_I: { int    v; if (oapiReadItem_int  (f, K(key), v)) *(DWORD*)p = (DWORD)v; break; }
+			}
+		}
+	}
+	OroThr_SyncIn();      // and show the selected group on the sliders
+}
+
+static int ThrClamp(int g) { return (g < 0 || g >= ORO_THR_N) ? ORO_THR_MAIN : g; }
+
+void OroThr_SyncOut()
+{
+	OroThrusterFx& d = g_fx.thr[ThrClamp(g_fx.thrSel)];
+	ORO_THR_FIELDS(d, g_fx)
+}
+
+void OroThr_SyncIn()
+{
+	const OroThrusterFx& s = g_fx.thr[ThrClamp(g_fx.thrSel)];
+	ORO_THR_FIELDS(g_fx, s)
+}
+
+const char* OroThr_Name(int grp)
+{
+	static const char* n[ORO_THR_N] = { "MAIN", "HOVER", "RETRO", "USER" };
+	return n[ThrClamp(grp)];
+}
+
+int OroThr_Count()
+{
+	int n = 0;
+	for (int i = 0; i < ORO_THR_N; i++) if (g_fx.thrAvail & (1 << i)) n++;
+	return n ? n : 1;
+}
+
+void OroThr_Cycle()
+{
+	OroThr_SyncOut();                       // bank what is on the sliders NOW
+	for (int step = 1; step <= ORO_THR_N; step++) {
+		const int cand = (g_fx.thrSel + step) % ORO_THR_N;
+		if (g_fx.thrAvail & (1 << cand)) { g_fx.thrSel = cand; break; }
+	}
+	OroThr_SyncIn();                        // and bring the new group's up
+}
+
+// REVERT - re-read the given scopes from disk, discarding everything moved since the last
+// save (2026-08-15, a beta ask: there was no way back from a bad tuning session but memory
+// or a restart, and the load path had existed all along without a control).
+//
+// ⚠️ IT CANNOT JUST CALL THE LOADERS. Both of them early-return on "already current" - that
+// compare is what makes the per-frame focus/world check free - so from outside they are
+// no-ops for the class and body already loaded, which is precisely the case a revert means.
+// Clearing the cached names first is the whole trick, and it belongs HERE rather than in the
+// dialog because these statics live in this file.
+//
+// The two loaders then disagree about a scope with NO file, and BOTH are right (invariant
+// 17a): an unconfigured hull KEEPS the current numbers, an unconfigured world gets the
+// built-in defaults back. Either way the user lands on what they would have had if they had
+// never touched anything, which is what "revert" means.
+void OroSettings_Revert(int mask)
+{
+	if (mask & ORO_SCOPE_GLOBAL) OroSettings_Load();
+	if (mask & ORO_SCOPE_CLASS) {
+		char cls[64]; strcpy_s(cls, g_setClass);
+		g_setClass[0] = 0;
+		OroSettings_LoadClass(cls);
+	}
+	if (mask & ORO_SCOPE_BODY) {
+		char body[64]; strcpy_s(body, g_setBody);
+		g_setBody[0] = 0;
+		OroSettings_LoadBody(body);
+	}
+}
+
 // Swap in a vessel class's numbers. Called when the focus vessel's class changes.
 // A class with NO file keeps whatever is on the sliders rather than snapping to
 // the built-in defaults: carrying the last look over to an untuned vessel is a
@@ -928,6 +1209,7 @@ void OroSettings_LoadClass(const char* cls)
 		return;
 	}
 	const int n = ReadTable(f, CLASSSET, NCLASSSET);
+	ThrReadGroups(f);            // per group, with the unprefixed-key migration
 	oapiCloseFile(f, FILE_IN);
 	oapiWriteLogV("ORO: vessel class %s - loaded %d of %d settings.", cls, n, NCLASSSET);
 }
@@ -1044,6 +1326,14 @@ bool OroStockExhaustSupported() { return g_stockExSupported; }
 // at start, because the probe is lazy (the atlas is created on the first update).
 static bool g_prtSupported = false;
 bool OroParticleTintOK() { return g_prtSupported; }
+
+// And for the client's POST-PROCESSING (bloom). Not a patch and not a capability - it is
+// a user SETTING, read out of D3D9Client.cfg at session start (see the block in
+// clbkSimulationStart for why it earns its place). Two flags, because "we could not read
+// the file" must not be reported as "your bloom is off".
+static bool g_bloomOn = true, g_bloomKnown = false;
+bool OroBloomOn()    { return g_bloomOn; }
+bool OroBloomKnown() { return g_bloomKnown; }
 
 // ----------------------------------------------------------------------------
 // Module lifecycle
@@ -1205,6 +1495,44 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		              padAdditive ? "available" : "NOT available (plasma will alpha-blend)", specs.gcAPIVer);
 	}
 
+	// --- IS THE CLIENT'S BLOOM ON? ----------------------------------------
+	// ⚠️ THIS IS A DIAGNOSTIC FOR A WHOLE CLASS OF LOOK COMPLAINT, and it exists because
+	// two beta testers produced four of them on 2026-08-15 that we could not tell from a
+	// settings line: reentry "looks pretty sharp", "a little pointy/sharp", and "max. eng
+	// bell colour is yellow? Was expecting a white/red". Both subsystems DELEGATE WHITE TO
+	// THE BLOOM by design - the plasma composites pre-resolve into the fp16 chain
+	// specifically so white EMERGES from HDR accumulation (patch i, invariant 20), and the
+	// bell overdrives its emissive x2.2 past the same threshold (invariant 23g). With
+	// PostProcess=0 both are exactly the colours they were authored, and both read wrong
+	// in exactly the ways reported. Neither log nor screenshot could distinguish that from
+	// a real tuning fault, and the answer cost a round trip through a stranger's video
+	// settings. Now it is one line in every log, and the panel says it.
+	//
+	// Read from the CLIENT's own cfg at the Orbiter ROOT (D3D9Config.cpp does the same),
+	// because there is no gcCore query for it. ZEROONFAIL: a missing file reads 0, which
+	// we treat as UNKNOWN rather than as "off" - a false alarm about someone's settings is
+	// worse than no alarm. Main thread, session start, once.
+	{
+		bloomKnown = false;
+		bloomOn    = true;                          // assume the good case until told otherwise
+		FILEHANDLE fc = oapiOpenFile("D3D9Client.cfg", FILE_IN_ZEROONFAIL, ROOT);
+		if (fc) {
+			int pp = -1;
+			if (oapiReadItem_int(fc, (char*)"PostProcess", pp) && pp >= 0) {
+				bloomKnown = true;
+				bloomOn    = (pp != 0);
+			}
+			oapiCloseFile(fc, FILE_IN_ZEROONFAIL);
+		}
+		g_bloomOn    = bloomOn;                     // dialog-visible mirrors
+		g_bloomKnown = bloomKnown;
+		oapiWriteLogV("ORO: client post-processing (Light glow) %s.",
+		              !bloomKnown ? "UNKNOWN - D3D9Client.cfg unreadable; assuming ON"
+		                          : (bloomOn ? "ON - plasma and bell reach white through the bloom"
+		                                     : "OFF - plasma will read hard-edged and the bell will read amber; "
+		                                       "turn PostProcess on in Video / Advanced for the intended look"));
+	}
+
 	// Register our full-frame draw callback ONCE. RENDERPROC_HUD_2ND fires after the
 	// HUD every frame with a Sketchpad bound to the backbuffer. The RenderProcs list
 	// persists across sessions (clbkCloseSession does not clear it), so registering
@@ -1343,9 +1671,13 @@ void OroModule::clbkSimulationEnd()
 	// Audio: stop our sounds and drop the XRSound proxy (recreated next session start).
 	if (pXRSound) {
 		pXRSound->StopWav(SND_HEARTBEAT);
-		for (int i = 0; i < NSCEN; i++) pXRSound->StopWav(SND_SCEN_BASE + i);
+		for (int i = 0; i < NSCEN; i++) {
+			pXRSound->SetPaused(SND_SCEN_BASE + i, false);   // never leave a voice parked paused
+			pXRSound->StopWav(SND_SCEN_BASE + i);
+		}
 		delete pXRSound; pXRSound = nullptr;
 	}
+	seqSoundPlaying = false;
 
 	// Reentry plasma: give every borrowed LightEmitter back before the session tears down.
 	// ReentryFreeSlot validates each handle with oapiIsVessel first, so this is safe even
@@ -1516,13 +1848,24 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 		focusPrimed = true;
 	}
 
+	// The FALLBACK projection camera, for a client without patch (k). The aurora, the
+	// lightning and the plasma are all projected in the render path now (2026-08-15) and
+	// prefer the render camera; this is what they fall back to, and it is exactly the
+	// pre-2026-08-15 behaviour - one step stale, and frozen while paused.
+	SnapPreStepCam();
+
 	// Compute the view gate on the MAIN thread (here), where oapi camera/cockpit queries
 	// are safe, and cache it for the render callback to read. Effects apply only in an
 	// internal panel/VC view - NOT the generic glass cockpit (which stays the natural
 	// kill: F8 to it clears the effect). NOTE: clbkPreStep is not called while paused, so
 	// a view change made while paused won't update the gate until the sim resumes.
+	// The VC-ONLY option narrows it further, to the virtual cockpit alone (see g_fx.fxVCOnly).
+	// Note the two toggles pull opposite ways on purpose: reentryVC WIDENS the plasma's domain
+	// into the VC, fxVCOnly NARROWS the physiology's out of the 2D panel. Both exist because
+	// the VC is the one internal view with real geometry to be part of.
 	viewGate = oapiCameraInternal()
-	        && (oapiCockpitMode() != COCKPIT_GENERIC);
+	        && (oapiCockpitMode() != COCKPIT_GENERIC)
+	        && (!g_fx.fxVCOnly || oapiCockpitMode() == COCKPIT_VIRTUAL);
 
 	// The EXTERNAL-view gate - the exhaust shimmer's domain, and the exact inverse of
 	// viewGate. The shimmer is a WORLD effect (hot air bending light), not a physiological
@@ -1559,9 +1902,15 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 		// Scenario sound: stop the previous clip, start the new one's (if the section's
 		// Sound toggle is on). Each scenario's wav loads under SND_SCEN_BASE + its index.
 		if (pXRSound && pXRSound->IsPresent()) {
-			if (prev >= 0 && prev < NSCEN) pXRSound->StopWav(SND_SCEN_BASE + prev);
+			if (prev >= 0 && prev < NSCEN) {
+				// Clear any PAUSE we left on it (see the toggle edge below) before stopping,
+				// so the next PlayWav on this id does not start into a paused mixer voice.
+				pXRSound->SetPaused(SND_SCEN_BASE + prev, false);
+				pXRSound->StopWav(SND_SCEN_BASE + prev);
+			}
+			seqSoundPlaying = false;
 			if (g_fx.seqActive >= 0 && g_fx.seqSoundEnabled)
-				pXRSound->PlayWav(SND_SCEN_BASE + g_fx.seqActive, false, 1.0f);
+				seqSoundPlaying = pXRSound->PlayWav(SND_SCEN_BASE + g_fx.seqActive, false, 1.0f);
 		}
 		if (g_fx.seqActive >= 0) {
 			// Force the driven effects enabled so the scenario always shows in full.
@@ -1596,7 +1945,11 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 				seqT = sc.dur;
 			} else {
 				// RECOVER: arc complete - back to normal. Release the scenario + its sound.
-				if (pXRSound && pXRSound->IsPresent()) pXRSound->StopWav(SND_SCEN_BASE + g_fx.seqActive);
+				if (pXRSound && pXRSound->IsPresent()) {
+					pXRSound->SetPaused(SND_SCEN_BASE + g_fx.seqActive, false);
+					pXRSound->StopWav(SND_SCEN_BASE + g_fx.seqActive);
+				}
+				seqSoundPlaying = false;
 				g_fx.seqActive = -1;
 				g_fx.blackout = g_fx.redout = g_fx.tunnel = g_fx.spots = g_fx.greyout =
 				g_fx.blur = g_fx.heartbeat = g_fx.aberration = g_fx.sparkles = g_fx.swim = g_fx.tilt = 0.0f;
@@ -1604,11 +1957,28 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 		}
 	}
 
-	// Sound toggle edge: turning the section's Sound OFF mid-scenario silences the clip now
-	// (turning it back on won't restart a clip mid-way - it applies to the next scenario).
-	if (pXRSound && pXRSound->IsPresent() && g_fx.seqActive >= 0
-	    && seqSoundWasOn && !g_fx.seqSoundEnabled)
-		pXRSound->StopWav(SND_SCEN_BASE + g_fx.seqActive);
+	// Sound toggle edge, mid-scenario. It USED to be a one-way street: the mute stopped the
+	// clip and turning the switch back on did nothing until the next scenario, which a beta
+	// tester reported and which invariant 8's "also mutes mid-run" quietly over-claimed.
+	// The fix is to stop STOPPING it. XRSound has SetPaused/SetPlayPosition, so a mute can
+	// PAUSE the voice and un-muting resumes exactly where the visuals are - a Stop+Play would
+	// restart the narration from the top, describing a G-event that is halfway over.
+	// The one case with nothing to resume is a scenario that STARTED silent; there the clip
+	// is begun now and SEEKED to the timeline, which lands in the same place.
+	if (pXRSound && pXRSound->IsPresent() && g_fx.seqSoundEnabled != seqSoundWasOn
+	    && g_fx.seqActive >= 0 && g_fx.seqActive < NSCEN) {
+		const int id = SND_SCEN_BASE + g_fx.seqActive;
+		if (!g_fx.seqSoundEnabled) {
+			if (seqSoundPlaying) pXRSound->SetPaused(id, true);
+		} else if (seqSoundPlaying) {
+			pXRSound->SetPaused(id, false);
+		} else if (pXRSound->PlayWav(id, false, 1.0f)) {
+			// seqT is REAL seconds into the scenario and each wav is authored to the
+			// scenario's own duration (invariant 8), so the timeline IS the clip position.
+			pXRSound->SetPlayPosition(id, (unsigned int)(seqT * 1000.0));
+			seqSoundPlaying = true;
+		}
+	}
 	seqSoundWasOn = g_fx.seqSoundEnabled;
 
 	// --- FELT-G PHYSICS ---------------------------------------------------
@@ -1631,19 +2001,50 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	// Premium capture textures: created/resized here (an oapi resource op, main-thread
 	// only) so the render callback can just copy the backbuffer into them. Maintained
 	// only while a frame-resample effect (grey-out or blur) is actually calling for one.
+	// --- PER-THRUSTER-GROUP: which groups exist, and bank the sliders -------
+	// THE ONLY SYNC POINT (see the note above OroThrusterFx). Everything the dialog has
+	// been editing lands in thr[thrSel] here, and from this line on every consumer reads
+	// thr[] by the group it is drawing. It MUST precede BuildPlumeModel.
+	//
+	// thrAvail is recomputed every step because it is a fact about the CURRENT vessel -
+	// docking, undocking or a focus change can add or remove groups under us. If the
+	// selected group vanishes (you tuned HOVER, then switched to a ship without hovers)
+	// the selection falls back to the first group that does exist rather than editing a
+	// group nothing can show.
+	{
+		VESSEL* tv = NULL;
+		OBJHANDLE th = oapiCameraTarget();
+		if (!th || oapiGetObjectType(th) != OBJTP_VESSEL) th = oapiGetFocusObject();
+		if (th && oapiGetObjectType(th) == OBJTP_VESSEL) tv = oapiGetVesselInterface(th);
+		int avail = 0;
+		if (tv) {
+			if (tv->GetGroupThrusterCount(THGROUP_MAIN)  > 0) avail |= 1 << ORO_THR_MAIN;
+			if (tv->GetGroupThrusterCount(THGROUP_HOVER) > 0) avail |= 1 << ORO_THR_HOVER;
+			if (tv->GetGroupThrusterCount(THGROUP_RETRO) > 0) avail |= 1 << ORO_THR_RETRO;
+			if (OroThrusterHasUser(tv))                       avail |= 1 << ORO_THR_USER;
+		}
+		if (!avail) avail = 1 << ORO_THR_MAIN;   // never leave the cycler with nothing
+		g_fx.thrAvail = avail;
+		OroThr_SyncOut();
+		if (!(avail & (1 << g_fx.thrSel))) {
+			for (int i = 0; i < ORO_THR_N; i++)
+				if (avail & (1 << i)) { g_fx.thrSel = i; break; }
+			OroThr_SyncIn();
+		}
+	}
+
 	// THE PLUME MODEL: regime, strongest-6 selection and the four physics curves,
 	// built ONCE for every consumer below (OroPlume.cpp). The LAB|PHYSICS switch
 	// acts inside it; both modes are anchored identical at sea level, full throttle.
+	// The strongest-6 pool stays SHARED across groups (his call): the six brightest
+	// plumes on the ship get drawn whichever group they came from, and a group whose
+	// plume pill is off now frees its slots instead of holding them.
 	BuildPlumeModel();
 
-	// Exhaust shimmer: CONSUMER 2 - shapes its heat-haze capsules from the model
-	// (merged 2026-08-09, his call), projects them to screen space here (main
-	// thread - the render callback makes no oapi calls). Self-gates on extGate/
-	// armed/enabled/strength/air and leaves plumeCount = 0 when there is nothing.
-	UpdateShimmerPlumes();
-
-	// PLUME EXPANSION: CONSUMER 1 - the jet geometry from the same model.
-	UpdatePlumeFx();
+	// (CONSUMER 2, the exhaust shimmer's screen-space capsules, and CONSUMER 1, the plume
+	//  jet geometry, both MOVED TO THE RENDER PATH on 2026-08-15 - see ProjCam. Both are
+	//  screen-space and clbkPreStep does not run while paused. The MODEL above stays here:
+	//  it is physics, it needs oapi, and it is the same for any camera.)
 
 	// EXHAUST PARTICLES: CONSUMER 3 - the DETACHED half (OroParticles.cpp). Ages
 	// and spawns here on SIM time (smoke is a physical object); the projection runs
@@ -2011,10 +2412,14 @@ void OroModule::ReleaseCameraShake()
 void OroModule::UpdateCopShift()
 {
 	g_fx.copMoment = 0.0f;
+	g_fx.copMach   = 0.0f;
+	g_fx.copGated  = false;
 	const double d = (double)g_fx.copShift;
 	if (!g_fx.masterArmed || fabs(d) < 0.001) return;   // 0 = the vessel exactly as coded
 	VESSEL* v = oapiGetFocusInterface();
 	if (!v) return;
+
+	g_fx.copMach = (float)v->GetMachNumber();
 
 	// The vertical aero force in VESSEL coordinates. GetLiftVector is documented as
 	// perpendicular to the relative wind with zero x-component (side force is a
@@ -2024,8 +2429,27 @@ void OroModule::UpdateCopShift()
 	VECTOR3 L = _V(0, 0, 0), D = _V(0, 0, 0);
 	v->GetLiftVector(L);
 	v->GetDragVector(D);
-	const double Fy = L.y + D.y;                        // [N]
+	double Fy = L.y + D.y;                              // [N]
 	if (fabs(Fy) < 1.0) return;                         // vacuum / no lift - nothing to shift
+
+	// --- THE REGIME GATE (2026-08-15) -------------------------------------
+	// See g_fx.copReentryOnly. Deliberately AFTER the no-air return, so a parked or
+	// orbiting ship still reads "+0.0 kNm" rather than "gated" - "gated" must mean the
+	// gate is holding back a couple that would otherwise be applied, or it is just noise.
+	// The couple ramps in across a band rather than switching, so decelerating out of the
+	// regime hands the airframe's own stability back gradually instead of dropping the
+	// nose at a threshold - the complaint Ctrl+G mid-entry already earns, and there is no
+	// reason to build a second one in.
+	if (g_fx.copReentryOnly) {
+		const double lo = 3.0, hi = 5.0;                // fully off below lo, full above hi
+		double authority = ((double)g_fx.copMach - lo) / (hi - lo);
+		if (authority <= 0.0) { g_fx.copGated = true; return; }
+		if (authority > 1.0) authority = 1.0;
+		else                 g_fx.copGated = true;      // partial: say so in the readout
+		authority = authority * authority * (3.0 - 2.0 * authority);   // smoothstep
+		Fy *= authority;
+		if (fabs(Fy) < 1.0) return;
+	}
 
 	// (0,0,d) x (0,Fy,0) = (-d*Fy, 0, 0). Mx>0 is nose-DOWN, so d>0 (CoP forward)
 	// with positive lift is nose-UP: the knob reads the way it flies.
@@ -2075,9 +2499,14 @@ void OroModule::UpdateCameraShake()
 	// (1) Seat-push: the eyepoint shifts OPPOSITE the felt accel (main -> back into the
 	// seat, hover -> down, retro/reentry-decel -> forward). Clamped, so even monster
 	// thrusters give a firm-but-bounded shove.
-	VECTOR3 push = feltAcc * (-SHAKE_PUSH_K);
-	const double pl = length(push);
-	if (pl > SHAKE_PUSH_MAX) push = push * (SHAKE_PUSH_MAX / pl);
+	// The gain scales the CLAMP as well as the slope, so turning it up genuinely raises the
+	// ceiling rather than just reaching it sooner - the clamp is there to bound a monster
+	// thruster, not to bound the user's taste. 1.0 is the pre-2026-08-15 behaviour exactly.
+	const double pushK = (double)(g_fx.shakePush < 0.0f ? 0.0f : (g_fx.shakePush > 2.0f ? 2.0f : g_fx.shakePush));
+	VECTOR3 push = feltAcc * (-SHAKE_PUSH_K * pushK);
+	const double pl   = length(push);
+	const double pmax = SHAKE_PUSH_MAX * pushK;
+	if (pmax > 0.0 && pl > pmax) push = push * (pmax / pl);
 
 	// (2) Buffet intensity: engine roughness (amplified rolling on the ground) + aero
 	// buffet (dynamic pressure) + runway rumble; max'd with the manual test slider.
@@ -2137,10 +2566,21 @@ namespace {
 void OroModule::UpdateShimmerPlumes()
 {
 	plumeCount = 0;
+	plmShimStr = 0.0f;
 	if (!extGate || !g_fx.masterArmed) return;                    // EXTERNAL view only
-	if (!g_fx.shimmerEnabled || g_fx.shimmer <= 0.001f) return;
 	if (viewW == 0 || viewH == 0) return;
 	if (plmModelN <= 0) return;                                   // nothing burning
+	// ⚠️ THE STRENGTH IS ONE SHADER UNIFORM, so it cannot be per plume however much the
+	// rest of this is (2026-08-16). PSShimmer warps the WHOLE FRAME by fShimmer and the
+	// capsules only say WHERE - so the honest resolution is the strongest CONTRIBUTING
+	// group, accumulated in the loop below. The enable and the offset ARE per group,
+	// because those act per capsule and cost nothing.
+	{
+		bool anyOn = false;
+		for (int gi = 0; gi < ORO_THR_N; gi++)
+			if (g_fx.thr[gi].shimmerEnabled && g_fx.thr[gi].shimmer > 0.001f) anyOn = true;
+		if (!anyOn) return;
+	}
 
 	// CONSUMER 2 OF THE PLUME MODEL (2026-08-09, his call: "bring in the shimmer
 	// into the physics"). The exhaust scan, the strongest-6 selection and the
@@ -2155,9 +2595,11 @@ void OroModule::UpdateShimmerPlumes()
 	if (rho < 1.0e-4) return;
 	const float atmW = (float)(rho > 0.02 ? 1.0 : rho / 0.02);
 
-	VECTOR3 cpos; oapiCameraGlobalPos(&cpos);
-	MATRIX3 Rcam; oapiCameraRotationMatrix(&Rcam);
-	const double tanAp  = tan(oapiCameraAperture());
+	// THE RENDER CAMERA (2026-08-15). This runs in the render path now: the capsules are
+	// SCREEN-SPACE, so under pause they used to keep warping wherever the plumes were when
+	// the sim stopped. Everything else it needs comes from the plume model (consumer 2).
+	VECTOR3 cpos; MATRIX3 Rcam; double tanAp;
+	if (!FillProjCam(cpos, Rcam, tanAp)) return;
 	const double aspect = (double)viewW / (double)viewH;
 
 	for (int p = 0; p < plmModelN && plumeCount < MAX_PLUMES; p++) {
@@ -2165,7 +2607,15 @@ void OroModule::UpdateShimmerPlumes()
 
 		// Capsule from the model: root at the nozzle plus the Offset knob along
 		// the flow axis; tip at the model's jet length.
-		VECTOR3 groot = e.rootG + e.dirG * g_fx.shimmerOfs;
+		// ⚠️ RENDER-EPOCH ANCHOR (invariant 21a) - the same correction the jet applies.
+		// The haze is diffuse enough to hide a 500 m offset far better than the jet does,
+		// which is precisely why it would have gone unnoticed.
+		const OroThrusterFx& T = g_fx.thr[(e.grp >= 0 && e.grp < ORO_THR_N) ? e.grp : 0];
+		if (!T.shimmerEnabled || T.shimmer <= 0.001f) continue;   // this group hazes nothing
+		if (T.shimmer > plmShimStr) plmShimStr = T.shimmer;       // strongest contributor
+
+		const VECTOR3 rootR = e.rootG + RenderEpochShift(e.hOwn, e.ownCg);
+		VECTOR3 groot = rootR + e.dirG * T.shimmerOfs;
 		VECTOR3 gtip  = groot + e.dirG * e.L;
 
 		// HULL OCCLUSION (geometric - see the old scan's comment, preserved in
@@ -2238,6 +2688,50 @@ void OroModule::UpdateShimmerPlumes()
 // ----------------------------------------------------------------------------
 
 // ----------------------------------------------------------------------------
+// THE PROJECTION CAMERA (2026-08-15, the pause fix). See the comment block on
+// ProjCam in OroModule.h for why this exists at all.
+//
+// SnapPreStepCam runs on the main thread and is the FALLBACK only. FillProjCam runs
+// in the RENDER PATH and prefers patch (k)'s render camera, which is the camera the
+// frame is actually being drawn with - and, while the sim is PAUSED, the only camera
+// that is still changing at all.
+//
+// INVARIANT-1 AUDIT for FillProjCam: no oapi calls. gcCore::GetRenderCam is a client
+// call, the same class as CopyResource / GetBackBufferHandle, both of which have run
+// mid-render since patch (b).
+// ----------------------------------------------------------------------------
+void OroModule::SnapPreStepCam()
+{
+	oapiCameraGlobalPos(&preStepCam.pos);
+	oapiCameraRotationMatrix(&preStepCam.rot);
+	preStepCam.tanAp = tan(oapiCameraAperture());
+	preStepCamValid  = true;
+}
+
+bool OroModule::FillProjCam(VECTOR3& pos, MATRIX3& rot, double& tanAp)
+{
+	if (pCore && pCore->CanGetRenderCam() && pCore->GetRenderCam(&pos, &rot, &tanAp))
+		return true;
+	if (preStepCamValid) {
+		pos = preStepCam.pos; rot = preStepCam.rot; tanAp = preStepCam.tanAp;
+		return true;
+	}
+	return false;   // before the first pre-step: nothing to project against
+}
+
+// The anchor half. See the comment on the declaration - a render camera paired with a
+// pre-step anchor is off by one step of the BODY's barycentric motion, ~500 m for Earth
+// at 60 fps, and it jitters with frame pacing rather than sitting still.
+VECTOR3 OroModule::RenderEpochShift(OBJHANDLE h, const VECTOR3& bodyCentrePreStep)
+{
+	if (h && pCore && pCore->CanGetRenderObjPos()) {
+		VECTOR3 rp;
+		if (pCore->GetRenderObjPos(h, &rp)) return rp - bodyCentrePreStep;
+	}
+	return _V(0, 0, 0);
+}
+
+// ----------------------------------------------------------------------------
 // Pre-resolve pass (client patch i) - the reentry plasma's compositing point since
 // the Firefly rework (2026-08-08). Fires after the COMPLETE scene (terrain, vessels,
 // transparency, VC) and before the client's light-blur resolve + tonemap + HUD:
@@ -2290,9 +2784,13 @@ void OroModule::DrawPreResolve(oapi::Sketchpad* pSkp)
 	// G11's shelved recipe as written - "before the additive one".
 	// External only (invariant 10): UpdateVapour self-gates, so vapActive is false in any
 	// internal view and this costs a branch.
-	if (extGate && vapActive) DrawVapourPoly(pSkp);
+	if (extGate) {
+		BuildVapourGeometry();     // render-path since 2026-08-15 (the pause fix)
+		if (vapActive) DrawVapourPoly(pSkp);
+	}
 	if (extGate || vcGate) {
 		ProjectTrail();
+		BuildPlasmaGeometry();     // render-path since 2026-08-15 (the pause fix)
 		DrawTrailPoly(pSkp, /*depthClip=*/true);
 		DrawPlasmaPoly(pSkp, /*depthClip=*/true);
 	}
@@ -2301,7 +2799,10 @@ void OroModule::DrawPreResolve(oapi::Sketchpad* pSkp)
 	// fp16 chain accumulates them past 1.0 and the client's threshold bloom whitens
 	// them (the Firefly law) - and the shimmer's resample runs later in DrawOverlay,
 	// so the diamonds ripple through their own heat haze, which is physically right.
-	if (extGate) DrawPlumePoly(pSkp, /*depthClip=*/true);
+	if (extGate) {
+		UpdatePlumeFx();     // render-path since 2026-08-15 (the pause fix)
+		DrawPlumePoly(pSkp, /*depthClip=*/true);
+	}
 }
 
 void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
@@ -2340,8 +2841,12 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		// the eye has just decided the brightness of, so they must follow the eclipse
 		// rather than precede it (a shaft does not dim because you are adapting - it is
 		// part of what you are adapting TO).
+		BuildGodRayScreen();   // render-path since 2026-08-15 (the pause fix)
 		DrawGodRayPass();
 
+		// CONSUMER 2 of the plume model - the heat-haze capsules, projected HERE since
+		// 2026-08-15 so a paused pan does not leave the warp behind (see ProjCam).
+		UpdateShimmerPlumes();
 		if (ipiReady && pCore && hFrameTex && pIPIShimmer && plumeCount > 0) {
 			SURFHANDLE hBB = pCore->GetBackBufferHandle();
 			if (hBB && pCore->CopyResource(hFrameTex, hBB)) {
@@ -2355,7 +2860,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 				}
 				pIPIShimmer->SetTexture("tSrc", hFrameTex, IPF_CLAMP_U | IPF_CLAMP_V | IPF_LINEAR);
 				pIPIShimmer->SetOutput(0, hBB);
-				pIPIShimmer->SetFloat("fShimmer", g_fx.shimmer);
+				pIPIShimmer->SetFloat("fShimmer", plmShimStr);   // strongest contributing group
 				pIPIShimmer->SetFloat("fAspect", (float)viewW / (float)viewH);
 				pIPIShimmer->SetFloat("fTime", animT);       // real-time clock, streams the ripple
 				pIPIShimmer->SetFloat("vPlume",  axes, sizeof(axes));
@@ -2379,6 +2884,8 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		// in DrawPreResolve (pre-bloom, pre-HUD) and preResolveLive skips this call.
 		if (!preResolveLive) {
 			ProjectTrail();
+			BuildPlasmaGeometry();     // render-path since 2026-08-15 (the pause fix)
+			UpdatePlumeFx();           //   "
 			DrawTrailPoly(pSkp, /*depthClip=*/true);
 			DrawPlasmaPoly(pSkp, /*depthClip=*/true);
 			DrawPlumePoly(pSkp, /*depthClip=*/true);   // plume expansion rides the same
@@ -2391,12 +2898,16 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		// LAST here (the proven external Sketchpad slot, where the plasma sits): after the
 		// eclipse/shimmer resamples, so it is not eye-adapted externally, which is fine -
 		// it is a light source. Both are additive, so their order relative to each other
-		// does not matter. Built + projected in clbkPreStep (UpdateAurora).
+		// does not matter. BUILT HERE since 2026-08-15 (was clbkPreStep): that callback
+		// does not run while PAUSED, so the curtains used to stay projected for whatever
+		// camera existed when the sim stopped and appeared to follow the ship.
+		BuildAuroraGeometry();
 		if (aurActive) DrawAuroraPoly(pSkp);
 
 		// LIGHTNING - flash discs in the cloud deck, additive like the aurora and
 		// drawn beside it for the same reasons (order between additive layers is
 		// cosmetic; both are light sources the eclipse's eye need not protect).
+		BuildLightningGeometry();
 		if (ltgActive) DrawLightningPoly(pSkp);
 		return;   // nothing physiological outside the cockpit
 	}
@@ -2419,6 +2930,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 	// patch-(i) client draws the VC plasma in DrawPreResolve instead.
 	if (vcGate && !preResolveLive) {
 		ProjectTrail();
+		BuildPlasmaGeometry();     // render-path since 2026-08-15 (the pause fix)
 		DrawTrailPoly(pSkp, /*depthClip=*/true);
 		DrawPlasmaPoly(pSkp, /*depthClip=*/true);
 	}
@@ -2429,6 +2941,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 	// BEFORE the resample stack like the VC plasma, so blur/grey-out/eclipse treat them as
 	// sky. Gated on depthClipOK: without real depth this would paint the cabin, so it stays
 	// external (UpdateAurora built nothing for an internal view in that case anyway).
+	BuildAuroraGeometry();
 	if (aurActive && depthClipOK) DrawAuroraPoly(pSkp);
 
 	// --- LIGHTNING through the cockpit windows (patch g) ------------------
@@ -2436,6 +2949,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 	// sit behind the frame and glass; without it UpdateLightning built nothing for
 	// an internal view. No cabin illumination in v1 - this is only the world,
 	// visible out the window.
+	BuildLightningGeometry();
 	if (ltgActive && depthClipOK) DrawLightningPoly(pSkp);
 
 	// --- Premium frame RESAMPLE stack (IPI/HLSL) --------------------------
@@ -2457,6 +2971,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		// GOD RAYS - world light too, and they come through the window like anything
 		// else out there, so the physiological stack below treats them as scenery. After
 		// the eclipse for the reason given at the external call site.
+		BuildGodRayScreen();   // render-path since 2026-08-15 (the pause fix)
 		DrawGodRayPass();
 
 		// PERIPHERAL SWIM - a woozy periphery-weighted UV warp. First in the stack, so

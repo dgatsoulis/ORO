@@ -309,6 +309,26 @@ namespace {
 
 	inline float clampf(float x, float a, float b) { return x < a ? a : (x > b ? b : x); }
 
+	// ------------------------------------------------------------------------
+	// THE PLASMA SNAPSHOT (2026-08-15, the pause fix). The four vessel-derived values
+	// BuildPlasmaGeometry needs - and the only reason it ever held a VESSEL*. Gathered
+	// on the main thread in UpdateReentry; the geometry is built in the RENDER PATH,
+	// because clbkPreStep does not run while PAUSED and the plasma would otherwise stay
+	// projected for a camera that no longer exists. See ProjCam in OroModule.h.
+	// ------------------------------------------------------------------------
+	struct PlasSnap {
+		int       slot;        // index into rentry[]
+		OBJHANDLE hV;          // for the render-epoch anchor (patch k2)
+		VECTOR3   flowLocal;   // relative wind, vessel frame
+		VECTOR3   Cg;          // vessel centre, global (pre-step; k2 overrides in the build)
+		VECTOR3   flowG;       // relative wind, global
+		double    size;        // hull size, floored at 1 m
+		MATRIX3   Rv;          // vessel rotation (pre-step - gcCore exposes no render-epoch
+		                       //   rotation; exactly zero error while paused)
+	};
+	PlasSnap s_plas;
+	bool     s_plasValid = false;
+
 	// Cheap deterministic hash -> 0..1 (per-ribbon / per-blob variation).
 	inline float hashf(float s)
 	{
@@ -439,6 +459,31 @@ namespace {
 	const float PAL_HUE_BODY   =  15.0f;
 	const float PAL_HUE_FRINGE = 313.0f;
 
+}  // namespace (re-opened below)
+
+// The two above, exported for every other ORO ramp that grows a colour pick - the bell
+// glow is the first (2026-08-15). ONE copy of 15b's law, so the "never scale the angle"
+// rule cannot be re-litigated in a second file. See the declarations in OroModule.h.
+float OroHueRotFromPick(DWORD col, float refHue) { return HueRotFromPick(col, refHue); }
+
+void OroHueRotate(float& r, float& g, float& b, float deg)
+{
+	if (deg == 0.0f) return;                 // identity pick: touch nothing at all
+	// HSV is defined on 0..1, and the bell's ramp deliberately runs past it (BELL_EMIS_GAIN
+	// pushes the emissive over the bloom threshold - that overdrive IS the incandescence).
+	// So normalise by the peak, rotate, and put the scale back: the rotation moves the HUE
+	// and leaves the brightness the caller chose exactly where it was.
+	const float mx = (r > g ? (r > b ? r : b) : (g > b ? g : b));
+	if (mx <= 1e-6f) return;                 // black has no hue to rotate
+	const float k = (mx > 1.0f) ? mx : 1.0f;
+	float h, s, v;
+	RgbToHsv(r / k, g / k, b / k, h, s, v);
+	HsvToRgb(h + deg, s, v, r, g, b);
+	r *= k; g *= k; b *= k;
+}
+
+namespace {
+
 	// The plasma colour ramp: white-hot -> orange -> violet. The KSP-reference family -
 	// it stays WARM through the whole middle and only the thin fading tails go violet.
 	// (An earlier light went blue-white at high heat and the ship turned grey at peak -
@@ -544,6 +589,12 @@ void OroModule::ReentryFreeSlot(int i, bool live)
 	if (i < 0 || i >= MAX_RENTRY) return;
 	ReentryVessel& e = rentry[i];
 
+	// This slot is going away, so the render path must stop rebuilding geometry from it.
+	// Slots are reused, so a stale index would eventually point at a DIFFERENT vessel -
+	// and while paused nothing would ever correct it. (Slot ADDRESSES are load-bearing
+	// per invariant 14; this is the same discipline applied to the snapshot that names one.)
+	if (s_plasValid && s_plas.slot == i) { s_plasValid = false; plasVtxN = 0; }
+
 	// oapiIsVessel is the real guard - `live` is only a caller's extra veto. At session
 	// teardown vessels are being destroyed around us, and calling into one that has already
 	// gone is a use-after-free; leaking on a vessel that is about to die costs nothing.
@@ -590,6 +641,7 @@ void OroModule::ReleaseReentry()
 	g_fx.reentryHeat = 0.0f;
 	plasmaGlow       = 0.0f;
 	plasVtxN         = 0;      // nothing for the render proc to draw
+	s_plasValid      = false;  // and nothing for it to REBUILD - see below
 	// The trail pool DOES clear here, unlike on a slot death: this is the disarm /
 	// pill-off / sim-end path, where every effect vanishes at once (Ctrl+G law), and
 	// at sim end it also stops stale GLOBAL positions leaking ghost particles into
@@ -600,8 +652,14 @@ void OroModule::ReleaseReentry()
 
 // A vessel is about to be destroyed. Its handle is valid for the length of this call and
 // no longer, so everything we borrowed from it MUST go now.
+// ⚠️ THAT NOW INCLUDES THE PLASMA SNAPSHOT. Since 2026-08-15 the geometry is rebuilt in
+// the RENDER PATH from s_plas, which caches the vessel's OBJHANDLE for patch (k2)'s
+// anchor lookup - and the render path keeps running after this returns, including while
+// PAUSED, when no pre-step will ever come along to refresh it. A file-static that
+// outlives what its handle points at is exactly invariant 23(m), and it cost a session.
 void OroModule::ReentryForget(OBJHANDLE h)
 {
+	if (s_plasValid && s_plas.hV == h) { s_plasValid = false; plasVtxN = 0; }
 	const int i = ReentryFindSlot(h);
 	if (i >= 0) ReentryFreeSlot(i, true);
 }
@@ -717,7 +775,11 @@ void OroModule::UpdateReentry()
 	OBJHANDLE hCam   = oapiCameraTarget();
 	float camHeat = 0.0f;
 	plasmaGlow = 0.0f;
-	plasVtxN   = 0;                          // rebuilt below for the camera-target vessel
+	// The geometry is REBUILT IN THE RENDER PATH now; clearing the snapshot here is what
+	// makes a frame with no hot camera-target vessel draw nothing. BuildPlasmaGeometry
+	// resets plasVtxN itself, so it is not cleared here any more - if it were, a paused
+	// frame would blank the plasma the moment the last pre-step ran.
+	s_plasValid = false;
 	const double simdt = oapiGetSimStep();   // SIM time: wake blobs are physical objects
 
 	// (rounds 3-4: NOTHING trail-related happens in pre-step any more. State moved
@@ -810,7 +872,19 @@ void OroModule::UpdateReentry()
 		if (e.hV == hCam && (extGate || vcGate)) {   // 3.5: geometry now also serves the VC
 			if (!e.hullSampled) SampleHull(i, v);
 			if (!e.shellBuilt) BuildShell(i, v);     // fallback trigger (round 4)
-			BuildPlasmaGeometry(i, v, flow);
+			// THE FOUR VESSEL VALUES the build needs, and the only reason it ever had to
+			// hold a VESSEL*. Snapshot them here; the geometry itself is built in the
+			// RENDER PATH now (2026-08-15), because clbkPreStep does not run while PAUSED
+			// and the plasma used to stay projected for a camera that no longer existed -
+			// which is what "the plasma doesn't zoom with the vessel" was.
+			s_plas.slot = i;
+			s_plas.hV   = e.hV;
+			s_plas.flowLocal = flow;
+			v->GetGlobalPos(s_plas.Cg);
+			v->GlobalRot(flow, s_plas.flowG);
+			s_plas.size = v->GetSize() > 1.0 ? v->GetSize() : 1.0;
+			v->GetRotationMatrix(s_plas.Rv);
+			s_plasValid = true;
 		}
 
 		// COCKPIT GLOW (focus vessel only) - screen-space, computed here because the render
@@ -833,18 +907,7 @@ void OroModule::UpdateReentry()
 		}
 	}
 
-	// Zero-pad the vertex buffer's unused tail (alpha 0, degenerate at origin).
-	// The render proc hands the client the FULL buffer every frame: the client's
-	// D3D9Triangle::Update Locks with D3DLOCK_DISCARD (fresh UNINITIALIZED memory
-	// each lock) and its Draw always draws the CREATION count - an unwritten tail
-	// is random VRAM drawn as random flashing triangles (the "green flashes",
-	// 2026-08-01). Invariant 3's dark-spots rule, enforced for the plasma.
-	// plasDepth is padded with it: the depth array is handed over at the same full count,
-	// and a tail of uninitialised distances would clip live triangles unpredictably.
-	if (plasVtxN > 0 && plasVtxN < PLAS_MAX_TRI * 3) {
-		memset(&plasVtx[plasVtxN],   0, sizeof(PlasVtx) * (PLAS_MAX_TRI * 3 - plasVtxN));
-		memset(&plasDepth[plasVtxN], 0, sizeof(float)   * (PLAS_MAX_TRI * 3 - plasVtxN));
-	}
+	// (the zero-pad moved into BuildPlasmaGeometry with the geometry - 2026-08-15)
 	// (the trail buffer's twin pad moved to UpdateTrailPost with the trail - round 3)
 
 	g_fx.reentryHeat = camHeat;
@@ -2168,9 +2231,10 @@ void OroModule::UpdateTrailPost(double simdt)
 	// flight: it proved the camera does NOT advance by post-step, which is why the
 	// projection moved to the render path at all. It has done its job and is gone.)
 	s_tTrim = g_fx.reentry * REN_TRIM_GAIN;
-	s_tWidK = clampf(g_fx.plasTrailWid, 0.0f, 8.0f);   // range x2'd on request (A.2)
-	s_tRotHead = HueRotFromPick(g_fx.plasTrailTint,  TRAIL_HUE_HEAD);   // trail colour picks
-	s_tRotTail = HueRotFromPick(g_fx.plasTrailTint2, TRAIL_HUE_TAIL);   // (A.3, 15b's law)
+	// (the trail's LOOK knobs - width and the two colour picks - moved to ProjectTrail on
+	//  2026-08-15 so they respond while the sim is PAUSED. They are read by
+	//  EmitTrailChains, which already runs in the render path; caching them here meant a
+	//  tuning drag did nothing until the sim was running again.)
 	// (A.6: no ramp state here any more - the ignition ramp is distance-from-head,
 	//  computed per knot in EmitTrailChains, and translates with the Trail start knob.)
 	GetCam(s_tPostCam);
@@ -2274,6 +2338,13 @@ void OroModule::ProjectTrail()
 		}
 	}
 
+	// The trail's LOOK knobs, read HERE (2026-08-15) rather than in UpdateTrailPost so a
+	// tuning drag shows while PAUSED. Only the look: density, life and start shape the
+	// SHEDDING, which genuinely cannot update with the sim stopped - nothing is being shed.
+	s_tWidK    = clampf(g_fx.plasTrailWid, 0.0f, 8.0f);              // range x2'd (A.2)
+	s_tRotHead = HueRotFromPick(g_fx.plasTrailTint,  TRAIL_HUE_HEAD);
+	s_tRotTail = HueRotFromPick(g_fx.plasTrailTint2, TRAIL_HUE_TAIL); // (A.3, 15b's law)
+
 	// PHASE A: one mitred feathered ribbon per chain, threaded through the pool -
 	// newborns to the synthetic head, no root gap, no stacking. See EmitTrailChains.
 	EmitTrailChains();
@@ -2298,11 +2369,16 @@ void OroModule::ProjectTrail()
 // the most forgiving case there is - in the reference shots the glow visibly
 // blooms ACROSS the craft's silhouette, so soft errors read as plasma, not bugs.
 // ----------------------------------------------------------------------------
-void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
+void OroModule::BuildPlasmaGeometry()
 {
 	static_assert(sizeof(PlasVtx) == sizeof(gcCore::clrVtx),
 	              "PlasVtx must mirror gcCore::clrVtx - the render proc casts between them");
 
+	plasVtxN = 0;
+	if (!s_plasValid) return;
+
+	const int i = s_plas.slot;
+	const VECTOR3 flowLocal = s_plas.flowLocal;
 	ReentryVessel& e = rentry[i];
 	// COLD reads as EXACTLY zero, never as a small number: every vessel-centred
 	// layer scales off heat (directly or through A below), so zero is what switches
@@ -2320,10 +2396,25 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 	if (viewW == 0 || viewH == 0) return;
 	if (heat <= 0.0f) return;                // nothing left to draw once cold
 
-	CamCtx cc; GetCam(cc);
-	VECTOR3 Cg;    v->GetGlobalPos(Cg);
-	VECTOR3 flowG; v->GlobalRot(flowLocal, flowG);
-	const double size = v->GetSize() > 1.0 ? v->GetSize() : 1.0;
+	// THE CAMERA the frame is actually being drawn with (patch k), falling back to the
+	// pre-step snapshot on an unpatched client. This is the whole point of the split:
+	// while PAUSED it is the only one of the two that is still moving.
+	CamCtx cc;
+	if (!FillProjCam(cc.pos, cc.rot, cc.tanAp)) return;
+
+	// THE ANCHOR, render-epoch (patch k2), for the same reason the trail needs it: pairing
+	// the renderer's camera with a pre-step vessel position would offset the whole effect
+	// by a step of the vessel's motion. Falls back to the pre-step position without (k2).
+	// ⚠️ There is NO render-epoch ROTATION in gcCore, so Rv below stays the pre-step one -
+	// worth about half a degree at 30 deg/s and 60 fps, and EXACTLY ZERO while paused,
+	// which is the case this whole change exists for.
+	VECTOR3 Cg = s_plas.Cg;
+	if (pCore && pCore->CanGetRenderObjPos()) {
+		VECTOR3 rp;
+		if (pCore->GetRenderObjPos(s_plas.hV, &rp)) Cg = rp;
+	}
+	const VECTOR3 flowG = s_plas.flowG;
+	const double  size  = s_plas.size;
 
 	// Pixels of a world length w seen at depth z (round 3.5). Element sizes used
 	// to scale off ONE vessel-wide Rpx - valid only with the whole ship at a
@@ -2361,7 +2452,7 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 	// GLOBAL normal - a point on the far side of the skin fades out. That per-point
 	// backface fade is the cheap substitute for the depth buffer we don't have
 	// (invariant 11), and for emissive fog it is enough.
-	MATRIX3 Rv; v->GetRotationMatrix(Rv);
+	const MATRIX3 Rv = s_plas.Rv;   // pre-step attitude - see the note on Cg above
 	float hpx[MAX_HULLPT], hpy[MAX_HULLPT], hpz[MAX_HULLPT], hwd[MAX_HULLPT], hcam[MAX_HULLPT];
 	float hped[MAX_HULLPT];                        // EUCLIDEAN camera distance, for the
 	                                               // patch-(g) clip (hpz is the camera-space
@@ -2384,6 +2475,27 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 
 	const float A = 255.0f * heat * trim;
 	const float t = (float)animT;            // real-time flicker clock
+
+	// THE WAKE CLOCK (2026-08-15). Everything downstream of the hull - fin shimmer, spark
+	// march, the envelope's skirt wave and its striation drift - ran off `t` at 0.06 to
+	// 0.25 Hz, and that is aurora pace, which is exactly what a beta tester called it
+	// ("too slow / Aurora like?"). They were recognising the shared ribbon substrate
+	// (invariant 19) through the look, so the honest fix is temporal, not geometric.
+	// ONE clock for all of it, so the wake stays internally coherent - every part of a
+	// turbulent structure speeds up together, and two clocks would give a skirt drifting
+	// at one rate under striations drifting at another. See g_fx.plasChurn; 0 freezes.
+	const float WAKE_CHURN_BASE = 2.6f;      // 1.00 on the knob = this x the pre-2026-08-15 rate
+	const float tw = t * WAKE_CHURN_BASE * clampf(g_fx.plasChurn, 0.0f, 3.0f);
+
+	// THE FIN RAKE (2026-08-15). tan of the angle a fin's tip is splayed OFF THE FLOW AXIS.
+	// Both fin families multiply this by their OWN length, so every fin carries the same
+	// angle whatever its length - which the old absolute offset emphatically did not (see
+	// g_fx.plasFinRake: short fins were standing past 55 deg, near-perpendicular to the
+	// hull, and short fins are the common case).
+	const double rakeT = tan((double)clampf(g_fx.plasFinRake, 0.0f, 45.0f) * 0.01745329252);
+	// The WRAP layer folds INWARD toward the wake axis instead. Proportional for the same
+	// reason; the fraction preserves the fold the old constants produced at nominal length.
+	const double wrapT = -0.24;
 
 	// DEPTH FOR THE PATCH-(g) CLIP (2026-08-07). Every vertex carries its EUCLIDEAN
 	// distance from the camera, to match the client's GBUF_DEPTH.a = length(posW).
@@ -2718,7 +2830,7 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 					const float nearFade = clampf((float)((zz - 1.0) / nfSpan), 0.0f, 1.0f);
 					// real-time flicker whose phase rides the flow coordinate: one
 					// coherent ripple travelling downstream, not per-vertex sparkle
-					const float flick = 0.90f + 0.10f * sinf(t * 3.7f
+					const float flick = 0.90f + 0.10f * sinf(tw * 3.7f
 					                  - 6.0f * (float)dotp(lp, flowLocal) / (float)size);
 					const float aRaw = A * 0.55f * shB * heatE * powf(wq, 0.7f)
 					                 * visS * fe * nearFade * flick * SHELL_LAYER_A;
@@ -2989,48 +3101,82 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 
 
 
-			// --- THE FEATHERED FIN EMITTER (round 2.1). One fin = 3 rows (base /
-			// mid / tip) x 3 columns (edge-ZERO / centre-FULL / edge-ZERO) = 8
+			// --- THE FEATHERED FIN EMITTER (round 2.1; cross-section reworked
+			// 2026-08-17). One fin = 3 rows (base / mid / tip) x 4 columns = 12
 			// triangles. The cross feather is what dissolves the fin outlines; the
 			// end-on fade (old streams law, invariant 15) is what stops fins seen
 			// down the flow axis stacking into an opaque star. All per-vertex 3D
 			// projected with per-vertex clip depth (patch g).
+			//
+			// ⚠️ THE CROSS-SECTION IS A FLAT-TOPPED TRAPEZOID, NOT A TENT, AND THAT IS
+			// THE WHOLE POINT OF THE REWORK. It used to be 3 columns - edge-ZERO,
+			// centre-FULL, edge-ZERO - so the alpha profile across every fin was a
+			// TRIANGLE. A triangle has two derivative discontinuities: a ridge down the
+			// centreline and an abrupt stop at each edge, and against black space in an
+			// additive blend the eye reads both of them as LINES. That is what made the
+			// wake read as a fan of hard-edged blades ("spikey", 2026-08-17) rather than
+			// as a medium. Scaling it could never help: the plasma trim was tried at
+			// half and produced a shorter tent, not a softer one.
+			//   0 |  a-w      the feather's outer lip, alpha 0
+			//   1 |  a   -+   the fin's OWN mesh-edge span, alpha FULL: a flat core
+			//   2 |  b   -+   with no ridge in it at all
+			//   3 |  b+w      the far lip, alpha 0
+			// So `w` finally means what its name says - the width of the SKIRT - instead
+			// of being half the tent. The bright core is exactly the real mesh edge the
+			// fin was built from, which is also the honest decomposition: a filament has
+			// a core of roughly even brightness with falloff at its edges, not a knife
+			// edge peak. A proper BELL (7 columns) was costed and rejected: 460 fins x 24
+			// x 2 layers = 22080 triangles against a 16384 ceiling.
 			struct FinRow { VECTOR3 a, b; double w; int r, g, bb; float alpha; };
 			auto emitFin3 = [&](const FinRow rw[3], const VECTOR3& sideV, double endonLen) {
-				float  X[3][3], Y[3][3]; double Z[3][3]; float D[3][3];
+				float  X[3][4], Y[3][4]; double Z[3][4]; float D[3][4];
 				for (int r = 0; r < 3; r++) {
-					const VECTOR3 pos[3] = { rw[r].a - sideV * rw[r].w,
-					                         (rw[r].a + rw[r].b) * 0.5,
+					const VECTOR3 pos[4] = { rw[r].a - sideV * rw[r].w,
+					                         rw[r].a,
+					                         rw[r].b,
 					                         rw[r].b + sideV * rw[r].w };
-					for (int q = 0; q < 3; q++) {
+					for (int q = 0; q < 4; q++) {
 						const VECTOR3 pg = Cg + mul(Rv, pos[q]);
 						if (!ProjPx(cc, pg, viewW, viewH, X[r][q], Y[r][q], Z[r][q])) return;
 						D[r][q] = (float)length(pg - cc.pos);
 					}
 				}
+				// The centreline the guards below want no longer has a column of its
+				// own - columns 1|2 bracket it - so take their midpoint. Both tests
+				// then behave exactly as they did with the old centre column.
+				float cX[3], cY[3]; double cZ[3];
+				for (int r = 0; r < 3; r++) {
+					cX[r] = 0.5f * (X[r][1] + X[r][2]);
+					cY[r] = 0.5f * (Y[r][1] + Y[r][2]);
+					cZ[r] = 0.5  * (Z[r][1] + Z[r][2]);
+				}
 				const float ovL = 1.5f * (float)viewW;
-				if (fabsf(X[0][1] - X[2][1]) > ovL || fabsf(Y[0][1] - Y[2][1]) > ovL) return;
+				if (fabsf(cX[0] - cX[2]) > ovL || fabsf(cY[0] - cY[2]) > ovL) return;
 				// End-on fade: projected centre-line length vs the side-on length
 				// this fin would show at its mid depth.
 				float fade = 1.0f;
 				if (endonLen > 0.0) {
-					const float pl = sqrtf((X[2][1] - X[0][1]) * (X[2][1] - X[0][1])
-					                     + (Y[2][1] - Y[0][1]) * (Y[2][1] - Y[0][1]));
-					const float el = pxAt(Z[1][1], endonLen * 0.8);
+					const float pl = sqrtf((cX[2] - cX[0]) * (cX[2] - cX[0])
+					                     + (cY[2] - cY[0]) * (cY[2] - cY[0]));
+					const float el = pxAt(cZ[1], endonLen * 0.8);
 					fade = clampf(pl / (el > 1.0f ? el : 1.0f), 0.0f, 1.0f);
 					if (fade < 0.02f) return;
 				}
-				DWORD cOut[3], cMid[3];
+				DWORD C[3][4];
 				for (int r = 0; r < 3; r++) {
-					cOut[r] = PCol(rw[r].r, rw[r].g, rw[r].bb, 0);
-					cMid[r] = PCol(rw[r].r, rw[r].g, rw[r].bb, (int)(rw[r].alpha * fade));
+					const DWORD o = PCol(rw[r].r, rw[r].g, rw[r].bb, 0);
+					const DWORD m = PCol(rw[r].r, rw[r].g, rw[r].bb, (int)(rw[r].alpha * fade));
+					C[r][0] = o; C[r][1] = m; C[r][2] = m; C[r][3] = o;   // the flat top
 				}
-				for (int r = 0; r < 2; r++) {
-					emit3z(X[r][0], Y[r][0], D[r][0], cOut[r],   X[r][1],   Y[r][1],   D[r][1],   cMid[r],   X[r+1][0], Y[r+1][0], D[r+1][0], cOut[r+1]);
-					emit3z(X[r][1], Y[r][1], D[r][1], cMid[r],   X[r+1][1], Y[r+1][1], D[r+1][1], cMid[r+1], X[r+1][0], Y[r+1][0], D[r+1][0], cOut[r+1]);
-					emit3z(X[r][1], Y[r][1], D[r][1], cMid[r],   X[r][2],   Y[r][2],   D[r][2],   cOut[r],   X[r+1][1], Y[r+1][1], D[r+1][1], cMid[r+1]);
-					emit3z(X[r][2], Y[r][2], D[r][2], cOut[r],   X[r+1][2], Y[r+1][2], D[r+1][2], cOut[r+1], X[r+1][1], Y[r+1][1], D[r+1][1], cMid[r+1]);
-				}
+				for (int r = 0; r < 2; r++)
+					for (int q = 0; q < 3; q++) {
+						emit3z(X[r][q],     Y[r][q],     D[r][q],     C[r][q],
+						       X[r][q+1],   Y[r][q+1],   D[r][q+1],   C[r][q+1],
+						       X[r+1][q],   Y[r+1][q],   D[r+1][q],   C[r+1][q]);
+						emit3z(X[r][q+1],   Y[r][q+1],   D[r][q+1],   C[r][q+1],
+						       X[r+1][q+1], Y[r+1][q+1], D[r+1][q+1], C[r+1][q+1],
+						       X[r+1][q],   Y[r+1][q],   D[r+1][q],   C[r+1][q]);
+					}
 			};
 
 			// Fin colour stations, hot -> cool, all through PCol so Tint/Fringe/
@@ -3068,10 +3214,17 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 			const float CEIL = 255.0f;    // soft alpha ceiling, unconditional
 			                              // (invariant 15: soft, never hard)
 
-			int finBudget = 460;          // 460 x 8 x 2 layers = 7360 tris ceiling -
+			int finBudget = 400;          // 400 x 12 x 2 layers = 9600 tris ceiling -
 			                              // the round-2.3 shock envelope is ~1k tris,
 			                              // far under the taps-bowl it replaced, so the
-			                              // fins get their round-2.1 budget back
+			                              // fins get their round-2.1 budget back.
+			                              // ⚠️ 2026-08-17: a fin is 12 triangles now, not
+			                              // 8 (the flat-top cross-section above), so 460
+			                              // would have taken 11040 of the 16384 and left
+			                              // the envelope, contour ring and sparks fighting
+			                              // over the remainder - and they DROP SILENTLY
+			                              // when the pool fills (invariant 15). 400 keeps
+			                              // 87% of the fins for a 30% ceiling rise.
 
 			// --- FAIR ANGULAR SPREAD (2026-08-08, user: "the streaks seem mainly
 			// focused on the front and aft ... spread them around the vessel more
@@ -3148,8 +3301,8 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 
 				const float hA = hashf((float)A2 * 17.31f + 0.7f);
 				const float hB = hashf((float)B2 * 17.31f + 0.7f);
-				const float nzA = 0.5f + 0.5f * sinf(t * (0.9f + hA * 0.7f) + hA * 6.2832f);
-				const float nzB = 0.5f + 0.5f * sinf(t * (0.9f + hB * 0.7f) + hB * 6.2832f);
+				const float nzA = 0.5f + 0.5f * sinf(tw * (0.9f + hA * 0.7f) + hA * 6.2832f);
+				const float nzB = 0.5f + 0.5f * sinf(tw * (0.9f + hB * 0.7f) + hB * 6.2832f);
 				// Lindner's length law: (1 - windwardness)^1.5 - a true rim root
 				// (wd <= 0) keeps its full streamer, a windward-ish root makes a
 				// SHORT sheet. Coverage everywhere, length graded by physics.
@@ -3168,6 +3321,8 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 				const double sl = length(sideV);
 				if (sl < 0.05) sideV = fu; else sideV = sideV / sl;
 				const VECTOR3 down = flowLocal * (-1.0);
+				// (the old ABSOLUTE outward offset. Kept only as the SPARK's drift scale,
+				//  where it is a mean over the pair rather than a per-fin rake - see rakeT.)
 				const double spread = size * 0.38 * (double)heat;
 				const double lift   = size * 0.012;
 
@@ -3182,18 +3337,21 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 
 				float aFin = A * 0.15f * em * aoaGate * fr * (vcGate ? VC_GAIN : 1.0f)
 				           * (0.55f + 0.45f * lenGrade)   // windward-rooted sheets run fainter
-				           * (0.85f + 0.15f * sinf(t * 2.6f + (float)ti * 1.9f));
+				           * (0.85f + 0.15f * sinf(tw * 2.6f + (float)ti * 1.9f));
 				aFin = CEIL * (1.0f - expf(-aFin / CEIL));
 				if (aFin < 2.0f) return;
 
 				for (int layer = 0; layer < 2; layer++) {
 					if (layer == 1 && regime < 0.6f) break;
-					double lA = lenA, lB = lenB, sprd = spread, dOfs = 0.0;
+					// rk is the TANGENT of the rake angle, applied to each end's OWN length
+					// below - so a short fin and a long one splay at the same angle, which
+					// is the whole point of the 2026-08-15 change (see rakeT).
+					double lA = lenA, lB = lenB, rk = rakeT, dOfs = 0.0;
 					float  aL = aFin;
 					if (layer == 1) {
 						const float wf = clampf((regime - 0.6f) / 0.4f, 0.0f, 1.0f);
 						lA *= 1.45; lB *= 1.45;
-						sprd = -(double)(size * 0.22);      // folds toward the wake axis
+						rk = wrapT;                         // folds toward the wake axis
 						dOfs = size * 0.05;
 						aL  *= 0.42f * wf;
 					}
@@ -3208,11 +3366,15 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 					rw[0] = { pA + nA * lift + down * dOfs,
 					          pB + nB * lift + down * dOfs,
 					          wp0, r0, g0, b0, aL };
-					rw[1] = { pA + nA * lift + down * (lA * 0.2 + dOfs) + nA * (sprd * 0.25),
-					          pB + nB * lift + down * (lB * 0.2 + dOfs) + nB * (sprd * 0.25),
+					// Per-END outward offset = that end's own length x tan(rake). The mid
+					// knot keeps its 0.25-of-tip offset at 0.20 of the length, which bows
+					// the sheet outward slightly instead of running it dead straight.
+					const double spA = lA * rk, spB = lB * rk;
+					rw[1] = { pA + nA * lift + down * (lA * 0.2 + dOfs) + nA * (spA * 0.25),
+					          pB + nB * lift + down * (lB * 0.2 + dOfs) + nB * (spB * 0.25),
 					          wp1, r1, g1, b1, aL * 0.55f };
-					rw[2] = { pA + nA * lift + down * (lA + dOfs) + nA * sprd,
-					          pB + nB * lift + down * (lB + dOfs) + nB * sprd,
+					rw[2] = { pA + nA * lift + down * (lA + dOfs) + nA * spA,
+					          pB + nB * lift + down * (lB + dOfs) + nB * spB,
 					          wp2, r2, g2, b2, 0.0f };
 					emitFin3(rw, sideV, (lenA + lenB) * 0.5);
 				}
@@ -3221,7 +3383,7 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 				// SPARK on carrier fins (stream-era look, knobs intact).
 				if (hashf((float)ti * 3.31f + 0.4f) < sparkFrac) {
 					const float hp   = hashf((float)ti * 9.13f + 1.7f);
-					float prog = t * (0.8f + 0.4f * hp) / sLife + hp * 7.0f;
+					float prog = tw * (0.8f + 0.4f * hp) / sLife + hp * 7.0f;
 					prog -= floorf(prog);
 					const VECTOR3 c0v = (pA + pB) * 0.5 + (nA + nB) * (lift * 0.5);
 					const VECTOR3 c1v = c0v + down * ((lenA + lenB) * 0.5) + (nA + nB) * (spread * 0.5);
@@ -3235,7 +3397,7 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 						                * clampf(g_fx.plasSparkSize, 0.0f, 4.0f);
 						const float aSp = clampf(A * 0.65f, 0.0f, 235.0f)
 						                * (0.55f + 0.45f * (1.0f - prog))
-						                * (0.7f + 0.3f * sinf(t * 9.0f + hp * 40.0f));
+						                * (0.7f + 0.3f * sinf(tw * 9.0f + hp * 40.0f));
 						if (aSp >= 3.0f && sr2 > 0.3f) {
 							const DWORD sC = PCol(255, 215, 165, (int)aSp);
 							const DWORD sE = PCol(255, 120, 45, 0);
@@ -3283,8 +3445,8 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 				const float em = clampf(edgeLen / ((float)size * 0.045f), 0.30f, 2.0f);
 				const float hA = hashf((float)b3 * 23.7f + 0.9f);
 				const float hB = hashf((float)bn * 23.7f + 0.9f);
-				const float nzA = 0.5f + 0.5f * sinf(t * (0.9f + hA * 0.7f) + hA * 6.2832f);
-				const float nzB = 0.5f + 0.5f * sinf(t * (0.9f + hB * 0.7f) + hB * 6.2832f);
+				const float nzA = 0.5f + 0.5f * sinf(tw * (0.9f + hA * 0.7f) + hA * 6.2832f);
+				const float nzB = 0.5f + 0.5f * sinf(tw * (0.9f + hB * 0.7f) + hB * 6.2832f);
 				const double lenA = Lbase * (double)(0.30f + 1.70f * nzA * nzA * nzAmp);
 				const double lenB = Lbase * (double)(0.30f + 1.70f * nzB * nzB * nzAmp);
 				if (lenA + lenB < size * 0.02) continue;
@@ -3293,6 +3455,8 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 				const double sl = length(sideV);
 				if (sl < 0.05) continue; else sideV = sideV / sl;
 				const VECTOR3 down = flowLocal * (-1.0);
+				// (the old ABSOLUTE outward offset. Kept only as the SPARK's drift scale,
+				//  where it is a mean over the pair rather than a per-fin rake - see rakeT.)
 				const double spread = size * 0.38 * (double)heat;
 				const double lift   = size * 0.012;
 
@@ -3305,18 +3469,21 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 				}
 
 				float aFin = A * 0.15f * em * aoaGate * fr * (vcGate ? VC_GAIN : 1.0f)
-				           * (0.85f + 0.15f * sinf(t * 2.6f + (float)b3 * 2.3f));
+				           * (0.85f + 0.15f * sinf(tw * 2.6f + (float)b3 * 2.3f));
 				aFin = CEIL * (1.0f - expf(-aFin / CEIL));
 				if (aFin < 2.0f) continue;
 
 				for (int layer = 0; layer < 2; layer++) {
 					if (layer == 1 && regime < 0.6f) break;
-					double lA = lenA, lB = lenB, sprd = spread, dOfs = 0.0;
+					// rk is the TANGENT of the rake angle, applied to each end's OWN length
+					// below - so a short fin and a long one splay at the same angle, which
+					// is the whole point of the 2026-08-15 change (see rakeT).
+					double lA = lenA, lB = lenB, rk = rakeT, dOfs = 0.0;
 					float  aL = aFin;
 					if (layer == 1) {
 						const float wf = clampf((regime - 0.6f) / 0.4f, 0.0f, 1.0f);
 						lA *= 1.45; lB *= 1.45;
-						sprd = -(double)(size * 0.22);
+						rk = wrapT;                         // folds toward the wake axis
 						dOfs = size * 0.05;
 						aL  *= 0.42f * wf;
 					}
@@ -3331,11 +3498,15 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 					rw[0] = { pA + nA * lift + down * dOfs,
 					          pB + nB * lift + down * dOfs,
 					          wp0, r0, g0, b0, aL };
-					rw[1] = { pA + nA * lift + down * (lA * 0.2 + dOfs) + nA * (sprd * 0.25),
-					          pB + nB * lift + down * (lB * 0.2 + dOfs) + nB * (sprd * 0.25),
+					// Per-END outward offset = that end's own length x tan(rake). The mid
+					// knot keeps its 0.25-of-tip offset at 0.20 of the length, which bows
+					// the sheet outward slightly instead of running it dead straight.
+					const double spA = lA * rk, spB = lB * rk;
+					rw[1] = { pA + nA * lift + down * (lA * 0.2 + dOfs) + nA * (spA * 0.25),
+					          pB + nB * lift + down * (lB * 0.2 + dOfs) + nB * (spB * 0.25),
 					          wp1, r1, g1, b1, aL * 0.55f };
-					rw[2] = { pA + nA * lift + down * (lA + dOfs) + nA * sprd,
-					          pB + nB * lift + down * (lB + dOfs) + nB * sprd,
+					rw[2] = { pA + nA * lift + down * (lA + dOfs) + nA * spA,
+					          pB + nB * lift + down * (lB + dOfs) + nB * spB,
 					          wp2, r2, g2, b2, 0.0f };
 					emitFin3(rw, sideV, (lenA + lenB) * 0.5);
 				}
@@ -3490,8 +3661,8 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 						    : (double)dProf[bb] + stand * 0.75
 						      - (double)(ext * ext) * (double)size * (0.42 + 0.62 * (double)heat);
 						// the boil: a travelling wave in theta and ring, REAL time
-						const float wave = sinf(th * 3.0f + t * 1.2f + rho * 4.0f + ext * 3.0f)
-						                 * sinf(th * 5.0f - t * 0.8f + 1.7f);
+						const float wave = sinf(th * 3.0f + tw * 1.2f + rho * 4.0f + ext * 3.0f)
+						                 * sinf(th * 5.0f - tw * 0.8f + 1.7f);
 						VECTOR3 P = fu * pu + fv * pv
 						          + flowLocal * (dd + (double)wave * stand * 0.08);
 						P.x *= bsx; P.y *= bsy; P.z *= bsz;
@@ -3515,8 +3686,8 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 						// stays continuous, so no facet or gap can ever open.
 						float stria = 1.0f;
 						if (!inCap) {
-							const float sp = 0.5f + 0.5f * sinf(th * 14.0f + t * 0.6f
-							               + 1.3f * sinf(th * 5.0f - t * 0.35f));
+							const float sp = 0.5f + 0.5f * sinf(th * 14.0f + tw * 0.6f
+							               + 1.3f * sinf(th * 5.0f - tw * 0.35f));
 							stria = 1.0f - 0.60f * powf(ext, 0.7f) * (1.0f - sp);
 						}
 						// the lead weighting (2.3c): full at the apex ring, fading to
@@ -3572,4 +3743,18 @@ void OroModule::BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal)
 	// knot survived as a permanent spike in the ribbon. The user's call after
 	// the cardiogram spiking: abandon it and let the STREAKS run long instead -
 	// their length knob went 9 -> 20 in the same breath. See the graveyard.)
+
+	// Zero-pad the vertex buffer's unused tail (alpha 0, degenerate at origin). Moved
+	// here from UpdateReentry with the geometry (2026-08-15) - it has to sit with
+	// whatever last touched plasVtxN.
+	// The render proc hands the client the FULL buffer every frame: the client's
+	// D3D9Triangle::Update Locks with D3DLOCK_DISCARD (fresh UNINITIALIZED memory each
+	// lock) and its Draw always draws the CREATION count - an unwritten tail is random
+	// VRAM drawn as random flashing triangles (the "green flashes", 2026-08-01).
+	// plasDepth is padded with it: the depth array is handed over at the same full
+	// count, and a tail of uninitialised distances would clip live triangles.
+	if (plasVtxN > 0 && plasVtxN < PLAS_MAX_TRI * 3) {
+		memset(&plasVtx[plasVtxN],   0, sizeof(PlasVtx) * (PLAS_MAX_TRI * 3 - plasVtxN));
+		memset(&plasDepth[plasVtxN], 0, sizeof(float)   * (PLAS_MAX_TRI * 3 - plasVtxN));
+	}
 }

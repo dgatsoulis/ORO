@@ -72,6 +72,12 @@ static const COLORREF CLR_PILL_OFF  = RGB(0x3A, 0x41, 0x50);  // enable pill off
 // Dialog-local state
 // ----------------------------------------------------------------------------
 static HWND     g_hDlg = NULL;
+static HINSTANCE g_hInst = NULL;          // our DLL instance, stashed by OroDlg_Open so the
+                                          // HELP button can open a second Orbiter dialog
+static HWND     g_hHelp = NULL;           // the HELP window (NULL = closed). Declared up
+                                          // here rather than with the rest of the help
+                                          // module at the bottom because the ARMED strip
+                                          // paints the HELP button lit while it is open.
 static HBITMAP  g_hBanner = NULL;         // user artwork, Modules\ORO\banner.bmp
 static int      g_bannerW = 0, g_bannerH = 0;
 static HFONT    g_fontText = NULL, g_fontSmall = NULL, g_fontBig = NULL, g_fontMono = NULL;
@@ -105,6 +111,11 @@ static int      g_dragBar = -1;           // scrollbar thumb grab offset within 
 static DWORD    g_saveMsgUntil = 0;       // SAVE confirmation deadline (GetTickCount ms)
 static bool     g_saveOk = true;          // ... and what it should say
 static int      g_saveMask = 0;           // ... and WHICH scopes it wrote (names the files)
+static bool     g_saveWasRevert = false;  // ... and whether it was a REVERT rather than a SAVE
+                                          // (same status line, opposite verb)
+static int      g_lastSavedH = 0;         // client height last written to window.cfg, so a
+                                          // window MOVE (which also ends in WM_EXITSIZEMOVE)
+                                          // does not rewrite the file for nothing
 
 static void ClearDrags()
 {
@@ -123,35 +134,51 @@ static void ClearDrags()
 // the felt-G model applies to its own output. The SLIDER edits whichever of the two the
 // current mode owns (LAB -> value, PHYSICS -> gain) and the readout always shows the
 // value, so in physics mode you trim a gain while watching what the model produces.
+// `driver` is what the felt-G model needs before this row can produce anything, in the
+// same axis names the FELT G readout uses. IT EXISTS BECAUSE A GAIN TIMES ZERO IS ZERO:
+// in PHYSICS mode the slider edits a multiplier on the model's output, so on an axis that
+// is not firing the control moves, the number stays at 0, and the row is indistinguishable
+// from a broken one. Both beta testers read it exactly that way ("aberration/swim/heartbeat
+// missing in PHYSICS", "I can't change it in physics mode") - and all three were wired and
+// working; aberration simply rides Gx, which a +Gz pull never touches. So while the model
+// is producing nothing, the readout column names what it is waiting for instead of printing
+// a zero. The row says "armed, wrong axis" rather than "dead".
 struct FxRow {
 	const char* label;
 	bool*  enabled;
 	float* value;
 	float* gain;
+	const char* driver;
 };
 
 // The slider's target: in PHYSICS mode the model owns `value`, so the knob edits the gain.
 static float* RowKnob(const FxRow& r) { return g_fx.physicsMode ? r.gain : r.value; }
 
 // VISION - the physiological suite (internal view).
+// The drivers below are read straight off UpdatePhysics' step 5: everything the oxygen
+// reserve gates says "+Gz" (that is the axis that empties it), red-out says "-Gz", and the
+// two globe-deformation effects say "Gx". Blur is the one row with two mechanisms - it
+// takes whichever of the Gx and +Gz terms is producing more - so it names both.
 static FxRow g_visRows[] = {
-	{ "Blackout",      &g_fx.blackoutEnabled, &g_fx.blackout,  &g_fx.gainBlackout   },
-	{ "Red-out",       &g_fx.redoutEnabled,   &g_fx.redout,    &g_fx.gainRedout     },
-	{ "Tunnel vision", &g_fx.tunnelEnabled,   &g_fx.tunnel,    &g_fx.gainTunnel     },
-	{ "Dark spots",    &g_fx.spotsEnabled,    &g_fx.spots,     &g_fx.gainSpots      },
-	{ "Grey-out",      &g_fx.greyoutEnabled,  &g_fx.greyout,   &g_fx.gainGreyout    },
-	{ "Blur",          &g_fx.blurEnabled,     &g_fx.blur,      &g_fx.gainBlur       },
-	{ "Heartbeat",     &g_fx.heartbeatEnabled,&g_fx.heartbeat, &g_fx.gainHeartbeat  },
-	{ "Aberration",    &g_fx.aberrationEnabled,&g_fx.aberration,&g_fx.gainAberration },
-	{ "Sparkles",      &g_fx.sparklesEnabled, &g_fx.sparkles,  &g_fx.gainSparkles   },
-	{ "Swim",          &g_fx.swimEnabled,     &g_fx.swim,      &g_fx.gainSwim       },
+	{ "Blackout",      &g_fx.blackoutEnabled, &g_fx.blackout,  &g_fx.gainBlackout,   "+Gz"   },
+	{ "Red-out",       &g_fx.redoutEnabled,   &g_fx.redout,    &g_fx.gainRedout,     "-Gz"   },
+	{ "Tunnel vision", &g_fx.tunnelEnabled,   &g_fx.tunnel,    &g_fx.gainTunnel,     "+Gz"   },
+	{ "Dark spots",    &g_fx.spotsEnabled,    &g_fx.spots,     &g_fx.gainSpots,      "+Gz"   },
+	{ "Grey-out",      &g_fx.greyoutEnabled,  &g_fx.greyout,   &g_fx.gainGreyout,    "+Gz"   },
+	{ "Blur",          &g_fx.blurEnabled,     &g_fx.blur,      &g_fx.gainBlur,       "Gx+Gz" },
+	{ "Heartbeat",     &g_fx.heartbeatEnabled,&g_fx.heartbeat, &g_fx.gainHeartbeat,  "+Gz"   },
+	{ "Aberration",    &g_fx.aberrationEnabled,&g_fx.aberration,&g_fx.gainAberration,"Gx"    },
+	{ "Sparkles",      &g_fx.sparklesEnabled, &g_fx.sparkles,  &g_fx.gainSparkles,   "+Gz"   },
+	{ "Swim",          &g_fx.swimEnabled,     &g_fx.swim,      &g_fx.gainSwim,       "+Gz"   },
 };
 static const int NVIS = (int)(sizeof(g_visRows) / sizeof(g_visRows[0]));
 
 // MOTION - whole-field movement. Tilt is a lab slider; the cam-shake below it is
 // physics-driven (its sliders shape the LOOK, not the intensity).
 static FxRow g_motRows[] = {
-	{ "Tilt / sway",   &g_fx.tiltEnabled,     &g_fx.tilt,      &g_fx.gainTilt       },
+	// Two mechanisms again: the woozy SWAY rides the reserve (+Gz), the signed LEAN rides
+	// the lateral load, and the same gain scales both.
+	{ "Tilt / sway",   &g_fx.tiltEnabled,     &g_fx.tilt,      &g_fx.gainTilt,       "+Gz Gy" },
 };
 static const int NMOT = (int)(sizeof(g_motRows) / sizeof(g_motRows[0]));
 
@@ -159,8 +186,14 @@ static const int NMOT = (int)(sizeof(g_motRows) / sizeof(g_motRows[0]));
 // Each maps its track 0..1 to 0..vmax in the value's stored unit: X/Y/Z hold metres
 // (vmax 0.010 = 10 mm, shown in mm x1000 with 0.1 precision), frequency holds Hz (0..10).
 // The enable pill is g_fx.shakeEnabled (drawn in the subsection header).
-struct ShakeRow { const char* label; float* value; float vmax; bool hz; };
+// `raw` = show the stored value as-is (x1.00) rather than the mm/Hz conversions - the seat
+// push is a plain gain, not a length.
+struct ShakeRow { const char* label; float* value; float vmax; bool hz; bool raw = false; };
 static ShakeRow g_shakeRows[] = {
+	// The SEAT PUSH first, because it is the separate effect the other four are not: a
+	// sustained lean opposite the felt acceleration, where the rest are a rattle. 0 = the
+	// buffet alone, which is the split a beta tester asked for (see g_fx.shakePush).
+	{ "Seat push",      &g_fx.shakePush, 2.0f,   false, true },
 	{ "X range (mm)",   &g_fx.shakeAmpX, 0.010f, false },
 	{ "Y range (mm)",   &g_fx.shakeAmpY, 0.010f, false },
 	{ "Z range (mm)",   &g_fx.shakeAmpZ, 0.010f, false },
@@ -173,10 +206,12 @@ static const int NSHAKE = (int)(sizeof(g_shakeRows) / sizeof(g_shakeRows[0]));
 // where the plasma/reentry rework lands.
 // (no gain column: the shimmer is a WORLD effect, outside the felt-G model, so its
 // slider means the same thing in both modes - it points its gain at its own value.)
+// (no driver column either: these never read zero-because-the-model-is-idle, so there is
+//  nothing for the PHYSICS readout to explain.)
 static FxRow g_envRows[] = {
-	{ "Exhaust shimmer", &g_fx.shimmerEnabled, &g_fx.shimmer, &g_fx.shimmer },
-	{ "Reentry plasma",  &g_fx.reentryEnabled, &g_fx.reentry, &g_fx.reentry },
-	{ "Plume expansion", &g_fx.plumeEnabled,   &g_fx.plume,   &g_fx.plume   },
+	{ "Exhaust shimmer", &g_fx.shimmerEnabled, &g_fx.shimmer, &g_fx.shimmer, NULL },
+	{ "Reentry plasma",  &g_fx.reentryEnabled, &g_fx.reentry, &g_fx.reentry, NULL },
+	{ "Plume expansion", &g_fx.plumeEnabled,   &g_fx.plume,   &g_fx.plume,   NULL },
 };
 static const int NENV = (int)(sizeof(g_envRows) / sizeof(g_envRows[0]));
 
@@ -208,6 +243,13 @@ static PlasRow g_plasRows[] = {
 	                                                        // the trail was abandoned
 	{ "Streak width",   &g_fx.plasStreakWid,   6.0f, 2 },   // range x2'd on request
 	{ "Streak wander",  &g_fx.plasWander,      3.0f, 2 },
+	{ "Wake churn",     &g_fx.plasChurn,       3.0f, 2 },   // 2026-08-15: how FAST the wake
+	                                                        // lives. 1 = the new baseline,
+	                                                        // 0 freezes it (the Soot churn
+	                                                        // idiom). See plasChurn.
+	{ "Fin rake (deg)", &g_fx.plasFinRake,    45.0f, 0 },   // ... and how far the fins
+	                                                        // splay off the flow axis.
+	                                                        // 0 = straight downstream.
 	{ "Sparks",         &g_fx.plasSpark,       6.0f, 2 },   // count multiplier
 	{ "Spark life (s)", &g_fx.plasSparkLife,   3.0f, 2 },   // root->tip travel time
 	{ "Spark size",     &g_fx.plasSparkSize,   4.0f, 2 },   // radius multiplier
@@ -291,7 +333,14 @@ static PlasRow g_prtRows[] = {
 // VC SHADOWS: the cabin-box half-width handed to the client. Range starts above zero
 // because a degenerate ortho box is not a look, it is a bug; the top end is roughly a
 // large vessel's whole forward section.
-static const float VCS_RAD_MIN = 1.0f, VCS_RAD_MAX = 12.0f;
+// ⚠️ THE FLOOR WAS 1.0 m AND IS 0.4 m SINCE 2026-08-15. Both beta testers independently
+// found that smaller is sharper and asked for less than a metre, which is exactly what the
+// 2026-08-04 texel-density analysis predicts: the map is a fixed 2048 (or 4096) texels
+// across the box, so halving the box doubles the resolution on a panel forty centimetres
+// from the eye. The STRUCTURAL trade is unchanged and is why this is a slider rather than a
+// baked constant - the small box that makes edges sharp is exactly what stops a DOCKED
+// vessel casting into your cockpit, and you cannot have both without a second map.
+static const float VCS_RAD_MIN = 0.4f, VCS_RAD_MAX = 12.0f;
 
 // ECLIPSE - the three things the observer does about it. Same unit-slider shape as
 // the two tables above (PlasRow is just label/value/vmax/decimals, nothing plasma
@@ -411,10 +460,26 @@ static const int NREC = (int)(sizeof(g_recNames) / sizeof(g_recNames[0]));
 // lives in the scrolling pane and is addressed in DOCUMENT coordinates (which
 // equal client coordinates when g_scroll == 0).
 // ----------------------------------------------------------------------------
-static const int DLG_W      = 500;        // forced client width  (px)
-static const int DLG_H      = 800;        // forced client height (px; 600 -> 800 on
+static const int DLG_W      = 500;        // client width, LOCKED (px) - see DLG_H_MIN
+static const int DLG_H      = 800;        // DEFAULT client height (px; 600 -> 800 on
                                           // 2026-08-02 - the pane earns its keep now
-                                          // that PLASMA TUNING is a section of its own)
+                                          // that PLASMA TUNING is a section of its own).
+                                          // ⚠️ SINCE 2026-08-16 THIS IS ONLY THE DEFAULT:
+                                          // the panel is vertically resizable and opens at
+                                          // whatever height it was last left (stored in
+                                          // Config\ORO\window.cfg). Nothing but the initial
+                                          // sizing reads it - every layout helper already
+                                          // derived from rc.bottom, which is what made the
+                                          // whole change cheap.
+static const int DLG_H_MIN  = 500;        // smallest useful client height. Below this the
+                                          // 219 px of fixed chrome (banner + arm strip +
+                                          // tab bar + status line) leaves under 300 px of
+                                          // pane and the panel stops being a panel.
+// WIDTH IS DELIBERATELY NOT RESIZABLE. Two things are pinned to 500: BANNER_H is
+// literally 500 * (130/558), so his artwork's aspect ratio decides the header height, and
+// the slider column was narrowed to 500 on his own call in 2026-07-30 ("no need to have
+// such wide sliders"). Height is the axis with the actual problem - the tallest tab is
+// over 1000 px of document against a 581 px pane - so height is the axis that opens.
 static const int BANNER_H   = 116;        // 500 * (130/558): keeps the current banner.bmp aspect
 static const int ARMED_H    = 40;         // master ARMED/ENABLED strip (below banner)
 static const int STATUS_H   = 34;         // fixed status line at the bottom
@@ -462,7 +527,7 @@ static int MotRowY(int i) { return MotHdrY() + 34 + i * ROW_DY; }
 // Readout rows: Gz, Gx, Gy, reserve - no controls, just numbers.
 static int PilHdrY()      { return MotRowY(NMOT - 1) + 30; }               // caption text top
 static int PilRowY(int i) { return PilHdrY() + 34 + i * ROW_DY; }
-static const int NPILROW  = 5;
+static const int NPILROW  = 6;   // mode / tolerance / suit / posture / G reference / effects view
 static int PilReadCapY()  { return PilRowY(NPILROW - 1) + 16; }            // "F E L T   G" text top
 static int PilReadY(int i){ return PilReadCapY() + 24 + i * ROW_DY; }
 static const int NPILREAD = 4;
@@ -536,14 +601,17 @@ static int BglHdrY()      { return PlmColY() + 30; }                       // se
 static int BglRowY()      { return BglHdrY() + 34; }                       // pill + strength centreline
 static int BglHeatY()     { return BglRowY() + ROW_DY; }                   // Heat time (s)
 static int BglCoolY()     { return BglHeatY() + ROW_DY; }                  // Cool time (s)
-static int BglCapY()      { return BglCoolY() + 11; }                      // readout caption top
+static int BglColY()      { return BglCoolY() + ROW_DY; }                  // Bell colour swatch
+static int BglCapY()      { return BglColY() + 11; }                       // readout caption top
 
 // STOCK EXHAUST (client patch n) - the judging pill: stock billboards + particle
 // streams on (default) or suppressed, so the overlay above is judged alone.
 static int StkPillY()     { return BglCapY() + 34; }                       // pill centreline
 static int StkCapY()      { return StkPillY() + 11; }                      // caption text top
 // CANCEL THRUST - the test-stand rig (session-only; invariant 9's family).
-static int CthPillY()     { return StkCapY() + 34; }                       // pill centreline
+static int CthPillY()     { return StkCapY() + 48; }                       // pill centreline
+                                                                           // (+14 for the
+                                                                           // cross-reference line)
 static int CthCapY()      { return CthPillY() + 11; }                      // caption text top
 static int ExhaustBottom() { return CthCapY() + 24; }
 
@@ -568,7 +636,7 @@ static int PrtCapY()      { return PrtColY() + 14; }                       // re
 // because you should not have to turn off the flame to adjust the smoke.
 static int PrtStkY()      { return PrtCapY() + 34; }                       // pill centreline
 static int PrtStkCapY()   { return PrtStkY() + 11; }                       // caption text top
-static int ParticlesBottom() { return PrtStkCapY() + 24; }
+static int ParticlesBottom() { return PrtStkCapY() + 38; }                 // + the cross-reference line
 
 static int ThrusterBottom(){ return g_thrSub ? ParticlesBottom() : ExhaustBottom(); }
 
@@ -594,9 +662,11 @@ static int VapWhyY()      { return VapBandY() + ROW_DY + 2; }              // "C
 // FLIGHT AID - not an effect (it changes what the VESSEL DOES), filed at the bottom of
 // the reentry tab because a high-AoA entry is exactly when a stock ship needs it.
 static int AidHdrY()      { return VapWhyY() + 30; }                       // caption text top
-static int AidKnobY()     { return AidHdrY() + 34; }                       // knob centreline
+static int AidWhatY()     { return AidHdrY() + 22; }                       // "this changes how the ship FLIES"
+static int AidKnobY()     { return AidWhatY() + 28; }                      // knob centreline
 static int AidCapY()      { return AidKnobY() + 13; }                      // caption text top
-static int AidReadY()     { return AidCapY() + 30; }                       // moment readout centreline
+static int AidGateY()     { return AidCapY() + 28; }                       // ALWAYS | REENTRY ONLY
+static int AidReadY()     { return AidGateY() + ROW_DY; }                  // moment readout centreline
 static int ReentryBottom(){ return AidReadY() + 24; }
 
 // ===== TAB 3 - ATMOSPHERIC : eclipse + aurora =====
@@ -639,7 +709,7 @@ static int VcsCapY()      { return VcsDepY() + 12; }                       // ca
 static int CamShakeTop()  { return VcsCapY() + 30; }                       // subsection header centreline
 static int ShakeRowY(int i){ return CamShakeTop() + 16 + i * ROW_DY; }
 static int MotCapY()      { return ShakeRowY(NSHAKE - 1) + 14; }           // caption text top
-static int VcBottom()     { return MotCapY() + 22; }
+static int VcBottom()     { return MotCapY() + 36; }                       // two caption lines
 
 static int ContentBottom(){
 	switch (g_tab) {
@@ -687,6 +757,21 @@ static RECT ValueRectAt(const RECT& rc, int cy)
 	return r;
 }
 
+// ⚠️ THE VALUE COLUMN IS 46 px - SEVEN Consolas characters at -12 - and DrawTextA is
+// right-aligned, so a longer string renders as its own TAIL and nothing else. That is
+// what turned the lightning readout into the bare word "cells)" in a beta screenshot.
+// A NUMBER always fits; a readout that has to say a WORD ("vacuum", "sun behind", "M 1.15
+// 85%", "M 0.7 - gated") does not, and every one of them was written after the warning
+// comment was already in this file - which is the tell that a comment was the wrong fix.
+// So: readout rows have no slider, their whole track column stands empty, and this rect
+// claims it. Use it for any readout that is not purely a short number, and the class of
+// bug goes away instead of each instance being caught in a screenshot.
+static RECT ReadRectAt(const RECT& rc, int cy)
+{
+	RECT r = { TRACK_X, cy - 9, rc.right - SEC_RPAD, cy + 12 };
+	return r;
+}
+
 // The master ENABLED/DISABLED toggle, in the fixed strip just below the banner.
 // Mirrors g_fx.masterArmed (the same flag Ctrl+G flips) - the whole experience on/off.
 static RECT ArmedBtnRect()
@@ -704,6 +789,30 @@ static RECT SaveBtnRect(const RECT& rc)
 {
 	const int cy = BANNER_H + ARMED_H / 2;
 	RECT r = { rc.right - 12 - 62, cy - 13, rc.right - 12, cy + 13 };
+	return r;
+}
+
+// HELP, immediately left of SAVE in the same FIXED strip (2026-08-16). It belongs beside
+// the master arm and the save for the same reason they are there: it must be reachable
+// from any tab at any scroll position. It opens the help for whichever tab is ACTIVE, so
+// where you are when you press it is the question you are asking.
+// THE THRUSTER-GROUP CYCLER (2026-08-16), in the FIXED strip beside the master arm.
+// It belongs there for the same reason the arm and SAVE do, and it is a stronger case
+// than either: it changes what every control on the THRUSTER tab MEANS, so it must be
+// visible from any scroll position rather than sitting at the top of a pane you have
+// scrolled past. Shown only on the THRUSTER tab - it governs nothing else.
+static RECT ThrGrpBtnRect(const RECT& rc)
+{
+	const int cy = BANNER_H + ARMED_H / 2;
+	RECT r = { rc.right - 12 - 62 - 8 - 56 - 8 - 92, cy - 13,
+	           rc.right - 12 - 62 - 8 - 56 - 8,      cy + 13 };
+	return r;
+}
+
+static RECT HelpBtnRect(const RECT& rc)
+{
+	const int cy = BANNER_H + ARMED_H / 2;
+	RECT r = { rc.right - 12 - 62 - 8 - 56, cy - 13, rc.right - 12 - 62 - 8, cy + 13 };
 	return r;
 }
 
@@ -727,6 +836,18 @@ static RECT BlinkBtnRect()
 static RECT TabSaveBtnRect(const RECT& rc)
 {
 	RECT r = { rc.right - SEC_RPAD - 62, TabSaveY() - 12, rc.right - SEC_RPAD, TabSaveY() + 12 };
+	return r;
+}
+
+// REVERT, immediately left of the tab's SAVE (2026-08-15, a beta ask). Re-reads this tab's
+// own scopes from disk, so a tuning session that went wrong has a way back that is not
+// "remember every number" or "restart Orbiter". It is the exact inverse of the button
+// beside it and it costs nothing to build: the load path has existed since the settings
+// landed, it was simply never given a control.
+static RECT TabRevBtnRect(const RECT& rc)
+{
+	RECT r = { rc.right - SEC_RPAD - 62 - 8 - 66, TabSaveY() - 12,
+	           rc.right - SEC_RPAD - 62 - 8,      TabSaveY() + 12 };
 	return r;
 }
 
@@ -1228,6 +1349,20 @@ static void OpenColourPicker(HWND hDlg, DWORD& target, int anchorDocY)
 	g_pickRc = { left, top, left + PICK_W, top + PICK_H };
 }
 
+// Keep an OPEN picker inside the pane after a resize. Without this, shrinking the window
+// with the picker open can push its OK/Cancel row off the bottom - and those two buttons
+// are the only way out of it, so it would strand the user in a modeless overlay they
+// cannot dismiss. Same clamp as OpenColourPicker, applied to the rect it already has.
+static void ClampColourPicker(const RECT& rc)
+{
+	if (!g_pickOpen) return;
+	int top = g_pickRc.top;
+	if (top + PICK_H > PaneBottom(rc) - 4)  top = PaneBottom(rc) - 4 - PICK_H;
+	if (top < ContentY() + 4)               top = ContentY() + 4;
+	const int left = (rc.right - PICK_W) / 2;
+	g_pickRc = { left, top, left + PICK_W, top + PICK_H };
+}
+
 static void CloseColourPicker(bool keep)
 {
 	if (!keep && g_pickTarget) *g_pickTarget = g_pickOrig;
@@ -1346,6 +1481,19 @@ static void DrawSectionHdr(HDC dc, const RECT& rc, int top, const char* text)
 	FillSolid(dc, rule, CLR_LINE);
 }
 
+// The same header with a right-aligned note. Used by the two felt-G sections to say what
+// their sliders MEAN in the current mode - the readout already names the axis a row is
+// waiting for, and this says why the number under your thumb is not the number you set.
+static void DrawSectionHdrNote(HDC dc, const RECT& rc, int top, const char* text, const char* note)
+{
+	DrawSectionHdr(dc, rc, top, text);
+	if (!note || !*note) return;
+	SelectObject(dc, g_fontSmall);
+	SetTextColor(dc, CLR_TEXT_DIM);
+	RECT rn = { rc.right / 2, top - 1, rc.right - SEC_RPAD, top + 16 };
+	DrawTextA(dc, note, -1, &rn, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+}
+
 // What each tab's SAVE writes, and to where. The SCOPE is the whole point of the split
 // (invariant 17): the pilot's settings follow the PILOT, a hull's follow the HULL, and a
 // world's aurora follows the WORLD. Saying so on every tab is what stops "I saved it and it
@@ -1388,7 +1536,17 @@ static void PaintTabSave(HDC dc, const RECT& rc)
 {
 	char cap[128];
 	TabSaveCaption(g_tab, cap, sizeof(cap));
-	DrawCaption(dc, 16, TabSaveY() - 6, cap);
+	// Bounded + ellipsised rather than a bare TextOutA: the scope captions run to ~55
+	// characters and REVERT moved the free space in from 400 px to ~320, which is close
+	// enough that a longer class name would have overprinted the button. Clipping here is
+	// cheaper than policing every caption string forever.
+	{
+		SelectObject(dc, g_fontSmall);
+		SetTextColor(dc, CLR_TEXT_DIM);
+		RECT rcap = { 16, TabSaveY() - 6, TabRevBtnRect(rc).left - 8, TabSaveY() + 10 };
+		DrawTextA(dc, cap, -1, &rcap, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+	}
+	DrawButton(dc, TabRevBtnRect(rc), "REVERT", false, CLR_PILL_OFF);
 	DrawButton(dc, TabSaveBtnRect(rc), "SAVE", false, CLR_ACCENT);
 	RECT rule = { 16, TabSaveY() + 14, rc.right - SEC_RPAD, TabSaveY() + 15 };
 	FillSolid(dc, rule, CLR_LINE);
@@ -1432,7 +1590,20 @@ static void DrawFxRow(HDC dc, const RECT& rc, int cy, const FxRow& row)
 	DrawPill(dc, PillRectAt(cy), en);
 	DrawRowLabel(dc, cy, row.label, en);
 	DrawSlider(dc, TrackRectAt(rc, cy), *RowKnob(row), en);
-	sprintf_s(val, "%d", (int)(*row.value * 100.0f + 0.5f));
+	const int pct = (int)(*row.value * 100.0f + 0.5f);
+	// PHYSICS, gain up, output still zero: the model is simply not driving this row yet, so
+	// name the axis it wants instead of printing a 0 that reads as a dead control (see the
+	// FxRow header). Drawn dim and in the value column's own font so it cannot be mistaken
+	// for a number. A gain of zero really IS off, and prints 0 like anything else.
+	if (en && g_fx.physicsMode && pct == 0 && row.driver && *row.gain > 0.0f) {
+		SelectObject(dc, g_fontSmall);
+		SetTextColor(dc, CLR_TEXT_DIM);
+		RECT rv = ValueRectAt(rc, cy);
+		rv.top -= 1;
+		DrawTextA(dc, row.driver, -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+		return;
+	}
+	sprintf_s(val, "%d", pct);
 	DrawValue(dc, rc, cy, val, en);
 }
 
@@ -1442,14 +1613,16 @@ static void DrawFxRow(HDC dc, const RECT& rc, int cy, const FxRow& row)
 // ----------------------------------------------------------------------------
 static void PaintVision(HDC dc, const RECT& rc)
 {
-	DrawSectionHdr(dc, rc, VisHdrY(), "V I S I O N");
+	DrawSectionHdrNote(dc, rc, VisHdrY(), "V I S I O N",
+	                   g_fx.physicsMode ? "slider = gain on the model" : "slider = the value");
 	for (int i = 0; i < NVIS; i++) DrawFxRow(dc, rc, VisRowY(i), g_visRows[i]);
 	DrawButton(dc, BlinkBtnRect(), "Blink", false, CLR_ACCENT);
 }
 
 static void PaintMotion(HDC dc, const RECT& rc)
 {
-	DrawSectionHdr(dc, rc, MotHdrY(), "M O T I O N");
+	DrawSectionHdrNote(dc, rc, MotHdrY(), "M O T I O N",
+	                   g_fx.physicsMode ? "slider = gain on the model" : "slider = the value");
 	for (int i = 0; i < NMOT; i++) DrawFxRow(dc, rc, MotRowY(i), g_motRows[i]);
 }
 
@@ -1470,12 +1643,15 @@ static void PaintCamShake(HDC dc, const RECT& rc)
 		const float frac = (sr.vmax > 0.0f) ? (*sr.value / sr.vmax) : 0.0f;
 		DrawRowLabel(dc, cy, sr.label, en);
 		DrawSlider(dc, TrackRectAt(rc, cy), frac, en);
-		if (sr.hz) sprintf_s(val, "%.0f", *sr.value);
-		else       sprintf_s(val, "%.1f", *sr.value * 1000.0f);   // metres -> mm (tenths)
+		if      (sr.raw) sprintf_s(val, "%.2f", *sr.value);        // a gain, not a length
+		else if (sr.hz)  sprintf_s(val, "%.0f", *sr.value);
+		else             sprintf_s(val, "%.1f", *sr.value * 1000.0f);   // metres -> mm (tenths)
 		DrawValue(dc, rc, cy, val, en);
 	}
 	// The intensity is NOT a slider here - say so, it is the one physics-driven effect.
+	// The second line names the split: which row is the lean and which four are the rattle.
 	DrawCaption(dc, LABEL_X, MotCapY(), "intensity is physics-driven - these shape the look");
+	DrawCaption(dc, LABEL_X, MotCapY() + 14, "seat push = the lean; X/Y/Z + frequency = the buffet");
 }
 
 // Per-row captions: these two effects share only their domain, so each says its own
@@ -1545,8 +1721,10 @@ static void PaintParticles(HDC dc, const RECT& rc)
 
 	// Air fade: stock's atmospheric ramp emits NOTHING in vacuum, so this is a
 	// button rather than a hidden default - see prtAirFade. The label says what
-	// happens, not what the flag is called.
-	DrawRowLabel(dc, PrtAirY(), "Air fade", pen);
+	// happens, not what the flag is called. The LABEL carries the live diagnostic:
+	// while the fade is actually holding emission off, the row says so, which is what
+	// let the default become the physically honest one (see prtAirFade's ⚠️).
+	DrawRowLabel(dc, PrtAirY(), g_fx.prtVacuum ? "Air fade - in vacuum" : "Air fade", pen);
 	DrawButton(dc, RowBtnRect(rc, PrtAirY()),
 	           g_fx.prtAirFade ? "FADES IN VACUUM" : "ALWAYS ON", pen, CLR_PILL_ON);
 
@@ -1557,9 +1735,10 @@ static void PaintParticles(HDC dc, const RECT& rc)
 	DrawSwatch(dc, SwatchRect(PrtColY(), 0), g_fx.prtColour, pen && tint);
 
 	DrawCaption(dc, LABEL_X, PrtCapY(),
-	            pen ? (g_fx.prtInfo[0] ? g_fx.prtInfo : "resolving...")
-	                : (g_fx.stockParticles ? "off - the vessel author's streams are flying"
-	                                       : "off - no exhaust particles at all"));
+	            !pen ? (g_fx.stockParticles ? "off - the vessel author's streams are flying"
+	                                        : "off - no exhaust particles at all")
+	                 : (g_fx.prtVacuum ? "streams live, but AIR FADE is holding emission off up here"
+	                                   : (g_fx.prtInfo[0] ? g_fx.prtInfo : "resolving...")));
 	// STOCK PARTICLES: the vessel author's own exhaust streams. Independent of the
 	// EXHAUST tab's billboard pill since the patch-(n) split.
 	const bool shave2 = OroStockExhaustSupported();
@@ -1572,6 +1751,14 @@ static void PaintParticles(HDC dc, const RECT& rc)
 	                    : (g_fx.stockParticles ? "flying the vessel author's own exhaust streams"
 	                                           : (g_fx.prtEnabled ? "suppressed - ORO's streams instead"
 	                                                              : "suppressed - no exhaust particles at all")));
+	// ⚠️ CROSS-REFERENCE THE PARTNER PILL, because the split is invisible from either
+	// side. Patch (n) was deliberately SPLIT into billboard and stream bits, on two
+	// sub-tabs (invariant 23n) - the right call, and a beta tester standing on this
+	// exact row asked for "a similar option on the EXHAUST sub-tab", which has had one
+	// all along at the bottom of its own scroll. A control nobody can find is a control
+	// that does not exist, and one line of text is the whole fix.
+	DrawCaption(dc, LABEL_X, PrtStkCapY() + 14,
+	            "stock BILLBOARDS have their own pill on the EXHAUST sub-tab");
 }
 
 static void PaintThruster(HDC dc, const RECT& rc)
@@ -1669,9 +1856,22 @@ static void PaintThruster(HDC dc, const RECT& rc)
 		sprintf_s(val, "%.0f", g_fx.plumeBellCoolT);
 		DrawValue(dc, rc, BglCoolY(), val, ben);
 
+		// The bell's HUE (2026-08-15). The trim above scales r/g/b uniformly, so it could
+		// only ever make the bell brighter AMBER - which is what a tester reported where
+		// they expected white/red. This rotates the blackbody ramp onto the picked hue and
+		// leaves its structure alone, so the bell still whitens at peak through the bloom.
+		DrawRowLabel(dc, BglColY(), "Bell colour", ben);
+		DrawSwatch(dc, SwatchRect(BglColY(), 0), g_fx.bellTint, ben);
+
+		// The bell reaches WHITE through the client's bloom, not through its palette
+		// (invariant 23g - the emissive is driven past the fp16 threshold on purpose), so
+		// with post-processing off it can only ever read amber however hot it gets. That is
+		// almost certainly what a tester saw, and it is a settings line rather than a
+		// tuning fault - so the caption says which one you are looking at.
 		DrawCaption(dc, LABEL_X, BglCapY(),
-		            ben ? (g_fx.plumeBellInfo[0] ? g_fx.plumeBellInfo : "resolving...")
-		                : "off - needs Meshes\\ORO\\<class>_bell.msh; heat follows thrust^1/4");
+		            !ben ? "off - needs Meshes\\ORO\\<class>_bell.msh; heat follows thrust^1/4"
+		                 : (!OroBloomOn() ? "Light glow is OFF - the bell cannot reach white, only brighter amber"
+		                                  : (g_fx.plumeBellInfo[0] ? g_fx.plumeBellInfo : "resolving...")));
 	}
 
 	// STOCK EXHAUST (client patch n): pill ON = stock billboards + particle streams
@@ -1683,10 +1883,14 @@ static void PaintThruster(HDC dc, const RECT& rc)
 	DrawCaption(dc, LABEL_X, StkPillY() - 7,
 	            shave ? "S T O C K   E X H A U S T"
 	                  : "S T O C K   E X H A U S T   -   n e e d s   p a t c h  ( n )");
+	// Same cross-reference as the PARTICLES tab's own stock pill: this one owns the
+	// BILLBOARDS only, and saying so on both sides is what makes the (n) split visible.
 	DrawCaption(dc, LABEL_X, StkCapY(),
 	            !shave ? "the running client cannot suppress - stock always renders"
-	                   : (g_fx.stockExhaust ? "stock billboards render under the overlay"
-	                                        : "billboards suppressed - particles on the PARTICLES tab"));
+	                   : (g_fx.stockExhaust ? "stock BILLBOARDS render under the overlay"
+	                                        : "stock BILLBOARDS suppressed"));
+	DrawCaption(dc, LABEL_X, StkCapY() + 14,
+	            "stock PARTICLES have their own pill on the PARTICLES sub-tab");
 
 	// CANCEL THRUST (session-only test-stand rig): a counter-force nulls the focus
 	// vessel's own thrust at the CoM each step, so the engines fire at any throttle
@@ -1708,9 +1912,17 @@ static void PaintReentry(HDC dc, const RECT& rc)
 	// scene depth buffer, the per-pixel clip silently dies everywhere, and the
 	// only symptom on screen is plasma painting through the hull - which cost a
 	// full confused round on 2026-08-08 before the log was read.
+	// The same discipline now covers the client's BLOOM, and for the same reason: the
+	// plasma composites PRE-RESOLVE into the fp16 chain specifically so that white emerges
+	// from HDR accumulation (patch i, invariant 20). With post-processing off nothing ever
+	// blooms, every edge stays exactly as authored, and the effect reads hard and "pointy" -
+	// which is what two beta testers reported, from a settings line we could not see.
+	// Precedence is deliberate: the depth warning first, because plasma painting through
+	// the hull is the worse breakage of the two.
 	DrawCaption(dc, LABEL_X, ReeCapY(),
-	            OroDepthClipOK() ? g_envCaps[1]
-	                               : "depth occlusion OFF - enable Sun glare in the D3D9 video tab");
+	            !OroDepthClipOK() ? "depth occlusion OFF - enable Sun glare in the D3D9 video tab"
+	                              : (!OroBloomOn() ? "Light glow is OFF - the plasma will read hard-edged; white comes from bloom"
+	                                               : g_envCaps[1]));
 
 	char val[16];
 	// Plasma heat of the CAMERA-TARGET vessel. Same reasoning as the felt-G readout: the
@@ -1877,7 +2089,7 @@ static void PaintAurora(HDC dc, const RECT& rc)
 	SelectObject(dc, g_fontMono);
 	SetTextColor(dc, !active ? CLR_TEXT_DIM
 	                         : (g_fx.auroraBody[0] ? CLR_ACCENT : CLR_TEXT_HI));
-	RECT rv = ValueRectAt(rc, AurBodyY());
+	RECT rv = ReadRectAt(rc, AurBodyY());   // world names run past seven characters
 	DrawTextA(dc, cap, -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
 }
 
@@ -1916,17 +2128,20 @@ static void PaintLightning(HDC dc, const RECT& rc)
 	const bool active = en || g_fx.ltgTest;
 	DrawRowLabel(dc, LtgBodyY(), "Storms over", active);
 	char cap[48];
-	// ⚠ THE VALUE COLUMN IS ~56 px - about EIGHT mono characters - and DrawTextA is
-	// right-aligned, so anything longer renders as its own TAIL. This line used to read
-	// "%s  (%d cells)", which showed up in the panel as the word "cells)" and nothing
-	// else. Keep every readout in this column short enough to survive (found 2026-08-10,
-	// from a screenshot, alongside the same bug in the new god-ray readout).
-	if (active && g_fx.ltgBody[0]) sprintf_s(cap, "%.5s %d", g_fx.ltgBody, g_fx.ltgCells);
-	else                           strcpy_s(cap, "-");
+	// The "cells)" bug (2026-08-10) was worked around by TRUNCATING the world name to five
+	// characters, which cost the readout most of its meaning to fit a 46 px column. It has
+	// the whole track column now (ReadRectAt), so it can say the world's real name and the
+	// count in full. ⚠️ A beta tester reported the clipping AFTER the workaround shipped -
+	// they are on 260810 and the fix landed on the 11th - so their report is stale; this
+	// change is the proper version of it rather than a second fix for the same thing.
+	if (active && g_fx.ltgBody[0])
+		sprintf_s(cap, "%s - %d cell%s", g_fx.ltgBody, g_fx.ltgCells, g_fx.ltgCells == 1 ? "" : "s");
+	else
+		strcpy_s(cap, "-");
 	SelectObject(dc, g_fontMono);
 	SetTextColor(dc, !active ? CLR_TEXT_DIM
 	                         : (g_fx.ltgCells > 0 ? CLR_ACCENT : CLR_TEXT_HI));
-	RECT rv2 = ValueRectAt(rc, LtgBodyY());
+	RECT rv2 = ReadRectAt(rc, LtgBodyY());
 	DrawTextA(dc, cap, -1, &rv2, DT_RIGHT | DT_TOP | DT_SINGLELINE);
 }
 
@@ -1964,7 +2179,7 @@ static void PaintGodRays(HDC dc, const RECT& rc)
 	SelectObject(dc, g_fontMono);
 	SetTextColor(dc, !active ? CLR_TEXT_DIM
 	                         : (g_fx.grayVis > 0.004f ? CLR_ACCENT : CLR_TEXT_HI));
-	RECT rv3 = ValueRectAt(rc, GryWhyY());
+	RECT rv3 = ReadRectAt(rc, GryWhyY());   // grayWhy says WORDS ("sun behind", "vacuum")
 	DrawTextA(dc, val, -1, &rv3, DT_RIGHT | DT_TOP | DT_SINGLELINE);
 }
 
@@ -2065,6 +2280,13 @@ static void PaintPilot(HDC dc, const RECT& rc)
 	DrawRowLabel(dc, PilRowY(4), "G reference", phys);
 	DrawButton(dc, PilotBtnRect(PilRowY(4), 110), g_fx.gRefCamera ? "Camera" : "Vessel CoM", false, CLR_ACCENT);
 
+	// 5 - which internal views the physiology is allowed into. Not gated on `phys`: it
+	// governs the LAB sliders and the scenarios too, and a 2D-panel pilot running an
+	// INDUCE clip is exactly who would want it narrowed.
+	DrawRowLabel(dc, PilRowY(5), "Effects view", true);
+	DrawButton(dc, PilotBtnRect(PilRowY(5), 110), g_fx.fxVCOnly ? "VC only" : "Panel + VC",
+	           g_fx.fxVCOnly, CLR_PILL_ON);
+
 	// --- live readout ---
 	DrawCaption(dc, 16, PilReadCapY(), "F E L T   G");
 	struct { const char* label; float v; bool pct; } rd[NPILREAD] = {
@@ -2141,7 +2363,7 @@ static void PaintVapour(HDC dc, const RECT& rc)
 	SelectObject(dc, g_fontMono);
 	SetTextColor(dc, !active ? CLR_TEXT_DIM
 	                         : (g_fx.vapVis > 0.004f ? CLR_ACCENT : CLR_TEXT_HI));
-	RECT rv4 = ValueRectAt(rc, VapWhyY());
+	RECT rv4 = ReadRectAt(rc, VapWhyY());   // "M 1.15  85%" is eleven characters
 	DrawTextA(dc, val, -1, &rv4, DT_RIGHT | DT_TOP | DT_SINGLELINE);
 }
 
@@ -2150,6 +2372,19 @@ static void PaintFlightAid(HDC dc, const RECT& rc)
 	DrawSectionHdr(dc, rc, AidHdrY(), "F L I G H T   A I D");
 	const bool en = g_fx.masterArmed;
 	char val[32];
+
+	// ⚠️ SAY WHAT THIS SECTION IS, FIRST. It is the one part of ORO that changes what the
+	// VESSEL DOES rather than what you SEE, it is the last section on the tab, and it
+	// ships enabled on the DG and Atlantis - so a beta tester flew it for hours,
+	// attributed the handling to "PULSE changes the aerodynamic model", and never found
+	// the slider that was doing it. Everything above this line is an effect; this is not.
+	SelectObject(dc, g_fontSmall);
+	SetTextColor(dc, CLR_ACCENT);
+	{
+		RECT rwh = { 16, AidWhatY(), rc.right - SEC_RPAD, AidWhatY() + 20 };
+		DrawTextA(dc, "TEST RIG - this one changes how the VESSEL FLIES, not how it looks",
+		          -1, &rwh, DT_LEFT | DT_TOP | DT_SINGLELINE);
+	}
 
 	const int cy = AidKnobY();
 	DrawRowLabel(dc, cy, "CoP shift (m)", en);
@@ -2163,15 +2398,24 @@ static void PaintFlightAid(HDC dc, const RECT& rc)
 	DrawTextA(dc, "forward (+) = less nose-down = holds AoA. 0 = vessel untouched", -1, &rw,
 	          DT_LEFT | DT_TOP | DT_SINGLELINE);
 
+	// The regime gate. Default REENTRY ONLY - see g_fx.copReentryOnly for the PIO report
+	// that put it there. ALWAYS is the pre-2026-08-15 behaviour, kept as the escape hatch.
+	DrawRowLabel(dc, AidGateY(), "Applies", en);
+	DrawButton(dc, RowBtnRect(rc, AidGateY()),
+	           g_fx.copReentryOnly ? "REENTRY ONLY (M 3+)" : "ALWAYS", g_fx.copReentryOnly, CLR_PILL_ON);
+
 	// Live pitch moment. Greys out at zero air the same way it greys out disarmed -
-	// both mean "nothing is being applied", which is exactly what you want to see.
+	// both mean "nothing is being applied", which is exactly what you want to see. And
+	// when the GATE is what is holding it off, the readout says so rather than reading 0:
+	// the same rule the PHYSICS gain sliders just learned on the G-FORCE tab.
 	const bool live = en && fabs(g_fx.copShift) > 0.001f;
 	DrawRowLabel(dc, AidReadY(), "Pitch moment", live);
-	sprintf_s(val, "%+.1f kNm", g_fx.copMoment);
+	if (live && g_fx.copGated) sprintf_s(val, "M %.1f - gated", g_fx.copMach);
+	else                       sprintf_s(val, "%+.1f kNm", g_fx.copMoment);
 	SelectObject(dc, g_fontMono);
 	SetTextColor(dc, !live ? CLR_TEXT_DIM
 	                       : (fabs(g_fx.copMoment) > 0.05f ? CLR_TEXT_HI : CLR_TEXT_DIM));
-	RECT rv = ValueRectAt(rc, AidReadY());
+	RECT rv = ReadRectAt(rc, AidReadY());   // "M 0.7 - gated" is thirteen
 	DrawTextA(dc, val, -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
 }
 
@@ -2245,9 +2489,24 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 		SelectObject(dc, g_fontSmall);
 		SetTextColor(dc, CLR_TEXT_DIM);
 		RECT rsv = SaveBtnRect(rc);
-		RECT rst = { rb.right + 10, rb.top, rsv.left - 8, rb.bottom };
-		DrawTextA(dc, "Master arm - all effects (Ctrl+G)", -1, &rst,
-		          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+		RECT rhp = HelpBtnRect(rc);
+		// The group cycler, THRUSTER tab only. Greys to a plain label when the vessel
+		// has only one group - there is nothing to cycle to, and a button that moves
+		// between identical states is worse than no button (invariant 18b's rule).
+		const bool thrTab = (g_tab == 1);
+		RECT rgp = ThrGrpBtnRect(rc);
+		if (thrTab) {
+			char gl[48];
+			const int ng = OroThr_Count();
+			sprintf_s(gl, ng > 1 ? "%s  (%d)" : "%s", OroThr_Name(g_fx.thrSel), ng);
+			DrawButton(dc, rgp, gl, ng > 1, ng > 1 ? CLR_PILL_ON : CLR_PILL_OFF);
+		}
+		RECT rst = { rb.right + 10, rb.top, (thrTab ? rgp.left : rhp.left) - 8, rb.bottom };
+		DrawTextA(dc, thrTab ? "Editing engine group:" : "Master arm - all effects (Ctrl+G)",
+		          -1, &rst, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+		// Lit green while the help window is up, so the button doubles as the answer to
+		// "is it already open, or did it open behind the sim window?"
+		DrawButton(dc, rhp, "HELP", g_hHelp != NULL, CLR_PILL_ON);
 		DrawButton(dc, rsv, "SAVE", false, CLR_ACCENT);
 	}
 	RECT rSep2 = { 0, PANE_Y - 1, W, PANE_Y };
@@ -2326,7 +2585,10 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 				strcat_s(what, OroSettings_Body());
 			}
 			if (!what[0]) strcpy_s(what, "nothing yet - no vessel or world in range");
-			sprintf_s(statusBuf, "Saved: %s. Reloaded automatically next time.", what);
+			if (g_saveWasRevert)
+				sprintf_s(statusBuf, "Reverted: %s - back to the last saved values.", what);
+			else
+				sprintf_s(statusBuf, "Saved: %s. Reloaded automatically next time.", what);
 		}
 		status = statusBuf;
 		alert  = !g_saveOk;
@@ -2571,6 +2833,7 @@ static BOOL ClickThruster(HWND hDlg, const RECT& rc, int x, int y)
 			g_fx.plumeBellCoolT = 5.0f + TrackValueFromX(rc, x) * 115.0f;
 			return TRUE;
 		}
+		if (PtIn(SwatchRect(BglColY(), 0), x, y)) { OpenColourPicker(hDlg, g_fx.bellTint, BglColY()); return TRUE; }
 	}
 	// STOCK EXHAUST pill (patch n) - inert without the capability (invariant 18b:
 	// a switch that cannot do anything is worse than no switch).
@@ -2807,6 +3070,10 @@ static BOOL ClickPilot(HWND hDlg, const RECT& rc, int x, int y)
 		g_fx.gRefCamera = !g_fx.gRefCamera;
 		return TRUE;
 	}
+	if (PtIn(PilotBtnRect(PilRowY(5), 110), x, y)) {
+		g_fx.fxVCOnly = !g_fx.fxVCOnly;
+		return TRUE;
+	}
 	if (PtIn(TrackRectAt(rc, PilRowY(1)), x, y, 8)) {
 		g_dragTol = 1;
 		SetCapture(hDlg);
@@ -2871,6 +3138,10 @@ static BOOL ClickFlightAid(HWND hDlg, const RECT& rc, int x, int y)
 		g_fx.copShift = EnvKnobValueFromX(rc, x, COP_MAX);
 		return TRUE;
 	}
+	if (PtIn(RowBtnRect(rc, AidGateY()), x, y)) {
+		g_fx.copReentryOnly = !g_fx.copReentryOnly;
+		return TRUE;
+	}
 	return FALSE;
 }
 
@@ -2898,6 +3169,993 @@ static BOOL ClickScenarios(const RECT& rc, int x, int y)
 	return FALSE;
 }
 
+// ============================================================================
+// THE HELP WINDOW (2026-08-16)
+// ----------------------------------------------------------------------------
+// A second Orbiter-managed dialog, opened from the HELP button in the fixed strip and
+// showing the help for WHICHEVER TAB WAS ACTIVE when it was pressed. Same dark palette
+// and same owner-drawn approach as the panel; no banner, resizable in both axes.
+//
+// WHY AN ORBITER DIALOG AND NOT A RAW CreateWindowEx: the same reason the panel is one.
+// oapiOpenDialog windows work in fullscreen, get Orbiter's caption skinning, and - the
+// lesson from this morning - are pumped by OrbiterDefDialogProc's frame timer while
+// being dragged. A hand-rolled window would have to re-earn all three.
+//
+// TEXT LAYOUT IS MEASURED, NOT TABULATED. Every block is word-wrapped with DT_WORDBREAK
+// and its height taken from DT_CALCRECT at the CURRENT width, so resizing genuinely
+// reflows rather than clipping - which is the only thing that makes a resizable help
+// window worth having. The same walk both measures and draws (bMeasure), so the scroll
+// range can never disagree with what is on screen.
+// ============================================================================
+
+static int   g_helpTab   = 0;       // which tab's text it is showing (g_hHelp is declared
+                                    // with the other window handles at the top of the file)
+static int   g_helpScroll = 0;      // px
+static int   g_helpDoc   = 0;       // measured document height at the last paint
+static int   g_helpDragBar = -1;    // scrollbar thumb grab offset, -1 = none
+static int   g_helpSavedW = 0, g_helpSavedH = 0;   // last size written to window.cfg
+
+static const int HELP_W_DEF = 520, HELP_H_DEF = 660;
+static const int HELP_W_MIN = 380, HELP_H_MIN = 300;
+static const int HELP_PAD   = 20;   // left/right margin
+static const int HELP_TOP   = 16;
+
+// ----------------------------------------------------------------------------
+// THE HELP WINDOW HAS ITS OWN FONTS, AND THAT IS THE POINT (2026-08-16).
+// It first borrowed the panel's -13/-11 pair, which is the wrong instinct dressed up as
+// consistency. Those two sizes are small for TWO reasons, and NEITHER of them applies
+// here: the panel has to fit ~90 controls across five tabs, and it has to stay small
+// enough that you can still see the sim you are tuning behind it. A help window fits
+// nothing and hides nothing - it is read, at length, and then closed. So it is sized for
+// READING and the panel keeps its own scale.
+// The hierarchy is carried by weight as much as size, so the three levels stay distinct
+// without the headings becoming shouty.
+static HFONT g_hfTitle = NULL;      // the small accent tab name at the top
+static HFONT g_hfHead  = NULL;      // section headings
+static HFONT g_hfName  = NULL;      // a control's name
+static HFONT g_hfBody  = NULL;      // running text - the size that actually matters
+
+static void CreateHelpFontsOnce()
+{
+	if (g_hfBody) return;
+	g_hfTitle = CreateFontA(-15, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI");
+	g_hfHead  = CreateFontA(-21, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI");
+	g_hfName  = CreateFontA(-18, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI");
+	g_hfBody  = CreateFontA(-17, 0, 0, 0, FW_NORMAL,   0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI");
+}
+
+// Block kinds. Deliberately few: a heading, a named control with its explanation, a
+// running paragraph, and a spacer. Anything richer would be a layout engine.
+enum { HK_H = 0, HK_ROW, HK_P, HK_GAP };
+struct HelpItem { int kind; const char* a; const char* b; };
+
+// --- TAB 0: G-FORCE ---------------------------------------------------------
+// Written against the code, not from memory: the thresholds quoted are the ones in
+// OroPhysics.cpp's step 5, and the axis each row answers to is the one the panel's own
+// PHYSICS readout names when it is idle.
+static const HelpItem HELP_GFORCE[] = {
+{ HK_H,   "WHAT THIS TAB IS", NULL },
+{ HK_P,   "Everything here is what high G does to the PILOT - the effects you see because "
+          "of what is happening to the body in the seat, not to the ship. They only draw in "
+          "an internal cockpit view.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "THE ONE THING TO UNDERSTAND FIRST", NULL },
+{ HK_P,   "The PILOT section has an Effect source switch with two positions, and it changes "
+          "what every slider on this tab MEANS.", NULL },
+{ HK_ROW, "LAB",     "The sliders ARE the effect. Drag Blackout to 0.60 and you get 60% "
+                     "blackout, right now, whatever the ship is doing. This is for seeing "
+                     "what each effect looks like." },
+{ HK_ROW, "PHYSICS", "The felt-G model computes the effects from the vessel's real motion, "
+                     "and each slider becomes a GAIN on its own effect - a multiplier, not a "
+                     "value. Pull G and the symptoms arrive by themselves." },
+{ HK_P,   "The consequence catches everyone: in PHYSICS, a gain times zero is still zero. If "
+          "the axis a row answers to is not being loaded, that row reads 0 no matter how far "
+          "you push its slider, and it looks broken when it is working perfectly. So while the "
+          "model is producing nothing, the number is replaced by the axis the row is WAITING "
+          "for - +Gz, -Gz or Gx. A row showing +Gz is armed and waiting for you to pull.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "IN PHYSICS: WHAT THE PILL AND THE SLIDER ACTUALLY DO", NULL },
+{ HK_ROW, "The pill is a DRAW gate, and nothing else",
+          "The model computes every effect every frame whether or not its pill is on. The "
+          "pill is checked much later, when the frame is painted. Turning it off is closing "
+          "your eyes to a symptom, not curing it - and note the row's slider becomes "
+          "un-draggable until you turn the pill back on." },
+{ HK_ROW, "Two pills reach further than their own row",
+          "Blackout suppresses the sparkles, so switching blackout OFF lets phosphenes "
+          "survive where they would normally have been swallowed. And the heartbeat adds "
+          "its throb to the tunnel and drives the heartbeat SOUND, so switching it off "
+          "takes both of those with it." },
+{ HK_ROW, "The gain is a plain multiply",
+          "Set it to half and you get exactly half - the model's number, multiplied. No "
+          "curve, no threshold shift." },
+{ HK_ROW, "It is a VOLUME knob, not a SENSITIVITY knob",
+          "Halving a gain does not make the symptom arrive later. It arrives at exactly the "
+          "same point in the pull, only weaker, and it can never reach full. If you want a "
+          "symptom to start LATER, that is G tolerance or the anti-G suit - those move the "
+          "real threshold. The gains only scale what comes out of the far end." },
+{ HK_ROW, "You can attenuate, never exaggerate",
+          "Gains run 0 to 1, so in PHYSICS the model is the ceiling. This is the one real "
+          "asymmetry with LAB, where the same slider spans the whole effect directly - LAB "
+          "will show you a total blackout parked on the runway, PHYSICS caps you at what "
+          "you have actually earned." },
+{ HK_P,   "And the part that surprises people: NONE OF THIS REACHES THE PHYSIOLOGY. The "
+          "oxygen reserve, the threshold, the onset-rate penalty and the fourteen-second "
+          "G-LOC hold never see the pills or the gains. Set every gain to zero and you will "
+          "still black out, still be incapacitated for the full fourteen seconds, and the "
+          "recovery eye-flutter will still fire - the blink has no pill and no gain, it is "
+          "fired straight from the G-LOC timer. The model is untouched by everything on "
+          "this tab except the four PILOT controls; the pills and gains live entirely on "
+          "the output side.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "VISION - the symptoms, in the order a real pull produces them", NULL },
+{ HK_P,   "These are separate symptoms and they layer. All except red-out track your oxygen "
+          "reserve, which is drained by sustained POSITIVE G - so they arrive in sequence as "
+          "the reserve empties, and they do not all appear at once.", NULL },
+{ HK_ROW, "Heartbeat",    "The field pulses darker with each beat, and drives the heartbeat "
+                          "sound. First to appear. It also deepens the tunnel as it throbs, so "
+                          "the pulse survives even when the tunnel has closed." },
+{ HK_ROW, "Grey-out",     "Colour drains before brightness does. Full-frame, not a vignette." },
+{ HK_ROW, "Swim",         "A slow woozy warp of the periphery. Disorientation." },
+{ HK_ROW, "Dark spots",   "Shimmering blind patches drifting across the field (scotomas)." },
+{ HK_ROW, "Tunnel vision","Peripheral vision closes to a narrowing circle." },
+{ HK_ROW, "Sparkles",     "Seeing stars - bright scintillations. A BAND, not a ramp: they "
+                          "belong to the middle of the descent and are gone by the time the "
+                          "field is black." },
+{ HK_ROW, "Blackout",     "Vision gone. Last to arrive, and if your reserve empties completely "
+                          "you are out for fourteen seconds whatever the G does next." },
+{ HK_ROW, "Red-out",      "The red veil of NEGATIVE G, blood forced toward the head. A "
+                          "different mechanism entirely: no reserve, prompt onset, and an "
+                          "anti-G suit does nothing for it. Humans tolerate this direction "
+                          "worst - about -2 to -3 G." },
+{ HK_ROW, "Blur",         "Vision softens. The one row with two causes: eyeball deformation "
+                          "under fore/aft G, OR deep positive G, whichever is producing more." },
+{ HK_ROW, "Aberration",   "Colour channels split toward the edges. Rides Gx alone - eyeballs "
+                          "in or out. IT WILL NEVER MOVE DURING A POSITIVE-G PULL, and that is "
+                          "correct, not a fault." },
+{ HK_ROW, "BLINK",        "Fires a single blink. For testing." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "MOTION", NULL },
+{ HK_ROW, "Tilt / sway",  "The whole view rolls. Two things at once: a woozy sway as you "
+                          "approach blackout, and a signed LEAN toward lateral G - your head "
+                          "lolling toward the load. Left and right tip opposite ways." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "PILOT - what the model assumes about the body in the seat", NULL },
+{ HK_ROW, "G tolerance",  "How much G you take before symptoms begin. The readout shows the "
+                          "threshold it produces in G, because a 0-to-1 abstraction would be "
+                          "unreadable - 4.0 is a number you can argue with." },
+{ HK_ROW, "Anti-G suit",  "Worth about 1.5 G, POSITIVE G only. It stops blood leaving the "
+                          "head, so it does nothing for red-out." },
+{ HK_ROW, "Position",     "Seated, reclined, prone, standing or couch. This decides which "
+                          "vessel axis is your SPINE, and therefore which manoeuvre loads "
+                          "you. A reclined pilot takes more G - it shortens the blood column "
+                          "between heart and eye, which is why fighter seats recline." },
+{ HK_ROW, "G reference",  "Camera, or the vessel's centre of mass. IN ORBIT THIS IS THE WHOLE "
+                          "EFFECT: free-falling, the centre of mass feels exactly zero, while "
+                          "your head sitting metres away feels every rotation. Camera is the "
+                          "honest answer and the default." },
+{ HK_ROW, "Effects view", "Whether the physiology draws in any internal view, or only in the "
+                          "virtual cockpit. The heartbeat sound follows the same rule." },
+{ HK_ROW, "FELT G",       "Live readout: signed Gz (spine), Gx (eyeballs), Gy (lateral), and "
+                          "your oxygen reserve. The reserve turns red below 50% and is the one "
+                          "number worth watching - the symptoms track it, not the raw G." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "WHILE YOU ARE DOCKED", NULL },
+{ HK_P,   "Docked, the model stops asking the simulator what forces are on your hull and works "
+          "the answer out from the motion of the whole joined assembly instead. There is a good "
+          "reason: a docking latch reports the force it uses to hold two ships together, and in "
+          "a scenario that STARTS docked that force can be large and permanent even though "
+          "nothing is moving. Read literally it puts a steady G on you that is not there - a "
+          "DeltaGlider parked at the ISS reads 1.5 G of nothing, which used to tilt the "
+          "horizon and leave it tilted.", NULL },
+{ HK_ROW, "What you still feel", "Your own engines, fired at a dock. And ROTATION - if you are "
+                          "docked to a spinning station you feel real artificial gravity, "
+                          "measured from your distance to the whole assembly's centre of mass. "
+                          "That is the ring's radius, so a big wheel gives you a real floor to "
+                          "stand on, and it falls off as you move toward the hub." },
+{ HK_ROW, "What you will not", "An acceleration applied to the assembly by somebody else - a "
+                          "station reboost, or a tug pushing the stack. That is a few "
+                          "thousandths of a G in practice." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "SCENARIOS", NULL },
+{ HK_P,   "One-click scripted G events, for when you want to see an effect without flying the "
+          "manoeuvre that causes it. INDUCE ramps up and HOLDS - you stay blacked out until "
+          "you press the matching RECOVER, which starts from exactly where the induce ended.", NULL },
+{ HK_P,   "They are LAB MODE ONLY and grey out in PHYSICS. Both a scenario and the felt-G "
+          "model write the same values every frame, and two writers on one set of numbers is a "
+          "fight nobody wins.", NULL },
+{ HK_ROW, "SOUND",        "Per-scenario audio. It can be toggled mid-run: muting pauses the "
+                          "clip and unmuting picks it up where the visuals are, rather than "
+                          "restarting it halfway through the event it describes." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "SAVING", NULL },
+{ HK_P,   "This tab saves GLOBALLY, to Config\\ORO.cfg - the same pilot flies every ship, so "
+          "none of it is per-vessel. REVERT re-reads that file and discards anything you have "
+          "moved since the last save.", NULL },
+};
+
+// --- TAB 1: THRUSTER --------------------------------------------------------
+static const HelpItem HELP_THRUSTER[] = {
+{ HK_H,   "WHAT THIS TAB IS", NULL },
+{ HK_P,   "Everything an engine does that you can see. It has two SUB-TABS because the two "
+          "halves are different in kind, not just in subject: EXHAUST is what ORO draws "
+          "itself, PARTICLES is Orbiter's own particle system with its controls exposed. "
+          "ORO draws no particles at all.", NULL },
+{ HK_P,   "This tab saves PER VESSEL CLASS. Nozzle size, engine layout and how a bell was "
+          "modelled decide every number here, so the DeltaGlider's settings are meaningless "
+          "on the Atlantis.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "FIRST: WHICH ENGINE GROUP ARE YOU EDITING?", NULL },
+{ HK_P,   "Look at the button in the top strip, beside SAVE. It names the engine group "
+          "everything on this tab is currently editing, and it stays visible however far you "
+          "scroll - because it changes what every control below it MEANS.", NULL },
+{ HK_ROW, "Click it to cycle", "It steps through the groups THIS VESSEL ACTUALLY HAS - main, "
+          "hover, retro, and any engines the author put in no standard group at all (shown "
+          "as USER). A ship with only main engines has nothing to cycle to, so the button "
+          "sits inert and says so. RCS is never included: attitude thrusters are tiny, "
+          "numerous, and would swamp everything." },
+{ HK_ROW, "Why it exists", "One set of numbers for every engine is right only while they all "
+          "burn the same propellant. The EXPANSION BAND's high handle is the pressure an "
+          "engine is RATED for; the Jet and Bloom swatches are its exhaust's colour; soot is "
+          "the difference between kerosene and hydrogen. A vacuum-rated main beside "
+          "sea-level hovers could not be described at all until this existed." },
+{ HK_ROW, "Tune one, cycle, tune the next", "Changing anything affects only the selected "
+          "group. SAVE writes the class file with every group's settings in it, so tuning "
+          "the hovers can never disturb what you did to the mains." },
+{ HK_ROW, "Your old settings are safe", "A class file written before this existed had one "
+          "set of numbers. It loads into ALL FOUR groups, so every group starts exactly "
+          "where your tuning already was and nothing changes until you cycle and edit." },
+{ HK_ROW, "Three controls stay whole-vessel", "STOCK EXHAUST, STOCK PARTICLES and CANCEL "
+          "THRUST are not per group and cannot be. The client suppresses stock exhaust for a "
+          "SHIP, not for a thruster group, and cancelling thrust acts at the centre of mass. "
+          "A per-group switch there would be a control that lies." },
+{ HK_ROW, "Engines with no exhaust of their own", "Some engines are built with no visible "
+          "exhaust at all - the DeltaGlider-S scramjets are the example, and on a stock "
+          "install they show particles and nothing else. ORO gives those a jet anyway, sized "
+          "from the hull rather than from thrust (an airbreather's rated thrust changes with "
+          "the air around it, so a nozzle sized from it would swell and shrink as you fly). "
+          "It is a reasonable guess, not the author's intent, so correct it with this group's "
+          "Width and Length - or turn the group's plume pill off if you prefer it bare." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "SUB-TAB EXHAUST - shimmer", NULL },
+{ HK_ROW, "Exhaust shimmer", "Heat haze bending the view behind the plume. Needs atmosphere "
+          "and lit engines, and it is EXTERNAL VIEW ONLY - from the cockpit the engines are "
+          "behind you, and a screen-space warp indoors would smear the panel and the window "
+          "frame along with the plume." },
+{ HK_ROW, "Offset (m)", "Slides the haze along the flow axis. Bipolar - it snaps to zero at "
+          "the centre. The nozzle a vessel DEFINES and the nozzle you can SEE do not always "
+          "agree, and this is the fix." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "PLUME EXPANSION", NULL },
+{ HK_P,   "A rocket nozzle is built for ONE ambient pressure. Everywhere else the atmosphere "
+          "decides what the jet does: overexpanded at sea level gives the narrow pinched jet "
+          "with the shock-diamond train, underexpanded in vacuum gives the wide faint bloom. "
+          "That is what this section draws.", NULL },
+{ HK_ROW, "LAB | PHYSICS", "PHYSICS lets pressure and throttle drive the shape and the "
+          "sliders trim on top; LAB pins the curves at reference so the sliders rule alone. "
+          "The two are anchored IDENTICAL at sea level and full throttle, which is what makes "
+          "PHYSICS safe to leave on - it changes nothing until you throttle back or climb. "
+          "The flip side is that on the pad the switch looks like it does nothing. It is "
+          "working; you are simply standing at the one condition where they agree." },
+{ HK_ROW, "The caption above the band", "A live readout of ambient pressure and the regime "
+          "the model has picked. Without it, 'no diamonds up here' and 'broken' look the same." },
+{ HK_ROW, "Expansion band", "TWO handles on one track, and the most important control in the "
+          "section. The LOW handle is the pressure at or below which the vacuum bloom is "
+          "fully open. The HIGH handle is full overexpansion AND the pressure the engine is "
+          "RATED for. Drag the high handle down low and you have a vacuum engine, which "
+          "duly shudders and pinches at sea level. The fade between them lives inside "
+          "whatever window you set, so the two ramps can never overlap." },
+{ HK_ROW, "Width / Length", "The jet's overall size." },
+{ HK_ROW, "Diamonds", "How many shock cells in the train. A whole number." },
+{ HK_ROW, "Diamond bright / spacing", "Contrast and pitch of the cells. In PHYSICS both are "
+          "already being driven - spacing stretches as you climb and tightens as you throttle "
+          "down - so these trim that, they do not set it." },
+{ HK_ROW, "Bloom width / bright", "The wide faint vacuum halo, the other end of the regime." },
+{ HK_ROW, "Throat glow", "The fire in the bell cup, drawn as camera-facing discs so it still "
+          "reads when you look straight up the nozzle. 0 turns it off." },
+{ HK_ROW, "Throat offset", "Where that cup sits, 0 to 1 m. Same problem as the shimmer's "
+          "offset: the visible nozzle and the defined exhaust point disagree per hull." },
+{ HK_ROW, "Soot streaks", "Dark ablative streaks shedding off the lip. 0 = off. They are "
+          "drawn dark OVER the jet, because soot is in the flame and must dim it." },
+{ HK_ROW, "Soot churn", "How fast they move. 0 freezes them." },
+{ HK_ROW, "Jet / Bloom", "Two colour swatches. The jet core reaches white through the "
+          "client's bloom, not through the palette - so with post-processing off it can only "
+          "get brighter, never whiter." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "BELL GLOW", NULL },
+{ HK_P,   "The nozzle bells heat and cool as real metal does, on SIM time, whether or not "
+          "you are watching - the same discipline as the eclipse. Equilibrium follows the "
+          "fourth root of throttle, so 10% thrust settles at about 56% temperature and never "
+          "reaches full glow at all. It needs an author-supplied bell mesh for the vessel "
+          "class; the caption under the section is the readout and says which engine families "
+          "were wired, or why nothing glows.", NULL },
+{ HK_ROW, "Bell glow", "Brightness trim." },
+{ HK_ROW, "Heat time (s)", "How fast they come up to temperature at full throttle." },
+{ HK_ROW, "Cool time (s)", "How long until the glow is COMPLETELY gone - not half gone. The "
+          "shape of the fade is preserved at any length: quick off white heat, then the long "
+          "dull-red ember tail." },
+{ HK_ROW, "Bell colour", "Rotates the whole heat ramp onto the hue you pick and keeps its "
+          "shape - still dull at the bottom, still whitening at the top. White is the default "
+          "blackbody ramp, unchanged. Like the jet, the bell reaches white through the BLOOM, "
+          "so with post-processing off it can only ever get brighter amber, and the caption "
+          "will tell you if that is what you are looking at." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "THE TWO TEST RIGS AT THE BOTTOM", NULL },
+{ HK_ROW, "STOCK EXHAUST", "Orbiter's own exhaust BILLBOARDS - the flame texture. Off hides "
+          "them so you can judge ORO's plume alone. It covers billboards ONLY; stock's "
+          "exhaust PARTICLES have their own pill on the PARTICLES sub-tab. They were split "
+          "deliberately, so an addon that replaces one of them can be handled without losing "
+          "the other. Greys out if the running client cannot suppress." },
+{ HK_ROW, "CANCEL THRUST", "A test stand: cancels the vessel's own thrust at its centre of "
+          "mass so you can run the engines up on the ground and look at them instead of "
+          "rolling off the runway. NEVER SAVED - a persisted thrust-cancel loaded into a "
+          "launch scenario would read as 'my engines are dead'." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "SUB-TAB PARTICLES", NULL },
+{ HK_P,   "ORO draws none of this. It hands Orbiter the same settings a vessel author writes "
+          "in code and lets you move them live, in the API's own units. That is why the rows "
+          "read the way they do - they are the fields of a particle stream spec, not "
+          "invented knobs.", NULL },
+{ HK_P,   "Two consequences fall straight out of the API and surprise everyone. There is no "
+          "width or length, because a particle is a ROUND sprite - Size is its radius. And "
+          "there is no colour field at all: colour lives in the texture, so the swatch works "
+          "by synthesizing one, and it greys out on a client that cannot accept it.", NULL },
+{ HK_ROW, "Offset (m)", "Where particles are born along the exhaust. The one bipolar row - "
+          "negative moves the source back toward the nozzle." },
+{ HK_ROW, "Size (m)", "Radius at birth." },
+{ HK_ROW, "Lifetime (s)", "How long each particle lives." },
+{ HK_ROW, "Rate (Hz)", "How many are created per second." },
+{ HK_ROW, "Speed (m/s)", "How fast they leave." },
+{ HK_ROW, "Spread", "Randomness in that velocity. 0 is a tight column." },
+{ HK_ROW, "Growth (m/s)", "How fast each expands as it ages." },
+{ HK_ROW, "Atm slowdown", "How hard the atmosphere brakes them." },
+{ HK_ROW, "Lighting", "EMISSIVE, glowing by themselves (flame), or DIFFUSE, lit by the sun "
+          "(smoke and vapour). The single biggest look switch in the whole spec - try both." },
+{ HK_ROW, "Air fade", "FADES IN VACUUM is Orbiter's own behaviour and the default: a stream "
+          "thins out as the air does, which is why you do not get exhaust clouds hanging in "
+          "orbit. ALWAYS ON emits everywhere. If you enable this tab in orbit on the default "
+          "and see nothing, that is the fade doing its job - the row's label changes to 'Air "
+          "fade - in vacuum' while it is holding emission off, and the caption says so." },
+{ HK_ROW, "Colour", "Tints the particles, by synthesizing a texture. Needs a patched client." },
+{ HK_ROW, "STOCK PARTICLES", "The vessel author's own exhaust streams. This pill and the one "
+          "at the top of the tab are MUTUALLY EXCLUSIVE - stock's streams or ORO's, never "
+          "both stacked. Turning one on turns the other off. Both off is fine too: no exhaust "
+          "particles at all." },
+};
+
+// --- TAB 2: REENTRY ---------------------------------------------------------
+static const HelpItem HELP_REENTRY[] = {
+{ HK_H,   "WHAT THIS TAB IS", NULL },
+{ HK_P,   "The biggest effect in the addon, plus the transonic vapour cone, plus one thing "
+          "at the bottom that is not an effect at all.", NULL },
+{ HK_P,   "It saves PER VESSEL CLASS, and that matters more here than anywhere else. How far "
+          "the glowing shell should stand off the skin is a fact about a HULL - the number "
+          "that fits the DeltaGlider sank the Atlantis within hours of being baked in as a "
+          "constant, which is why it is a slider again.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "THE TWO READOUTS - read these before you touch a slider", NULL },
+{ HK_ROW, "Plasma heat", "What the model computed for the camera-target vessel. No vessel "
+          "publishes a nose radius, so the heat thresholds cannot be derived and the number "
+          "has to be visible - otherwise 'too cold' and 'not working' look identical." },
+{ HK_ROW, "The caption under the pill", "Normally it describes the effect. It becomes a "
+          "WARNING when something in your video settings is quietly degrading it: with Sun "
+          "glare off the client never builds the depth buffer and the plasma paints straight "
+          "through the hull, and with post-processing off it can never bloom to white and "
+          "reads hard and pointy. Both are settings, not tuning faults, and both are silent "
+          "on screen - which is exactly why the caption says them." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "PLASMA TUNING - the look", NULL },
+{ HK_ROW, "Saturation", "The whole palette at once. 1 is the reference look." },
+{ HK_ROW, "Hull light", "A real light source at the stagnation point, lighting the vessel's "
+          "OWN mesh - not our geometry. 0 removes the light entirely." },
+{ HK_ROW, "Streak length / width / wander", "The flame streamers trailing back." },
+{ HK_ROW, "Wake churn", "How FAST the wake lives - fin shimmer, spark march, the drift of the "
+          "striations, all on one clock so the wake stays coherent. 1 is standard, 0 freezes "
+          "it. Turn it up if the plasma reads more like an aurora than like something being "
+          "torn off a hypersonic vehicle. Note this scales the spark march too, so 'Spark "
+          "life' means seconds at churn 1." },
+{ HK_ROW, "Fin rake (deg)", "How far the streamers splay OUT from the flow direction. 0 lays "
+          "them dead downstream. Every streamer carries the same angle whatever its length." },
+{ HK_ROW, "Sparks / Spark life / Spark size", "Burning debris marching downstream." },
+{ HK_ROW, "Edge light", "A rim light picking out the windward silhouette. Off by default." },
+{ HK_ROW, "Shock bright", "The shock envelope wrapped around the hull. 0 turns the shell off "
+          "entirely, which is the escape hatch on a vessel where it looks wrong." },
+{ HK_ROW, "Shell dist", "How far the glowing shell stands off the skin. A property of the "
+          "HULL - see the note above." },
+{ HK_ROW, "Bowl dist / Bowl size X, Y, Z", "Standoff and shape of the bow shock in front. "
+          "The three sizes sculpt it along the vessel's own axes; 1 is neutral." },
+{ HK_ROW, "Tint / Fringe", "Two colour swatches: the body hue and the magenta cast, "
+          "independently. They ROTATE the hue rather than multiplying it, so you pick a "
+          "colour and you get that colour - and white is the reference palette, unchanged." },
+{ HK_ROW, "VC ON / OFF", "Whether the plasma also draws looking OUT of the virtual cockpit. "
+          "This is the one deliberate crack in the internal/external wall. With a patched "
+          "client it cuts per pixel at the window frame." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "THE TRAIL", NULL },
+{ HK_ROW, "Trail density", "Knot spacing, not brightness - the trail is a continuous ribbon, "
+          "so there is no stacking to brighten. 0 turns it off." },
+{ HK_ROW, "Trail life (s)", "The LENGTH lever. About six seconds is tens of kilometres at "
+          "entry speed." },
+{ HK_ROW, "Trail width", "Ribbon width." },
+{ HK_ROW, "Trail start", "Where it begins, in hull sizes. BIPOLAR: negative moves it UPSTREAM "
+          "into the fireball, and the hull correctly hides the overlap." },
+{ HK_ROW, "Trail hot / tail", "Head and tail colours, blended along the trail's own age." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "VAPOUR CONE", NULL },
+{ HK_P,   "The shroud that forms going through Mach 1. Air holds water; the flow over the "
+          "hull expands, pressure and temperature drop, and the water condenses. It needs LOW "
+          "ALTITUDE as well as the right speed - the water is in the troposphere, which is "
+          "why every reference photograph of one is taken low and usually over the sea. Both "
+          "gates are read from the sim.", NULL },
+{ HK_ROW, "TEST", "Pins Mach 1.15 and bypasses the speed and altitude gates, so you can judge "
+          "it from a runway instead of flying an ascent over and over. Not 1.00, because at "
+          "exactly Mach 1 the cone is a near-flat collar and tells you almost nothing about "
+          "its shape from three of four viewing directions." },
+{ HK_ROW, "Strength", "Opacity. 0 turns it off." },
+{ HK_ROW, "Size", "Outer radius, in hull sizes. A property of the AIRFRAME." },
+{ HK_ROW, "Position", "Where it sits along the flight direction. Bipolar, snaps to zero. Also "
+          "a property of the airframe - it depends on the shape of the nose." },
+{ HK_ROW, "Mach band", "Two handles: where the cone starts and stops existing. Drag them "
+          "together for a brief flash as you punch through, apart for a long transonic haze. "
+          "The fade in and out live INSIDE whatever window you set, so a tight window is a "
+          "sharp flash rather than a fade-in that has not finished before the fade-out starts." },
+{ HK_ROW, "Flicker (Hz)", "How fast it breathes. Opacity and size vary together on ONE number, "
+          "because a stronger condensation event is denser AND bigger at the same instant - "
+          "two clocks would give you a shroud that grows while it thins, which nothing in "
+          "nature does. 0 freezes it." },
+{ HK_ROW, "Cone", "Readout: your Mach and how strong the cone is, or WHY it is not showing - "
+          "subsonic, thin air, vacuum, or internal view. The number keeps working from the "
+          "cockpit even though the cone only draws externally, because the whole point is to "
+          "tell you when to switch to an external view." },
+{ HK_P,   "The LENGTH is deliberately not a slider. It comes from the Mach angle, so the "
+          "shroud stretches back on its own as you accelerate - and that IS the effect. Give "
+          "it a slider and the cone becomes a decal that happens to be there.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "FLIGHT AID - NOT AN EFFECT", NULL },
+{ HK_P,   "Everything above this changes what you SEE. THIS CHANGES HOW THE VESSEL FLIES. It "
+          "is a test rig, not part of the visuals, and it is the only thing in ORO that "
+          "applies a real force to your ship.", NULL },
+{ HK_ROW, "CoP shift (m)", "Shifts the vessel's effective centre of pressure, which changes "
+          "its PITCH TRIM: a stock ship will hold a high angle of attack instead of "
+          "weathervaning nose-first. It exists so you can SEE a reentry at all - left alone, "
+          "stock ships drop the nose into the flight direction and make almost no plasma. "
+          "Forward (+) is less nose-down. Zero, which the knob snaps to, is the vessel "
+          "flying exactly as its author coded it." },
+{ HK_ROW, "It is enabled in the shipped settings", "For the DeltaGlider and the Atlantis, "
+          "because the reentry scenarios need it. So if one of those handles differently "
+          "from stock - trims nose-up, resists pushing the nose down - this knob is why, and "
+          "zeroing it gives you the stock airframe back on the next step." },
+{ HK_ROW, "Applies", "REENTRY ONLY (M 3+) is the default, and keeps the aid out of the way at "
+          "ordinary flying speeds. That matters: it is a steady couple added to your pitch "
+          "axis, so anything else trying to hold an attitude - an autopilot in particular - "
+          "is working against it, and at low speed the two can chase each other into a "
+          "growing oscillation. ALWAYS applies it at any speed if you want that." },
+{ HK_ROW, "Pitch moment", "What the aid is applying, live. An aid you cannot see working is "
+          "an aid you cannot tune. While the gate is holding it off it says 'gated' and your "
+          "Mach, rather than a zero that would look like a broken knob." },
+{ HK_P,   "One thing to know before you press it: Ctrl+G releases the aid instantly along "
+          "with everything else, so disarming in the middle of an entry hands the airframe's "
+          "full stability back at once and the nose WILL drop.", NULL },
+};
+
+// --- TAB 3: ATMOS -----------------------------------------------------------
+static const HelpItem HELP_ATMOS[] = {
+{ HK_H,   "WHAT THIS TAB IS", NULL },
+{ HK_P,   "Four effects that belong to the WORLD rather than to your ship or your body. Each "
+          "has a TEST toggle, and they exist for the same reason: none of these is something "
+          "you can wait for on demand. A polar night, a total eclipse and a sunset over "
+          "broken cloud are not things you can schedule around a tuning session.", NULL },
+{ HK_P,   "SAVING IS SPLIT HERE. The eclipse is GLOBAL - it models your eye, and the same "
+          "pilot sits behind every canopy. The aurora and the lightning are PER BODY: what a "
+          "world's aurora IS belongs to the world. A world with no file of its own gets the "
+          "built-in defaults back rather than inheriting the last world's look, because "
+          "arriving somewhere new must not show you Jupiter's curtains.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "ECLIPSE", NULL },
+{ HK_P,   "This is built as an EYE, not as a dimmer, and that decision is what makes it work. "
+          "The client already darkens terrain under a moon's shadow and already cuts a "
+          "vessel's sunlight in its primary's shadow, so simply multiplying the frame down "
+          "would have fought the renderer on the night side of every orbit. What no renderer "
+          "models is the observer: asymmetric dark adaptation, which is why emerging from a "
+          "shadow DAZZLES and entering one merely gropes.", NULL },
+{ HK_ROW, "TEST", "Runs a full cycle in about forty seconds of real time - clear, first "
+          "contact, eight seconds of totality, emergence." },
+{ HK_ROW, "Dim", "How much the steady obscuration darkens the scene." },
+{ HK_ROW, "Eye adaptation", "How strongly the eye compensates. This is the part that produces "
+          "the dazzle on the way out." },
+{ HK_ROW, "Colour loss", "How far colour drains toward the cool grey of night vision." },
+{ HK_ROW, "The two readouts", "Sun obscured, and the eye's response. They are shown "
+          "separately because they genuinely diverge: fully adapted inside totality the sun "
+          "is 100% covered while the eye is doing nothing, which is correct and would look "
+          "broken as a single number. Expect 'obscured 100% by Earth' standing on the ground "
+          "at night - that is orbital night, and it is a real event for an eye." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "AURORA", NULL },
+{ HK_P,   "Ribbon curtains around each MAGNETIC pole of the world you are at. Twelve worlds "
+          "ship with settings. There is no enable flag per world on purpose - ACTIVITY IS "
+          "THE OPT-IN. An unlisted world is silent, turning Activity up at any world gives it "
+          "an aurora, and saving keeps it.", NULL },
+{ HK_ROW, "TEST", "Rings the point directly below the camera, so you need not fly to a pole "
+          "and wait for darkness." },
+{ HK_ROW, "Activity", "Master strength, and the opt-in. 0 is silent." },
+{ HK_ROW, "Oval lat", "How far the oval sits from the magnetic pole. Shown in real degrees "
+          "from the current world's own range, not a raw 0 to 1." },
+{ HK_ROW, "Fold", "Waves the ring in and out - the draperies." },
+{ HK_ROW, "Rays", "The vertical striations. 0 is a smooth sheet." },
+{ HK_ROW, "Breakup", "How broken the curtain is along its length." },
+{ HK_ROW, "Thickness", "Parallel sheets per curtain. This buys LIMB BRIGHTENING for free: "
+          "edge-on you look through more sheets than face-on. Per-sheet brightness falls as "
+          "you add them, so the knob changes the LOOK, not the total brightness." },
+{ HK_ROW, "Base (km) / Top (km)", "The altitude band the curtain spans, in real kilometres "
+          "from this world's own range." },
+{ HK_ROW, "Ribbons", "How many concentric arcs, 1 to 6." },
+{ HK_ROW, "Tilt X / Y (deg)", "Rotates the magnetic AXIS, so both ovals move together as a "
+          "dipole - north one way, south exactly opposite. Physical before exotic: Earth's "
+          "magnetic pole is about 11 degrees off its spin axis, Uranus's is 59, and Io's "
+          "aurora is equatorial because Jupiter's field drives it rather than its own." },
+{ HK_ROW, "Base / Body / Top", "Three colour swatches in ALTITUDE order, because that is what "
+          "decides a real aurora's colour - how deep the particles get sets which species "
+          "emits and which of its lines. Earth reads nitrogen violet at the bottom, oxygen "
+          "green through the body and oxygen red at the top, and no two-colour scheme can say "
+          "that, which is exactly why there are three." },
+{ HK_ROW, "Curtains over", "Which world they are being drawn at. Blank means no suitable body "
+          "in range, which is the honest reason for 'nothing is showing'." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "LIGHTNING", NULL },
+{ HK_P,   "Storms in the cloud deck, seen from above. The storms form where the CLOUD "
+          "actually is - ORO reads the planet's own cloud map rather than inventing weather, "
+          "so a flash never lights up a clear ocean. Earth ships enabled; other worlds have "
+          "it available at zero.", NULL },
+{ HK_P,   "Flashes only appear on the NIGHT side, and that is physics rather than a budget. "
+          "From orbit the eye cannot pick a diffuse in-cloud flash out of a sunlit deck - the "
+          "instruments that do it in daylight work at one narrow wavelength for that reason, "
+          "and every astronaut photograph of lightning is taken night-side.", NULL },
+{ HK_ROW, "TEST", "One fast cell a couple of hundred kilometres north of you with every gate "
+          "bypassed - night, cloud cover and altitude - so it is judgeable from a runway." },
+{ HK_ROW, "Activity", "How much of the world is storming. 0 is silent." },
+{ HK_ROW, "Brightness", "Flash intensity." },
+{ HK_ROW, "Flash rate", "How often each cell fires." },
+{ HK_ROW, "Cell size", "How big a storm cell is; the readout shows what the slider means in "
+          "kilometres." },
+{ HK_ROW, "Flash colour", "Default is the blue-white lightning actually looks like from the "
+          "ISS - the opposite pole of the palette from the reentry plasma." },
+{ HK_ROW, "The readout", "The world and the live CELL COUNT. 'No storms' has three honest "
+          "causes - day side, clear sky under you, or activity zero - and the count is what "
+          "tells them apart from broken." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "GOD RAYS", NULL },
+{ HK_P,   "Crepuscular shafts - the beams you get when a low sun is broken up by terrain, "
+          "cloud or a hull. They need AIR to scatter in, so the pass does not run in orbit at "
+          "all, and they need something to BREAK THE BEAM UP: with the sun in open sky the "
+          "technique can only smear the disc into a halo. Best seen low, near sunrise or "
+          "sunset, with something between you and the sun.", NULL },
+{ HK_ROW, "TEST", "Bypasses the air and sun-height gates, though not 'the sun has to be "
+          "roughly on screen'." },
+{ HK_ROW, "Strength", "Master intensity." },
+{ HK_ROW, "Reach", "How far the shafts extend from the disc." },
+{ HK_ROW, "Softness", "Crisp short rays through to long soft ones." },
+{ HK_ROW, "Sensitivity", "How dim a thing may be and still cast a shaft. This is the knob "
+          "that separates 'shafts' from 'radial blur over the whole sky'." },
+{ HK_ROW, "Warmth", "How far they redden as the sun nears the horizon." },
+{ HK_ROW, "Shafts", "Readout: strength, or why it is zero - vacuum, high sun, night, sun "
+          "behind you, or off-view. This effect has more honest ways of showing nothing than "
+          "any other in ORO, and without the line every one of them reads as a fault." },
+{ HK_P,   "An eclipse kills the shafts, which is correct - there is less beam left to "
+          "scatter. It is the one place the two solar effects talk to each other.", NULL },
+};
+
+// --- TAB 4: VC --------------------------------------------------------------
+static const HelpItem HELP_VC[] = {
+{ HK_H,   "WHAT THIS TAB IS", NULL },
+{ HK_P,   "The cockpit itself: light coming into it, and the seat you are sitting in.", NULL },
+{ HK_P,   "VC SHADOWS is the one section where ORO DRAWS NOTHING. It hands the patched "
+          "client two numbers and the client's own shadow pass does the work - which is why "
+          "the whole section greys out on a client that cannot do it. A switch that cannot "
+          "do anything is worse than no switch.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "VC SHADOWS", NULL },
+{ HK_P,   "Sunlight through the canopy, sweeping across the cabin as the ship rotates. Needs "
+          "local shadows enabled in the D3D9 video settings.", NULL },
+{ HK_ROW, "Cabin box (m)", "The size of the region the shadow map covers. The map is a fixed "
+          "number of texels ACROSS that box, so halving the box doubles the resolution - and "
+          "a cockpit panel is forty centimetres from your eye, where that is very visible. Go "
+          "as low as 0.4 m for the crispest possible shadows." },
+{ HK_ROW, "... and the cost, which is structural", "The box is also how far out the client "
+          "looks for things that CAST. Shrink it far enough and a vessel docked outside your "
+          "window stops throwing a shadow into the cabin. You cannot have both from a single "
+          "shadow map, which is why this is a slider and not a baked-in number." },
+{ HK_ROW, "Shadow depth", "How DARK the shadows go. 0 is Orbiter's stock behaviour, where a "
+          "shadow only removes direct sunlight and the cabin's ambient keeps everything "
+          "visible - which is why stock cockpit shadows look like a faint grey smudge, and "
+          "why no brightness setting anywhere fixes it. Raising this lets the shadow take the "
+          "ambient share with it. LIT INSTRUMENT PANELS ARE NEVER DIMMED: a canopy frame "
+          "passing over an MFD does not turn the MFD off." },
+{ HK_P,   "There is deliberately no shadow-filter control. That value is compiled into the "
+          "client's shaders when the render window is created, so nothing can change it "
+          "mid-session and a slider for it would be a control that lies. It belongs in the "
+          "Launchpad D3D9 setup.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "CAM-SHAKE", NULL },
+{ HK_P,   "The one effect whose STRENGTH is not a slider. It is driven by thrust, dynamic "
+          "pressure and ground contact - the sliders here shape the LOOK, not the amount. "
+          "The caption under the section says so for that reason.", NULL },
+{ HK_P,   "It is two different sensations from two different mechanisms, and you can have "
+          "either without the other.", NULL },
+{ HK_ROW, "Seat push", "The smooth sustained LEAN, opposite whichever way you are being "
+          "accelerated: back into the seat under main thrust, down under hovers, forward "
+          "under deceleration. 1 is standard, 0 removes the lean entirely and leaves you the "
+          "rattle alone." },
+{ HK_ROW, "X / Y / Z range (mm)", "Buffet amplitude per axis - the RATTLE. All three at zero "
+          "leaves the seat push on its own, which is the other half of the split." },
+{ HK_ROW, "Frequency (Hz)", "How fast it shakes." },
+{ HK_ROW, "Test", "Forces full intensity at your tuned settings so you can judge it parked, "
+          "instead of having to fly something violent to see what you just changed." },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "SAVING", NULL },
+{ HK_P,   "This tab writes to TWO scopes. The shadow on/off and the whole cam-shake section "
+          "are GLOBAL - they are preferences about you. The cabin box and the shadow depth "
+          "are PER VESSEL CLASS, because the right value depends on how big that cockpit is "
+          "and how its materials were authored, not on who is flying it.", NULL },
+};
+
+static const HelpItem* HelpText(int tab, int& n)
+{
+	switch (tab) {
+	case 1:  n = (int)(sizeof(HELP_THRUSTER) / sizeof(HELP_THRUSTER[0])); return HELP_THRUSTER;
+	case 2:  n = (int)(sizeof(HELP_REENTRY)  / sizeof(HELP_REENTRY[0]));  return HELP_REENTRY;
+	case 3:  n = (int)(sizeof(HELP_ATMOS)    / sizeof(HELP_ATMOS[0]));    return HELP_ATMOS;
+	case 4:  n = (int)(sizeof(HELP_VC)       / sizeof(HELP_VC[0]));       return HELP_VC;
+	default: n = (int)(sizeof(HELP_GFORCE)   / sizeof(HELP_GFORCE[0]));   return HELP_GFORCE;
+	}
+}
+
+static const char* HelpTitle(int tab)
+{
+	static const char* t[] = { "G - F O R C E", "T H R U S T E R", "R E E N T R Y",
+	                           "A T M O S", "V C" };
+	return (tab >= 0 && tab < NTABS) ? t[tab] : t[0];
+}
+
+// One pass that MEASURES and (optionally) DRAWS. Returns the document height. Keeping
+// both in one function is what guarantees the scrollbar and the text agree - two walks
+// would be two chances to drift apart.
+static int HelpWalk(HDC dc, const RECT& rc, bool bDraw)
+{
+	int n = 0;
+	const HelpItem* it = HelpText(g_helpTab, n);
+	const int w = rc.right - HELP_PAD * 2 - SB_W - SB_RPAD;
+	int y = HELP_TOP;
+
+	// The tab name this text belongs to, so a window left open on the far side of the
+	// screen still says what it is describing.
+	if (bDraw) {
+		SelectObject(dc, g_hfTitle);
+		SetTextColor(dc, CLR_ACCENT);
+		TextOutA(dc, HELP_PAD, y - g_helpScroll, HelpTitle(g_helpTab),
+		         (int)strlen(HelpTitle(g_helpTab)));
+	}
+	y += 30;
+	if (bDraw) {
+		RECT rule = { HELP_PAD, y - g_helpScroll - 8, rc.right - HELP_PAD, y - g_helpScroll - 7 };
+		FillSolid(dc, rule, CLR_LINE);
+	}
+
+	for (int i = 0; i < n; i++) {
+		switch (it[i].kind) {
+		case HK_GAP:
+			y += 16;
+			break;
+		case HK_H: {
+			y += 16;
+			SelectObject(dc, g_hfHead);
+			RECT m = { HELP_PAD, 0, HELP_PAD + w, 0 };
+			DrawTextA(dc, it[i].a, -1, &m, DT_WORDBREAK | DT_CALCRECT);
+			const int h = m.bottom - m.top;
+			if (bDraw) {
+				SetTextColor(dc, CLR_TEXT_HI);
+				RECT r = { HELP_PAD, y - g_helpScroll, HELP_PAD + w, y - g_helpScroll + h };
+				DrawTextA(dc, it[i].a, -1, &r, DT_WORDBREAK);
+				RECT rule = { HELP_PAD, y - g_helpScroll + h + 6,
+				              rc.right - HELP_PAD, y - g_helpScroll + h + 7 };
+				FillSolid(dc, rule, CLR_LINE);
+			}
+			y += h + 18;
+			break;
+		}
+		case HK_ROW: {
+			// Control name on its own line, description indented under it. A two-column
+			// layout would look tidier and would fall apart the moment the window is
+			// narrowed, which is exactly what this window invites the user to do.
+			SelectObject(dc, g_hfName);
+			RECT mn = { HELP_PAD, 0, HELP_PAD + w, 0 };
+			DrawTextA(dc, it[i].a, -1, &mn, DT_WORDBREAK | DT_CALCRECT);
+			const int hn = mn.bottom - mn.top;
+			if (bDraw) {
+				SetTextColor(dc, CLR_PILL_ON);
+				RECT r = { HELP_PAD, y - g_helpScroll, HELP_PAD + w, y - g_helpScroll + hn };
+				DrawTextA(dc, it[i].a, -1, &r, DT_WORDBREAK);
+			}
+			y += hn + 3;
+			if (it[i].b) {
+				SelectObject(dc, g_hfBody);
+				const int ind = HELP_PAD + 14;
+				RECT md = { ind, 0, HELP_PAD + w, 0 };
+				DrawTextA(dc, it[i].b, -1, &md, DT_WORDBREAK | DT_CALCRECT);
+				const int hd = md.bottom - md.top;
+				if (bDraw) {
+					SetTextColor(dc, CLR_TEXT);
+					RECT r = { ind, y - g_helpScroll, HELP_PAD + w, y - g_helpScroll + hd };
+					DrawTextA(dc, it[i].b, -1, &r, DT_WORDBREAK);
+				}
+				y += hd;
+			}
+			y += 14;
+			break;
+		}
+		default: {   // HK_P
+			SelectObject(dc, g_hfBody);
+			RECT m = { HELP_PAD, 0, HELP_PAD + w, 0 };
+			DrawTextA(dc, it[i].a, -1, &m, DT_WORDBREAK | DT_CALCRECT);
+			const int h = m.bottom - m.top;
+			if (bDraw) {
+				// CLR_TEXT, not CLR_TEXT_DIM: dim is right for a one-line hint under a
+				// slider you are already looking at, and wrong for a paragraph someone
+				// has to read. Running text gets the primary colour here.
+				SetTextColor(dc, CLR_TEXT);
+				RECT r = { HELP_PAD, y - g_helpScroll, HELP_PAD + w, y - g_helpScroll + h };
+				DrawTextA(dc, it[i].a, -1, &r, DT_WORDBREAK);
+			}
+			y += h + 12;
+			break;
+		}
+		}
+	}
+	return y + HELP_TOP;
+}
+
+static int HelpMaxScroll(const RECT& rc)
+{
+	const int mx = g_helpDoc - rc.bottom;
+	return mx > 0 ? mx : 0;
+}
+
+static void HelpClampScroll(const RECT& rc)
+{
+	const int mx = HelpMaxScroll(rc);
+	if (g_helpScroll > mx) g_helpScroll = mx;
+	if (g_helpScroll < 0)  g_helpScroll = 0;
+}
+
+static RECT HelpThumbRect(const RECT& rc)
+{
+	const int mx = HelpMaxScroll(rc);
+	RECT tr = { rc.right - SB_RPAD - SB_W, 2, rc.right - SB_RPAD, rc.bottom - 2 };
+	if (mx <= 0) return tr;
+	const int trackH = tr.bottom - tr.top;
+	int th = (int)((double)trackH * (double)rc.bottom / (double)g_helpDoc);
+	if (th < 24) th = 24;
+	const int top = tr.top + (int)((double)(trackH - th) * (double)g_helpScroll / (double)mx);
+	RECT r = { tr.left, top, tr.right, top + th };
+	return r;
+}
+
+static void PaintHelp(HWND hWnd, HDC dcOut)
+{
+	RECT rc; GetClientRect(hWnd, &rc);
+	const int W = rc.right, H = rc.bottom;
+
+	HDC dc = CreateCompatibleDC(dcOut);
+	HBITMAP bmp = CreateCompatibleBitmap(dcOut, W, H);
+	HGDIOBJ oldBmp = SelectObject(dc, bmp);
+	SetBkMode(dc, TRANSPARENT);
+	RECT full = { 0, 0, W, H };
+	FillSolid(dc, full, CLR_BG);
+
+	// Measure first (the document height depends on the CURRENT width), clamp, then draw.
+	g_helpDoc = HelpWalk(dc, rc, false);
+	HelpClampScroll(rc);
+	HelpWalk(dc, rc, true);
+
+	if (HelpMaxScroll(rc) > 0) {
+		RECT tr = { W - SB_RPAD - SB_W, 2, W - SB_RPAD, H - 2 };
+		FillSolid(dc, tr, CLR_TRACK);
+		RECT th = HelpThumbRect(rc);
+		FillSolid(dc, th, g_helpDragBar >= 0 ? CLR_ACCENT : CLR_PILL_OFF);
+	}
+
+	BitBlt(dcOut, 0, 0, W, H, dc, 0, 0, SRCCOPY);
+	SelectObject(dc, oldBmp);
+	DeleteObject(bmp);
+	DeleteDC(dc);
+}
+
+static INT_PTR CALLBACK OroHelpProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	switch (uMsg) {
+	case WM_INITDIALOG: {
+		g_hHelp = hWnd;
+		g_helpScroll = 0;
+		CreateFontsOnce();
+		CreateHelpFontsOnce();               // its own, reading-sized set - see the note there
+		int w = 0, h = 0;
+		OroSettings_LoadHelpSize(w, h);
+		if (w < HELP_W_MIN) w = HELP_W_DEF;
+		if (h < HELP_H_MIN) h = HELP_H_DEF;
+		RECT want = { 0, 0, w, h };
+		AdjustWindowRectEx(&want, GetWindowLongA(hWnd, GWL_STYLE), FALSE, GetWindowLongA(hWnd, GWL_EXSTYLE));
+		// Open beside the panel rather than on top of it - you want to read the help and
+		// look at the control it describes at the same time. Clamped to the work area, or
+		// a panel already near the right edge would push this one off screen entirely.
+		const int wW = want.right - want.left, wH = want.bottom - want.top;
+		int x = 0, y = 0;
+		bool place = false;
+		if (g_hDlg) {
+			RECT pr; GetWindowRect(g_hDlg, &pr);
+			RECT wa = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+			SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
+			x = pr.right + 8; y = pr.top;
+			if (x + wW > wa.right)  x = pr.left - 8 - wW;   // no room right? go left
+			if (x < wa.left)        x = wa.left;            // no room either side? overlap
+			if (y + wH > wa.bottom) y = wa.bottom - wH;
+			if (y < wa.top)         y = wa.top;
+			place = true;
+		}
+		SetWindowPos(hWnd, NULL, x, y, wW, wH,
+		             (place ? 0 : SWP_NOMOVE) | SWP_NOZORDER | SWP_NOACTIVATE);
+		RECT cr; GetClientRect(hWnd, &cr);
+		g_helpSavedW = cr.right; g_helpSavedH = cr.bottom;
+		return TRUE;
+	}
+
+	case WM_ERASEBKGND:
+		return TRUE;                         // fully painted in WM_PAINT, no flicker
+
+	case WM_PAINT: {
+		PAINTSTRUCT ps;
+		HDC dc = BeginPaint(hWnd, &ps);
+		PaintHelp(hWnd, dc);
+		EndPaint(hWnd, &ps);
+		return TRUE;
+	}
+
+	case WM_GETMINMAXINFO: {
+		MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+		RECT fr = { 0, 0, HELP_W_MIN, HELP_H_MIN };
+		AdjustWindowRectEx(&fr, GetWindowLongA(hWnd, GWL_STYLE), FALSE, GetWindowLongA(hWnd, GWL_EXSTYLE));
+		mmi->ptMinTrackSize.x = fr.right - fr.left;
+		mmi->ptMinTrackSize.y = fr.bottom - fr.top;
+		return TRUE;
+	}
+
+	case WM_SIZE:
+		// The text REFLOWS, so the document height changes with the width as well as the
+		// height - the clamp has to happen against a freshly measured document, which the
+		// next paint does. Just invalidate.
+		InvalidateRect(hWnd, NULL, FALSE);
+		break;
+
+	case WM_EXITSIZEMOVE: {
+		RECT cr; GetClientRect(hWnd, &cr);
+		if (cr.right != g_helpSavedW || cr.bottom != g_helpSavedH) {
+			g_helpSavedW = cr.right; g_helpSavedH = cr.bottom;
+			OroSettings_SaveHelpSize(cr.right, cr.bottom);
+		}
+		break;
+	}
+
+	case WM_MOUSEWHEEL: {
+		RECT rc; GetClientRect(hWnd, &rc);
+		g_helpScroll -= (GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA) * 48;
+		HelpClampScroll(rc);
+		InvalidateRect(hWnd, NULL, FALSE);
+		return TRUE;
+	}
+
+	case WM_LBUTTONDOWN: {
+		RECT rc; GetClientRect(hWnd, &rc);
+		const int x = (short)LOWORD(lParam), y = (short)HIWORD(lParam);   // house idiom
+		if (HelpMaxScroll(rc) > 0 && x >= rc.right - SB_RPAD - SB_W - 4) {
+			RECT th = HelpThumbRect(rc);
+			if (y >= th.top && y <= th.bottom) g_helpDragBar = y - th.top;
+			else { g_helpScroll += (y < th.top ? -1 : 1) * rc.bottom; HelpClampScroll(rc); }
+			SetCapture(hWnd);
+			InvalidateRect(hWnd, NULL, FALSE);
+			return TRUE;
+		}
+		return FALSE;
+	}
+
+	case WM_MOUSEMOVE: {
+		if (g_helpDragBar < 0) return FALSE;
+		RECT rc; GetClientRect(hWnd, &rc);
+		const int mx = HelpMaxScroll(rc);
+		RECT tr = { 0, 2, 0, rc.bottom - 2 };
+		RECT th = HelpThumbRect(rc);
+		const int trackH = (tr.bottom - tr.top) - (th.bottom - th.top);
+		if (trackH > 0 && mx > 0) {
+			const int top = (short)HIWORD(lParam) - g_helpDragBar - tr.top;
+			g_helpScroll = (int)((double)top * (double)mx / (double)trackH);
+			HelpClampScroll(rc);
+			InvalidateRect(hWnd, NULL, FALSE);
+		}
+		return TRUE;
+	}
+
+	case WM_LBUTTONUP:
+		if (g_helpDragBar >= 0) { g_helpDragBar = -1; ReleaseCapture(); }
+		return TRUE;
+
+	// Same beep guard as the main panel - see the long note there. This window is an
+	// empty template too, and being the newest thing on screen it is the one most likely
+	// to be holding focus when the user reaches for the throttle.
+	case WM_CHAR:
+	case WM_SYSCHAR:
+		return TRUE;
+
+	case WM_COMMAND:
+		if (LOWORD(wParam) == IDCANCEL) { oapiCloseDialog(hWnd); return TRUE; }
+		return FALSE;
+
+	case WM_DESTROY:
+		g_hHelp = NULL;
+		g_helpDragBar = -1;
+		return TRUE;
+	}
+	return oapiDefDialogProc(hWnd, uMsg, wParam, lParam);
+}
+
+// Open, or - if it is already up - just re-point it at the current tab and raise it.
+// ⚠️ NEVER A SECOND WINDOW: the button is in the fixed strip and is therefore reachable
+// from every tab at every scroll position, so pressing it twice is the normal case, not
+// the exceptional one. Re-pointing rather than ignoring is what makes the second press
+// useful: you switch tab, press HELP, and get that tab's text in the window you already
+// have open.
+static void OroHelp_Open(HINSTANCE hInst, int tab)
+{
+	const bool retarget = (g_hHelp != NULL);
+	g_helpTab = tab;
+	if (retarget) {
+		g_helpScroll = 0;                    // new subject, start at the top
+		InvalidateRect(g_hHelp, NULL, FALSE);
+		// NOT SetForegroundWindow: an Orbiter dialog is a CHILD of the render window, and
+		// that call is for top-level windows - it would raise Orbiter, not this. HWND_TOP
+		// within the parent is the correct move and works in fullscreen too.
+		SetWindowPos(g_hHelp, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		return;
+	}
+	oapiOpenDialogEx(hInst, IDD_ORO_HELP, OroHelpProc, DLG_CAPTIONCLOSE, NULL);
+}
+
+static void OroHelp_Close()
+{
+	if (g_hHelp) oapiCloseDialog(g_hHelp);   // WM_DESTROY clears g_hHelp
+}
+
 // ----------------------------------------------------------------------------
 // Message handler
 // ----------------------------------------------------------------------------
@@ -2913,14 +4171,29 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		// dialog units, whose pixel size depends on the shell font metrics and so
 		// varies per machine - this is what makes the layout constants in this file
 		// mean the same thing everywhere.
+		// The HEIGHT is whatever it was last left at (Config\ORO\window.cfg); DLG_H is
+		// only the fallback for a first run. Clamped both ways: never below DLG_H_MIN,
+		// and never taller than this machine's work area - a height saved on a bigger
+		// monitor must not open off the bottom of a smaller one.
 		{
-			RECT want = { 0, 0, DLG_W, DLG_H };
+			int h = OroSettings_LoadDlgHeight();
+			const bool restored = (h > 0);
+			if (!restored) h = DLG_H;
+			int hMax = GetSystemMetrics(SM_CYMAXTRACK) - 80;   // leave room for the frame
+			if (hMax < DLG_H_MIN) hMax = DLG_H_MIN;
+			if (h < DLG_H_MIN) h = DLG_H_MIN;
+			if (h > hMax)      h = hMax;
+
+			RECT want = { 0, 0, DLG_W, h };
 			AdjustWindowRectEx(&want, GetWindowLongA(hDlg, GWL_STYLE), FALSE, GetWindowLongA(hDlg, GWL_EXSTYLE));
 			SetWindowPos(hDlg, NULL, 0, 0, want.right - want.left, want.bottom - want.top,
 			             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 			RECT rc; GetClientRect(hDlg, &rc);
-			oapiWriteLogV("ORO: dialog client %d x %d px (wanted %d x %d), content %d px, scroll range %d.",
-			              rc.right, rc.bottom, DLG_W, DLG_H, ContentHeight(), MaxScroll(rc));
+			g_lastSavedH = rc.bottom;        // so a pure MOVE never rewrites the file
+			oapiWriteLogV("ORO: dialog client %d x %d px (%s; width locked, min height %d), "
+			              "content %d px, scroll range %d.",
+			              rc.right, rc.bottom, restored ? "height restored" : "default height",
+			              DLG_H_MIN, ContentHeight(), MaxScroll(rc));
 		}
 		// ~10 Hz repaint: keeps the ENABLED toggle in sync with Ctrl+G and animates
 		// the sliders while an INDUCE scenario drives them. Double-buffered, no flicker.
@@ -2961,6 +4234,21 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		if (PtIn(ArmedBtnRect(), x, y)) {
 			g_fx.masterArmed = !g_fx.masterArmed;   // same flag Ctrl+G flips
 			InvalidateRect(hDlg, NULL, FALSE);
+			return TRUE;
+		}
+		// The engine-group cycler (THRUSTER tab only). One click banks the sliders into
+		// the group you were editing and brings up the next one - see OroThr_Cycle.
+		if (g_tab == 1 && OroThr_Count() > 1 && PtIn(ThrGrpBtnRect(rc), x, y)) {
+			OroThr_Cycle();
+			ClearDrags();                        // never leave a drag on a replaced value
+			InvalidateRect(hDlg, NULL, FALSE);
+			return TRUE;
+		}
+		// HELP, ditto - and it opens the text for whichever tab is ACTIVE, so the
+		// question it answers is "what is all this in front of me".
+		if (PtIn(HelpBtnRect(rc), x, y)) {
+			OroHelp_Open(g_hInst, g_tab);
+			InvalidateRect(hDlg, NULL, FALSE);   // the button lights up
 			return TRUE;
 		}
 		// SAVE, ditto. Confirmation goes to the status line for a few seconds - a
@@ -3007,7 +4295,27 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		if (PtIn(TabSaveBtnRect(rc), x, dy)) {
 			g_saveMask = TabSaveMask(g_tab);
 			g_saveOk = OroSettings_SaveScope(g_saveMask);
+			g_saveWasRevert = false;
 			g_saveMsgUntil = GetTickCount() + 4000;
+			InvalidateRect(hDlg, NULL, FALSE);
+			return TRUE;
+		}
+		// REVERT - re-read this tab's own scopes from disk, discarding everything moved
+		// since the last save. The three loaders are the same ones the module calls on a
+		// focus/world change, so a revert is exactly "arrive at this hull again".
+		// ⚠️ A SCOPE WITH NO FILE MUST NOT BE TOUCHED, and the two loaders differ on that
+		// by design (invariant 17a): LoadClass KEEPS the current numbers for an unconfigured
+		// hull, LoadBody restores the built-in DEFAULTS. Both are the right answer to
+		// "revert", because both are what you would have had if you had never touched
+		// anything - so this hands the question straight to them rather than second-guessing.
+		if (PtIn(TabRevBtnRect(rc), x, dy)) {
+			const int m = TabSaveMask(g_tab);
+			OroSettings_Revert(m);
+			g_saveMask = m;
+			g_saveOk = true;             // a load has nothing to fail at: a missing file
+			g_saveWasRevert = true;      // simply means "the defaults", which is a revert too
+			g_saveMsgUntil = GetTickCount() + 4000;
+			ClearDrags();                // never leave a drag pointing at a value we replaced
 			InvalidateRect(hDlg, NULL, FALSE);
 			return TRUE;
 		}
@@ -3114,9 +4422,84 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		}
 		return FALSE;
 
+	// ⚠️ TEST THE TIMER ID. THE DIALOG-DRAG SIM FREEZE WAS THIS ONE LINE (2026-08-16).
+	// OrbiterDefDialogProc ALREADY SOLVES THE FREEZE: on WM_ENTERSIZEMOVE it starts a
+	// 1 ms timer with id 0xff, and its own WM_TIMER case calls g_pOrbiter->SingleFrame(),
+	// so Orbiter keeps rendering right through Windows' modal move loop. That has been in
+	// the core all along - and ORO was eating it. This case returned TRUE for EVERY timer
+	// id, so 0xff never reached oapiDefDialogProc and SingleFrame() never ran.
+	// A beta tester reported the freeze as an unavoidable cost of dragging a window. It
+	// was ours, and the fix is one comparison.
+	// (An earlier attempt the same day PAUSED the sim across the drag, to stop the giant
+	// dt on release that once threw landed vessels into the air. That was treating a
+	// symptom we had caused - and it would have held the sim stopped while Orbiter tried
+	// to pump frames through it. Removed in favour of this. THE LESSON IS THE USUAL ONE:
+	// read the client/core before building a workaround, because it had already been
+	// solved upstream and we were the reason it did not work.)
 	case WM_TIMER:
-		InvalidateRect(hDlg, NULL, FALSE);   // keep the ENABLED toggle live vs Ctrl+G
+		if (wParam == 1) {                       // OUR ~10 Hz repaint, and only ours
+			InvalidateRect(hDlg, NULL, FALSE);   // keeps ENABLED live vs Ctrl+G
+			return TRUE;
+		}
+		break;                                   // anything else -> Orbiter's frame pump
+
+	// ⚠️ EAT WM_CHAR OR WINDOWS DINGS ON EVERY KEYPRESS.
+	// DefDlgProc treats a character as a possible control MNEMONIC: it searches the
+	// dialog's children for a matching &accelerator and, finding none, calls
+	// MessageBeep. This template has NO CHILD CONTROLS AT ALL - every pill, slider and
+	// button here is painted in WM_PAINT - so the search can never succeed and EVERY
+	// character keypress beeps while the panel holds focus. And it holds focus easily:
+	// OrbiterDefDialogProc implements focus-follows-mouse, so merely moving the pointer
+	// over the panel makes it the keyboard target.
+	// The keys still reach the sim regardless (Orbiter's own input path is upstream of
+	// this), which is exactly why the symptom is "my engines respond AND it dings".
+	// Consuming the message removes the beep and nothing else: there is no edit control,
+	// no mnemonic and no accelerator in this window that would ever want it. Escape and
+	// the caption close still arrive as WM_COMMAND/IDCANCEL, which is untouched.
+	case WM_CHAR:
+	case WM_SYSCHAR:
 		return TRUE;
+
+	// ------------------------------------------------------------------------
+	// VERTICAL RESIZE (2026-08-16). The .rc carries WS_THICKFRAME; these three cases are
+	// the whole of the behaviour, because every layout helper already derived from
+	// rc.bottom (PaneBottom, PaneHeight, MaxScroll, the status line, the scrollbar) - the
+	// panel has been resize-ready for months without anyone noticing.
+	//
+	// THE WIDTH IS PINNED HERE, not in the template: setting min and max track x to the
+	// same value leaves Windows nothing to drag horizontally, which is cleaner than
+	// correcting the rect in WM_SIZING (that flickers as the user pulls against it).
+	case WM_GETMINMAXINFO: {
+		MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+		// Track sizes are WINDOW sizes, so run the client numbers through the frame.
+		RECT fr = { 0, 0, DLG_W, DLG_H_MIN };
+		AdjustWindowRectEx(&fr, GetWindowLongA(hDlg, GWL_STYLE), FALSE, GetWindowLongA(hDlg, GWL_EXSTYLE));
+		mmi->ptMinTrackSize.x = mmi->ptMaxTrackSize.x = fr.right - fr.left;   // locked
+		mmi->ptMinTrackSize.y = fr.bottom - fr.top;                           // floor only:
+		return TRUE;                         // ptMaxTrackSize.y keeps the system default,
+	}                                        // so a tall monitor is free to use its height
+
+	case WM_SIZE: {
+		// Growing the window can leave the scroll position past the new bottom (the
+		// document did not change, the VIEWPORT did), so re-clamp before the next paint.
+		RECT rc; GetClientRect(hDlg, &rc);
+		ClampScroll(rc);
+		ClampColourPicker(rc);               // its OK/Cancel row must stay reachable
+		InvalidateRect(hDlg, NULL, FALSE);
+		break;                               // Orbiter's dialog manager sees it too
+	}
+
+	// End of a drag - resize OR move, Windows sends it for both. Write only on a real
+	// height change: a move must not touch the file, and neither must a resize that
+	// ended where it started.
+	case WM_EXITSIZEMOVE: {
+		RECT rc; GetClientRect(hDlg, &rc);
+		if (rc.bottom != g_lastSavedH && rc.bottom >= DLG_H_MIN) {
+			g_lastSavedH = rc.bottom;
+			OroSettings_SaveDlgHeight(rc.bottom);
+		}
+		break;                               // ... and Orbiter still kills its frame timer
+	}
 
 	case WM_COMMAND:
 		if (LOWORD(wParam) == IDCANCEL) {  // Orbiter's caption close / Esc
@@ -3133,6 +4516,8 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 	case WM_DESTROY:
 		KillTimer(hDlg, 1);
 		g_hDlg = NULL;
+		OroHelp_Close();                   // closing the panel from its own caption button
+		                                   // must not leave the help window behind either
 		ClearDrags();
 		// The picker's gradient DIBs are window-lifetime resources; the open state
 		// must not survive into the next dialog instance either.
@@ -3150,6 +4535,7 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 // ----------------------------------------------------------------------------
 void OroDlg_Open(HINSTANCE hInst)
 {
+	g_hInst = hInst;                          // the HELP button needs it later
 	if (g_hDlg) return;                       // already open
 	LoadBannerOnce(hInst);
 	// Orbiter-managed dialog (NOT CreateWindow - required for fullscreen).
@@ -3159,5 +4545,9 @@ void OroDlg_Open(HINSTANCE hInst)
 
 void OroDlg_Close()
 {
+	// The help window goes with the panel it describes. It is a second top-level window,
+	// so without this it would outlive the panel and sit there orphaned - and at session
+	// end it would outlive the module, which is worse than untidy.
+	OroHelp_Close();
 	if (g_hDlg) oapiCloseDialog(g_hDlg);      // WM_DESTROY clears g_hDlg
 }

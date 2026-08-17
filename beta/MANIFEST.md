@@ -133,6 +133,11 @@ The FALLBACK only - used if a tester loses the backup the installer made.
   anywhere in the source. A standalone breathing loop was rejected long ago; breathing
   lives inside the scenario clips. Dead files in a first impression are noise.
 - **`Textures\ORO\bell_glow.tga`** — the authoring source. Only the `.dds` is loaded.
+- **`Config\ORO\window.cfg`** — RUNTIME-GENERATED, not authored: it holds the panel height
+  the user last dragged the window to. Shipping it would impose the author's window size on
+  every tester on first run, which is exactly what the file exists to avoid. Absent = the
+  default 800 px. (The uninstaller correctly KEEPS it, along with every other file that is
+  not byte-identical to what shipped — it is user state, like a tuned class cfg.)
 - **`Meshes\ORO\DeltaGlider2.msh`** — a copy of `DG-S.msh` under a DELIBERATELY dead
   name: the override lookup is `Meshes\ORO\<class>.msh`, so renaming it to
   "DeltaGlider2" switches the override off and makes the DeltaGlider build its shock

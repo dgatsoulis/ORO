@@ -19,6 +19,56 @@
   (Also Greek: "oro" / opw = to see, to look at, to perceive - which is the
   whole subject of the addon.)
 
+--------------------------------------------------------------------------------
+  WHAT CHANGED SINCE THE BUILD YOU HAVE
+--------------------------------------------------------------------------------
+
+  If you tested the 260810 beta, thank you - both of your reports drove almost
+  everything below. This build is a long way from that one.
+
+  FIXED, AND YOU HIT THESE:
+
+  - The crash when loading a second scenario. That was ORO handing Orbiter an
+    object before the new scene existed. Gone.
+  - Effects froze when you paused. Seven of them - plasma, aurora, lightning,
+    plume, vapour cone, shimmer, god rays - were built once per simulation step,
+    and pausing stops those steps while the screen keeps drawing. So the effect
+    stayed where it was while you moved the camera. One of you worked out the
+    cause unaided, from the outside, by noticing that VC shadows behaved
+    correctly. You were exactly right.
+  - The DeltaGlider's nose moving when you pressed Ctrl+G, and the pitch
+    oscillation on autopilot. That was the FLIGHT AID, a test rig that shifts a
+    vessel's centre of pressure so stock ships can hold a high angle of attack
+    during reentry. It was shipped switched on, which was our mistake - it is
+    now inert until you are actually in a reentry regime.
+  - The engine bell was fake. Pushing its glow from 1.0 to 2.0 really did do
+    nothing: the graphics client was clamping the value, so you were looking at
+    the raw texture. Fixed in the client. It glows properly now, and it has a
+    colour picker.
+  - The lightning readout that clipped to "cells)".
+  - Scenario sound not resuming after you un-muted it.
+  - Dragging the panel froze the simulation.
+  - Every character keypress made Windows ding.
+
+  ALSO NEW:
+
+  - An in-panel HELP window, per tab. Several things you asked for already
+    existed and there was no way to discover them - that is what this answers.
+  - The panel resizes vertically, and there is a REVERT button.
+  - Two effects you have never seen: crepuscular GOD RAYS, and the transonic
+    VAPOUR CONE.
+  - Every thruster setting is now PER ENGINE GROUP, so a vacuum-rated main and
+    sea-level hovers can be described separately. Your existing tuning is
+    carried into every group untouched.
+
+  ONE REQUEST, AND IT MATTERS MORE THAN IT SOUNDS:
+
+  - PLEASE SEND UNPAUSED SCREENSHOTS when commenting on how something looks.
+    Most of the shots we got last time were of a paused simulation, which was
+    precisely the state where our drawing was known to be wrong - so we could
+    not tell a genuine complaint about the look from that bug. It is fixed now,
+    but the habit is worth keeping: a paused frame is the one we trust least.
+
 Thanks for testing. ORO is a global module that adds two families of effects:
 
   PHYSIOLOGY - what G-force does to the pilot: blackout, red-out, tunnel vision,
@@ -137,7 +187,14 @@ In the Launchpad, VIDEO tab -> "Advanced" / D3D9 configuration:
   Post-processing ............ "Light glow"   REQUIRED
       The reentry plasma composites into the client's high-dynamic-range buffer
       BEFORE the glow pass. That is where its white-hot core comes from. Without
-      it the plasma looks flat and orange.
+      it the plasma looks flat and orange, and the engine bells stay amber
+      however hot they get - both delegate "white" to this pass rather than
+      painting it.
+      ORO CHECKS THIS ONE FOR YOU. It reads the setting at startup, writes it
+      into Orbiter.log ("ORO: client post-processing (Light glow) ..."), and the
+      REENTRY and BELL GLOW sections replace their captions with a warning while
+      it is off. So if plasma looks hard-edged or a bell looks yellow, the panel
+      will tell you whether it is a setting or a tuning question.
 
   Local shadows / ShadowMapMode .... 1 or higher   REQUIRED for VC shadows
       Shadow map size 2048 is a good default; 4096 if you have headroom.
@@ -200,7 +257,34 @@ its own SAVE button explaining what it writes.
 
   ENABLED / DISABLED   Master arm. Same as Ctrl+G. Kills every effect at once
                        and gives the sim back its stock behaviour.
+  HELP                 Opens the help window for WHICHEVER TAB YOU ARE ON, so
+                       where you are when you press it is the question you are
+                       asking. It never opens twice: press it again on another
+                       tab and the window you already have switches to that
+                       tab's text. Closeable and resizable, and it remembers its
+                       size - but not that it was open, so it never reappears by
+                       itself on a new session. The button lights green while it
+                       is up, which is also how you tell it has opened behind
+                       the sim window rather than not opened at all.
+                       Everything in section 5 below is in there, in more depth.
   SAVE                 Writes ALL settings, in all three scopes (section 6).
+
+Each tab also carries its own SAVE and a REVERT beside it. REVERT re-reads that
+tab's files from disk and throws away everything you have moved since the last
+save - the way back from a tuning session that went wrong.
+
+THE PANEL RESIZES VERTICALLY. Drag its bottom edge or a corner: the width is
+fixed (the sliders and the banner are built around it) but the height is yours,
+down to a minimum of 500 px and up to whatever your monitor allows. Taller means
+less scrolling, and REENTRY and ATMOS both run to about a thousand pixels of
+content, so there is real benefit in it.
+The height is remembered. It is written the moment you finish dragging, into
+Config\ORO\window.cfg, and the panel reopens at that height next session - you
+do not have to press SAVE and it deliberately does NOT go in with your settings,
+so resizing the window can never commit tuning you had not saved. Delete that
+file to get the default 800 back.
+(If you had an earlier build that froze the sim while you dragged the panel: that
+was ours, and it is fixed. Orbiter keeps rendering during a window drag.)
 
 
 === TAB: G-FORCE ===  what high G does to you
@@ -228,6 +312,14 @@ PILOT - this is where the effects stop being a lab and start being physics.
                   PHYSICS - the felt-G model drives them, and the sliders
                             become per-effect GAINS. This is the real thing:
                             pull G and the symptoms arrive on their own.
+                  IN PHYSICS A SLIDER IS A MULTIPLIER, so a row whose axis is
+                  not firing reads zero however far you push it - that is not a
+                  broken control. While the model is producing nothing, the
+                  readout column names the axis the row is WAITING FOR instead
+                  of showing a number: "+Gz" for the whole vision suite (it
+                  tracks your oxygen reserve), "-Gz" for red-out, "Gx" for
+                  aberration. Aberration in particular will never move during a
+                  positive-G pull - it is eyeball deformation, a different axis.
   G tolerance     How much G you take before symptoms start. The readout shows
                   the threshold in G.
   Anti-G suit     Adds about 1.5 G of tolerance, positive G only.
@@ -237,6 +329,13 @@ PILOT - this is where the effects stop being a lab and start being physics.
   G reference     Camera or vessel centre of mass. In orbit this is the whole
                   effect - your head is metres from the CoM, so rotation alone
                   produces real G at your eyes.
+  Effects view    PANEL + VC - the physiology draws in any internal cockpit
+                               view (the default, and what it has always done).
+                  VC ONLY    - only in the virtual cockpit. For pilots who fly
+                               the VC and drop to the 2D panel to work systems:
+                               a panel is a flat overlay with no world behind
+                               it, and some people want a clean one. The
+                               heartbeat sound follows the same rule.
   FELT G readout  Live signed Gz/Gx/Gy plus your oxygen reserve. The reserve
                   goes red below 50%. At zero you black out and stay out.
 
@@ -249,6 +348,25 @@ SCENARIOS - one-click scripted G events (LAB mode only; they and the physics
 
 
 === TAB: THRUSTER ===  engines. Two sub-tabs.
+
+⚠ FIRST, THE ENGINE GROUP BUTTON in the top strip beside SAVE. Everything on
+this tab - both sub-tabs - edits ONE engine group at a time, and that button
+says which. Click it to cycle through the groups this vessel actually has:
+MAIN, HOVER, RETRO, and USER for engines the author put in no standard group.
+RCS is never included. A ship with only main engines has nothing to cycle to.
+  Why: one set of numbers only suits a ship whose engines all burn the same
+  thing. The expansion band's high handle is the pressure an engine is RATED
+  for, the Jet/Bloom swatches are its exhaust colour, and soot is the difference
+  between kerosene and hydrogen. Now a vacuum-rated main and sea-level hovers
+  can each have their own.
+  Tune a group, cycle, tune the next. SAVE writes them all, so working on the
+  hovers cannot disturb what you did to the mains.
+  If you already had a tuned class file, its single set of numbers loads into
+  ALL FOUR groups - nothing is lost and nothing looks different until you cycle
+  and change something.
+  STOCK EXHAUST, STOCK PARTICLES and CANCEL THRUST are the exceptions: they
+  apply to the whole vessel, because the client suppresses stock exhaust per
+  SHIP and cancelling thrust acts at the centre of mass.
 
 --- Sub-tab EXHAUST - the parts ORO draws itself ---
 
@@ -282,11 +400,20 @@ SCENARIOS - one-click scripted G events (LAB mode only; they and the physics
     Bell glow      Brightness trim.
     Heat time (s)  How fast they come up to temperature.
     Cool time (s)  How long until the glow is COMPLETELY gone.
+    Bell colour    Rotates the whole heat ramp onto the colour you pick, keeping
+                   its shape: still dull at the bottom, still whitening at peak.
+                   White = the default blackbody ramp, unchanged. Note the bell
+                   reaches WHITE through the client's bloom rather than through
+                   its palette, so with post-processing OFF it can only ever get
+                   brighter amber - the caption under this section will tell you
+                   if that is what you are looking at.
     Needs a bell mesh for the vessel class; DeltaGlider and DG-S have one.
 
   STOCK EXHAUST   Off = hide Orbiter's own exhaust texture, so you judge ORO's
-                  plume alone. This only affects the flame billboards, not the
-                  particles.
+                  plume alone. This only affects the flame BILLBOARDS. Stock's
+                  exhaust PARTICLES have their own pill, on the PARTICLES
+                  sub-tab - they were split deliberately, so that an addon which
+                  replaces only one of them can be handled.
   CANCEL THRUST   A test stand: cancels the vessel's thrust so you can run the
                   engines up on the ground and look at them. Never saved.
 
@@ -308,10 +435,14 @@ sets in code, and lets you move them live. Units are the API's own.
   Lighting       EMISSIVE - they glow by themselves (flame).
                  DIFFUSE  - the sun lights them (smoke, vapour). This is the
                  single biggest change in the whole tab; try both.
-  Air fade       ALWAYS ON       - emit everywhere, including vacuum.
-                 FADES IN VACUUM - Orbiter's stock behaviour, where a stream
-                 fades out as the air thins. If you enable this tab in orbit
-                 and see nothing, this is why.
+  Air fade       FADES IN VACUUM - Orbiter's stock behaviour, where a stream
+                 fades out as the air thins. THIS IS THE DEFAULT: exhaust clouds
+                 hanging in orbit look wrong, and they are wrong.
+                 ALWAYS ON       - emit everywhere, including vacuum.
+                 If you enable this tab in orbit on the default and see nothing,
+                 that is the fade doing its job - the row's own label says
+                 "Air fade - in vacuum" while it is holding emission off, and
+                 the caption below says so too.
   Colour         Tints the particles.
   STOCK PARTICLES  The vessel author's own exhaust particles. This pill and the
                  one at the top of the tab are MUTUALLY EXCLUSIVE - stock's or
@@ -332,6 +463,15 @@ sets in code, and lets you move them live. Units are the API's own.
     Hull light      A real light source at the stagnation point, lighting the
                     vessel's own mesh. 0 removes the light entirely.
     Streak length / width / wander   The flame streaks trailing back.
+    Wake churn      How FAST the wake lives - fin shimmer, spark march, the
+                    drift of the striations. 1 = the standard rate, 0 freezes
+                    it. Turn it up if the plasma looks like an aurora rather
+                    than something being torn off a hypersonic vehicle. One
+                    clock for all of it, so the wake stays coherent; note that
+                    means "Spark life (s)" is seconds at churn 1.
+    Fin rake (deg)  How far the streamers splay OUT from the flow direction.
+                    0 lays them straight downstream. Every fin carries the same
+                    angle whatever its length.
     Sparks / Spark life / Spark size Burning debris marching downstream.
     Edge light      A rim light on the silhouette. Off by default.
     Shock bright    The shock envelope wrapped around the hull.
@@ -379,6 +519,18 @@ sets in code, and lets you move them live. Units are the API's own.
                     stock ships drop the nose and there is little plasma. The
                     readout shows the pitch moment it is applying.
                     Ctrl+G releases it instantly - the nose WILL drop.
+                    THE SHIPPED SETTINGS FILES TURN THIS ON for the DeltaGlider
+                    and the Atlantis, because the reentry scenarios need it. If
+                    your ship handles differently from stock, this is why, and
+                    zero (the centre, which the knob snaps to) is stock exactly.
+    Applies         REENTRY ONLY (M 3+) - the default. The aid is a reentry rig,
+                    so it stays out of the way at ordinary flying speeds. This
+                    matters: at low speed on an autopilot, two controllers
+                    closing the same pitch loop can build up an oscillation.
+                    ALWAYS             - apply it at any speed. The old
+                    behaviour, kept for anyone who wants it.
+                    While the gate is holding the aid off, the pitch-moment
+                    readout says "gated" and your current Mach rather than 0.
 
 
 === TAB: ATMOS ===  the sky
@@ -422,9 +574,9 @@ sets in code, and lets you move them live. Units are the API's own.
     Brightness / Flash rate / Cell size (the km readout tells you what the
                     slider means).
     Flash colour    Default is the blue-white lightning looks like from the ISS.
-    Readout         "Storms over <body> (N cells)". "No storms" has three
-                    honest causes - day side, clear sky, or activity 0 - and
-                    the count tells you which.
+    Readout         "<body> - N cells". "No storms" has three honest causes -
+                    day side, clear sky, or activity 0 - and the count tells
+                    you which.
     Storms form where the CLOUD actually is: ORO reads the planet's own cloud
     map. And flashes only show on the NIGHT side, which is deliberate - from
     orbit you cannot see a diffuse in-cloud flash against a sunlit deck.
@@ -452,8 +604,15 @@ sets in code, and lets you move them live. Units are the API's own.
 
   VC SHADOWS      Sunlight through the canopy, sweeping across the cabin as you
                   rotate. Needs local shadows enabled (section 3).
-    Cabin box (m) The size of the area the shadow map covers. Smaller is
-                  sharper. Too small and things outside the cabin stop casting.
+    Cabin box (m) The size of the area the shadow map covers. The map is a
+                  fixed number of texels across that box, so HALVING the box
+                  doubles the resolution - and a cockpit panel is forty
+                  centimetres from your eye, where that is very visible. Go as
+                  low as 0.4 m if you want the crispest possible shadows.
+                  The cost is real and structural: the box is also how far out
+                  ORO looks for things that CAST, so shrink it far enough and a
+                  vessel docked outside your window stops throwing a shadow
+                  into the cabin. You cannot have both from one shadow map.
     Shadow depth  How DARK the shadows go. 0 is Orbiter's stock behaviour,
                   where a shadow only removes direct sunlight and the cabin's
                   ambient light keeps everything visible - which is why stock
@@ -463,8 +622,14 @@ sets in code, and lets you move them live. Units are the API's own.
 
   CAM-SHAKE       Buffet and the push into your seat. The STRENGTH is physics
                   driven - thrust, dynamic pressure, ground contact - so these
-                  sliders shape the LOOK, not the amount.
-    X / Y / Z range (mm)   Buffet amplitude per axis.
+                  sliders shape the LOOK, not the amount. They are two separate
+                  sensations and you can have either without the other.
+    Seat push              The smooth sustained LEAN, opposite whichever way
+                           you are being accelerated: back into the seat under
+                           main thrust, down under hovers, forward under
+                           deceleration. 1 = standard, 0 = no lean at all.
+    X / Y / Z range (mm)   Buffet amplitude per axis - the RATTLE. All three at
+                           zero leaves the seat push on its own.
     Frequency (Hz)         How fast it shakes.
     Test                   Forces full intensity so you can tune it parked.
 
@@ -493,6 +658,11 @@ Two consequences worth knowing:
   * Unsaved changes are LOST when you switch to a different vessel class.
   * A vessel class with no file of its own keeps whatever is on screen rather
     than resetting, so an untuned ship inherits your last look.
+
+The REVERT button beside each tab's SAVE re-reads that tab's files, so an hour
+of tuning that went nowhere costs one click rather than a restart. It follows
+the same two rules: a hull with no file of its own keeps what is on screen, a
+world with no file goes back to the built-in defaults.
 
 This beta ships tuned files for the DeltaGlider, DG-S, Atlantis and the ISS, and
 for eleven worlds. Other vessels will work but are untuned.

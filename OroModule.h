@@ -48,6 +48,31 @@ static const double SHAKE_RESET = 0.5;
 // does not compile.
 OBJHANDLE OroFindStar();
 
+// Invariant 15b's colour machinery, shared (defined in OroReentry.cpp). Every ORO ramp
+// that gained a colour pick works the same way: a swatch names a HUE, the ramp is ROTATED
+// onto it, and grey/white is the identity so a default look is bit-for-bit unchanged.
+// It is exported rather than copied because 15b(c) is a LAW - the angle is never scaled by
+// the pick's saturation, because a partial rotation lands on an intermediate hue (pale blue
+// came out green) instead of a paler version of the target. A second copy of that reasoning
+// is a second place for it to drift.
+//   OroHueRotFromPick : swatch + the family's own reference hue -> degrees to rotate.
+//   OroHueRotate      : apply it to one linear rgb triple, preserving value and saturation.
+//                       Values ABOVE 1.0 are preserved (the bell rides an emissive overdrive
+//                       past the fp16 bloom threshold), so this normalises and re-scales.
+float OroHueRotFromPick(DWORD col, float refHue);
+void  OroHueRotate(float& r, float& g, float& b, float deg);
+
+// WHICH THRUSTER GROUP A THRUSTER BELONGS TO (defined in OroPlume.cpp), shared by the
+// plume, the shimmer, the particles and the bell so all four can never disagree about
+// what "HOVER" means. Returns ORO_THR_MAIN/HOVER/RETRO/USER, or -1 for anything ORO
+// does not touch - which is exactly the RCS: every THGROUP_ATT_* thruster classifies
+// as "not ours" and is skipped everywhere.
+// "USER" is any thruster in NO standard group at all. That is the definition the bell
+// glow has used since 2026-08-09 (BellUserLevel), adopted wholesale rather than
+// invented a second time.
+int  OroThrusterGroupOf(VESSEL* v, THRUSTER_HANDLE th);
+bool OroThrusterHasUser(VESSEL* v);
+
 // ORO's lifecycle module. Derives from oapi::Module for the per-frame main-thread
 // hook (clbkPreStep), the session start/end events, and keyboard input (the toggle).
 class OroModule : public oapi::Module {
@@ -190,6 +215,11 @@ private:
 	// INDUCE scenario player: elapsed time (REAL) into the active scripted sequence.
 	double   seqT = 0.0;
 	bool     seqSoundWasOn = true;   // prev g_fx.seqSoundEnabled - to catch a mid-scenario mute
+	bool     seqSoundPlaying = false;// a scenario clip is loaded into the mixer (playing or PAUSED).
+	                                 // The mute is a PAUSE, so un-muting can resume in place rather
+	                                 // than restart a narration out of step with what it describes;
+	                                 // this says whether there is anything to resume, or whether the
+	                                 // scenario started silent and the clip has to be seeked instead.
 
 	// Camera shake (felt-G): we perturb the focus vessel's camera offset. Track the
 	// delta we added and the total we last wrote, so we can recover the vessel's clean
@@ -415,6 +445,11 @@ private:
 	int      plasVtxN = 0;                   // vertices filled this frame (multiple of 3)
 	HPOLY    hPlasmaPoly = NULL;             // device resource - released with the others
 	bool     padAdditive = false;            // client carries patch (d) (gcAPIVer >= 260801)
+	// The client's PostProcess (Light glow) setting, read once from D3D9Client.cfg at
+	// session start - see the block in clbkSimulationStart and OroBloomOn() in OroState.h.
+	// bloomKnown separates "we read a 0" from "we could not read the file at all".
+	bool     bloomOn    = true;
+	bool     bloomKnown = false;
 
 	// (the SMOKE pool and the trail's gather/miter scratch lived here. Both went
 	//  with the trail on 2026-08-02. The smoke was ORO's only alpha-blended layer;
@@ -564,7 +599,10 @@ private:
 	BYTE  hullOk[SHELL_MAX_VTX];
 	float hullZ[HZ_N * HZ_N];                // nearest skin depth per cell (1e30 = no hull)
 	void SpawnWakeBlobs(int i, VESSEL* v, const VECTOR3& flowLocal, double simdt);
-	void BuildPlasmaGeometry(int i, VESSEL* v, const VECTOR3& flowLocal);
+	void BuildPlasmaGeometry();             // RENDER PATH since 2026-08-15: the whole draw
+	                                        //   list off the render camera. Took a VESSEL*
+	                                        //   for exactly four values, which UpdateReentry
+	                                        //   now snapshots - see ProjCam in this header.
 
 	bool   physWasOn   = false;        // previous g_fx.physicsMode - detects the mode edges
 	float  physGzFilt  = 0.0f;         // +Gz after the cardiovascular lag - what the eye follows
@@ -608,7 +646,8 @@ private:
 	// by the time we capture, so the shader's light source and its occlusion both
 	// arrive for free. Everything below is computed on the MAIN thread and read by
 	// the render path (invariant 1).
-	void  UpdateGodRays();
+	void  UpdateGodRays();      // MAIN thread: the light budget (air / elevation / eclipse)
+	void  BuildGodRayScreen(); // RENDER PATH: where the sun is on screen (2026-08-15)
 	void  DrawGodRayPass();     // the IPI resample; self-gating, called from both branches
 	float grSunU     = 0.5f;    // sun position in UV - MAY LIE OUTSIDE [0,1]: the shafts
 	float grSunV     = 0.5f;    //   still converge correctly on an off-screen source, and
@@ -656,7 +695,14 @@ private:
 	                                        //   looking like a missing chunk (the extreme
 	                                        //   combination is 6 ribbons at full thickness
 	                                        //   in complete polar night).
-	void    UpdateAurora();                 // per frame, main thread - builds aurVtx
+	void    BuildVapourGeometry();          // RENDER PATH: the cone -> vapVtx (2026-08-15)
+	void    UpdateAurora();                 // per frame, MAIN thread: identify the world,
+	                                        //   load its settings, gather the world state
+	                                        //   the build needs. No geometry (2026-08-15).
+	void    BuildAuroraGeometry();          // RENDER PATH: the curtains -> aurVtx, off the
+	                                        //   render camera. Here rather than in
+	                                        //   clbkPreStep because clbkPreStep does not run
+	                                        //   while PAUSED - see ProjCam above.
 	void    DrawAuroraPoly(oapi::Sketchpad* pSkp);   // push + additive draw
 	PlasVtx aurVtx[AUR_MAX_TRI * 3];
 	// --- LIGHTNING (OroLightning.cpp, 2026-08-08) ------------------------
@@ -683,7 +729,12 @@ private:
 	};
 	LtgFlash ltgFlash[LTG_MAX_FLASH];
 	float    ltgPrevAnim = 0.0f;            // last frame's animT (flash-crossing detect)
-	void    UpdateLightning(double simt);   // per frame, main thread - builds ltgVtx
+	void    UpdateLightning(double simt);   // per frame, MAIN thread: cloud map, districts,
+	                                        //   storm cells, flash scheduling. No geometry
+	                                        //   since 2026-08-15.
+	void    BuildLightningGeometry();       // RENDER PATH: the discs -> ltgVtx, off the
+	                                        //   render camera (clbkPreStep is dead while
+	                                        //   PAUSED - see ProjCam above).
 	void    DrawLightningPoly(oapi::Sketchpad* pSkp);   // push + additive draw
 	PlasVtx ltgVtx[LTG_MAX_TRI * 3];
 	float   ltgDepth[LTG_MAX_TRI * 3];      // per-vertex Euclidean camera distance (patch g)
@@ -719,6 +770,42 @@ private:
 	// is live this session (SunGlare on). Probed by BINDING, invariant 18(a).
 	bool    depthClipOK = false;
 	int     depthClipLogged = -1;           // -1 = never announced; else the value logged
+
+	// --- THE PROJECTION CAMERA (2026-08-15, the pause fix) -----------------
+	// ⚠️ clbkPreStep IS NOT CALLED WHILE PAUSED. Anything built there therefore FREEZES
+	// while the render callback keeps drawing it, which is why a paused pan or zoom used
+	// to slide the aurora, the lightning and the plasma off their subjects - the most
+	// reported issue of the whole closed beta (2/2 testers, ~6 reports). The one effect
+	// that always behaved is the one ORO does not draw (VC shadows, invariant 18), and
+	// the TRAIL behaves because its projection already lives in the render path.
+	// THE RULE THAT COMES OUT OF IT: world geometry may freeze while paused - nothing is
+	// moving - but the PROJECTION may not, because the camera is still moving. So the
+	// aurora, lightning and plasma builds now run in the RENDER PATH off this camera.
+	// preStepCam is the fallback on a client without patch (k): one step stale, which is
+	// exactly the old behaviour - degraded, not broken.
+	struct ProjCam { VECTOR3 pos; MATRIX3 rot; double tanAp; };
+	ProjCam preStepCam;
+	bool    preStepCamValid = false;
+	void    SnapPreStepCam();                                        // main thread
+	bool    FillProjCam(VECTOR3& pos, MATRIX3& rot, double& tanAp);  // render path
+
+	// ⚠️ THE COMPANION TO FillProjCam, AND IT IS NOT OPTIONAL FOR VESSEL-SCALE GEOMETRY.
+	// Orbiter's "global" frame is SOLAR-SYSTEM BARYCENTRIC (invariant 21a), so a position
+	// sampled in clbkPreStep is stale by one step of the whole planet's orbital motion -
+	// Earth covers ~500 m at 60 fps. Pair the RENDER camera with a PRE-STEP anchor and the
+	// effect lands hundreds of metres from its vessel and jitters with frame pacing, which
+	// is exactly what the plume and the vapour cone did on 2026-08-15.
+	// Returns the correction to ADD to any global position taken from that body at
+	// pre-step. Zero on a client without patch (k2) - degraded to the old one-step lag,
+	// not broken. Harmless for planet-scale geometry, which is why the aurora and the
+	// lightning never showed it.
+	// ⚠️⚠️ THE SECOND ARGUMENT IS THE BODY'S OWN CENTRE AT PRE-STEP - **NOT** the point
+	// you are correcting. Pass the point instead and the shift comes out as
+	// (centre_render - point_prestep), so point + shift == centre_render and EVERY point
+	// you correct collapses onto the body's centre of mass. That is exactly what happened
+	// to the plume on 2026-08-15: two nozzles became one plume sitting half inside the
+	// hull, and it looked like a projection bug rather than an argument bug.
+	VECTOR3 RenderEpochShift(OBJHANDLE h, const VECTOR3& bodyCentrePreStep);
 
 	// --- THE VAPOUR CONE (OroVapour.cpp, 2026-08-11) ---------------------
 	// Transonic condensation. Built + projected on the MAIN thread (invariant 1) into
@@ -810,7 +897,21 @@ private:
 	// (pad smoke / ablative trail) will spawn from the same entries - that is the
 	// whole reason this table exists as a table.
 	struct PlumeModel {
+		int     grp;            // ORO_THR_MAIN/HOVER/RETRO/USER - WHICH GROUP'S SETTINGS
+		                        //   this plume answers to (2026-08-16). Carried from the
+		                        //   candidate scan so every consumer - jet, shimmer, soot,
+		                        //   colour - reads g_fx.thr[grp] instead of one shared set.
 		VECTOR3 rootG, dirG;    // nozzle exit + exhaust FLOW direction, global frame
+		OBJHANDLE hOwn;         // the vessel rootG was taken from - a docked STACK can
+		                        //   contribute entries from several. ⚠️ rootG is a
+		                        //   BARYCENTRIC position sampled at PRE-STEP, and the
+		                        //   consumers now run in the render path a step later,
+		                        //   where Earth has moved ~500 m at 60 fps (invariant
+		                        //   21a). RenderEpochShift corrects it per entry.
+		VECTOR3 ownCg;          // that vessel's own CENTRE at pre-step. Stored because
+		                        //   RenderEpochShift needs the BODY CENTRE, not the point
+		                        //   being corrected - passing rootG collapsed every nozzle
+		                        //   onto the CoM (2026-08-15). See its declaration.
 		double  level;          // thrust level 0..1
 		double  wRef;           // effective nozzle width [m] (stock wsize x Width knob)
 		double  w0;             // core exit radius [m] (widthF folded in)
@@ -829,6 +930,11 @@ private:
 	};
 	PlumeModel plmModel[MAX_PLUMES];
 	int        plmModelN = 0;               // entries this step (0 = nothing burning)
+	float      plmShimStr = 0.0f;           // shimmer strength of the STRONGEST group that
+	                                        //   actually contributed a capsule this frame.
+	                                        //   PSShimmer has one full-frame uniform, so a
+	                                        //   per-plume strength is not expressible; this
+	                                        //   is the honest reduction (2026-08-16).
 	double     plmRho    = 0.0;             // ambient density at the vessel (the
 	                                        //   shimmer's atmosphere gate reads it)
 	// Last step's (exhaust idx -> level, puff), matched BY INDEX so slot reshuffles
@@ -891,7 +997,12 @@ private:
 	};
 	PrtStream  prtStr[PRT_MAX_STREAM];
 	int        prtStrN     = 0;
-	SURFHANDLE hPrtTex     = NULL;          // synthesized tinted 2x2 particle atlas
+	SURFHANDLE hPrtTex[4]  = {};            // synthesized tinted 2x2 particle atlas, ONE PER
+	                                        //   THRUSTER GROUP (2026-08-16). The particle
+	                                        //   spec has no colour field - colour lives in
+	                                        //   the texture - so per-group colour means one
+	                                        //   texture per group. 4 x 256^2 is cheap; the
+	                                        //   alternative was making the swatch lie.
 	bool       prtTexMode  = false;         // patch (l) bound AND the texture exists
 	bool       prtTexTried = false;         // one-shot probe/create guard (per session)
 	void UpdateParticles(double simdt);     // main thread (clbkPreStep): rebuild on change

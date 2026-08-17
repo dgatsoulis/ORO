@@ -1,4 +1,4 @@
-# Rebuilding D3D9Client for ORO (SEVENTEEN local patches: a-g, i-q)
+# Rebuilding D3D9Client for ORO (EIGHTEEN local patches: a-g, i-r)
 
 ORO runs on a locally-patched D3D9Client carrying **seventeen** ORO patches:
 
@@ -88,7 +88,7 @@ This documents the local rebuild that produced all five patches.
 
 ## Build recipe (mirrors .github/workflows/reusable-build.yml)
 
-> **THE EASY PATH (since 2026-08-13): skip step 3 entirely.** All seventeen patches are
+> **THE EASY PATH (since 2026-08-13): skip step 3 entirely.** All eighteen patches are
 > published, already applied, on the `oro-patches` branch of
 > <https://github.com/dgatsoulis/orbiter-oro> (branched from tag `2024`). Clone that
 > instead of upstream and there is nothing to apply:
@@ -828,6 +828,59 @@ uninitialised locals. Confirmed by inspecting the built object file: no date str
 emitted into `D3D9Util.cpp.obj` at all. This is very likely the real cause of
 `gcCore::GetSystemSpecs().gcAPIVer` reading 0 - a number that was never computed explains
 it more simply than one lost crossing the call boundary. Worth reporting upstream with (q).
+
+## Patch (r): the EMISSIVE OVERDRIVE (a stock limitation, and it is SHADER-ONLY)
+
+`PBR.fx` + `Vessel.fx`, two lines each. **No DLL rebuild — both are runtime-compiled
+deployed files, so this is edit, copy, restart Orbiter.**
+
+**The problem.** Both vessel shaders fold the material emissive into the light term and
+then clamp it:
+
+```
+float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (...) + gMtrl.emissive.rgb + ...);
+cDiff.rgb *= diffBaked;                       // PBR.fx
+```
+
+...and `Light_fx()` in `Common.hlsl` is `return saturate(x);` — a plain clamp (the soft
+rolloff beside it is commented out). So **everything a material emissive carries past 1.0
+is discarded**, and because the term MULTIPLIES the texture, a surface can never be
+brighter than its own texture. Three consequences, all of which ORO hit at once:
+
+- ORO's bell glow drives emissive to `1.45 x trim x 2.2`, i.e. ~3.19 at trim 1.0. Every
+  channel clamps to 1.0, so **trim 0.3 and trim 2.0 render identically** and the slider is
+  dead across most of its range.
+- All three channels clamping together means the result is **untinted** — the heat ramp's
+  colour, and the per-class Bell colour pick, are erased at high heat. What you see is the
+  raw texture.
+- Nothing ever exceeds 1.0, so **it can never reach the light-glow (bloom) pass**. Invariant
+  23(g) claimed "the halo IS the glow"; that was false in this shader path, and this patch
+  is what makes it true.
+
+**The fix.** Re-apply the excess as an ADDITIVE term, modulating the albedo:
+
+```
+float3 cAlbedo = cDiff.rgb;                   // before the lighting multiply
+cDiff.rgb *= diffBaked;
+cDiff.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
+```
+
+⚠️ **STOCK CONTENT CANNOT MOVE.** `max()` is exactly zero for any emissive at or below 1.0,
+which is everything an authored mesh carries — so this is a no-op for the entire stock
+install and only a material *deliberately* driven past 1.0 sees any change. Modulating by
+the albedo (rather than adding flat) keeps a texture's dark areas dark, so ORO's bell
+banding survives the overdrive instead of being washed out.
+
+**Which shader actually matters:** `Mesh.cpp` sets `Grp[g].Shader = SHADER_PBR` for every
+group by default, so a plain textured mesh takes **PBR.fx** — `Vessel.fx` is
+`SHADER_LEGACY` and only runs where a mesh asks for it. Both are patched so behaviour does
+not depend on which path a mesh happens to take. **`Metalness.fx` is deliberately NOT
+patched**: it routes emissive through `LightFXSq` with squared terms, it only engages when
+a texture carries a metalness map, and nothing in ORO uses it.
+
+**Report this upstream with (q) and the `BuildDate()` bug** — it is a limitation rather
+than a crash, but it means no addon can make anything glow past its own texture, which is
+a real constraint on any future heat/incandescence effect.
 
 ## Version marker
 

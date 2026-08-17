@@ -1,4 +1,4 @@
-diff --git a/OVP/D3D9Client/D3D9Client.cpp b/OVP/D3D9Client/D3D9Client.cpp
+﻿diff --git a/OVP/D3D9Client/D3D9Client.cpp b/OVP/D3D9Client/D3D9Client.cpp
 index f9c5ff7..d88e102 100644
 --- a/OVP/D3D9Client/D3D9Client.cpp
 +++ b/OVP/D3D9Client/D3D9Client.cpp
@@ -1517,7 +1517,7 @@ index 5b43b27..4515075 100644
  
  
 diff --git a/OVP/D3D9Client/shaders/PBR.fx b/OVP/D3D9Client/shaders/PBR.fx
-index e09b23c..421bcf6 100644
+index e09b23c..f59eba5 100644
 --- a/OVP/D3D9Client/shaders/PBR.fx
 +++ b/OVP/D3D9Client/shaders/PBR.fx
 @@ -194,8 +194,13 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
@@ -1544,7 +1544,27 @@ index e09b23c..421bcf6 100644
  
  #if LMODE > 0
  	cSun = Light_fx(cSun + cSpecLocal);	// Add local light sources
-@@ -472,7 +477,8 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+@@ -265,7 +270,19 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	if (gNoColor) cDiff.rgb = 1;
+ 
+ 	// ------------------------------------------------------------------------
++	float3 cAlbedo = cDiff.rgb;			// ORO patch (r): texture colour before lighting
+ 	cDiff.rgb *= diffBaked;				// Lit the texture
++	// ORO patch (r): THE EMISSIVE OVERDRIVE.
++	// Light_fx() above is a plain saturate(), so everything a material emissive carries
++	// past 1.0 was being discarded. An addon driving hot metal deliberately past the
++	// bloom threshold therefore got a flat, fully-lit copy of its own texture - identical
++	// at every setting above ~0.3, with its colour ramp erased (all three channels clamp
++	// together, so the result is untinted) and no way to reach the light-glow pass at all.
++	// The excess is re-applied here as an ADDITIVE term, modulating the albedo so a
++	// texture's dark areas stay dark and its banding survives.
++	// STOCK CONTENT CANNOT MOVE: max() is exactly zero for any emissive at or below 1.0,
++	// which is everything an authored mesh carries.
++	cDiff.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
+ 	cDiff.a *= gMtrlAlpha;				// Modulate material alpha
+ 
+ 
+@@ -472,7 +489,8 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
  		float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
  		cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
  
@@ -1633,7 +1653,7 @@ index 5cae620..af8fe33 100644
  
  		// Apply color matrix
 diff --git a/OVP/D3D9Client/shaders/Vessel.fx b/OVP/D3D9Client/shaders/Vessel.fx
-index ea4691f..5a1a1a1 100644
+index ea4691f..519d1af 100644
 --- a/OVP/D3D9Client/shaders/Vessel.fx
 +++ b/OVP/D3D9Client/shaders/Vessel.fx
 @@ -123,7 +123,14 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
@@ -1652,3 +1672,16 @@ index ea4691f..5a1a1a1 100644
  #endif
  
  
+@@ -136,7 +143,12 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 
+ 
+ 	// Lit the diffuse texture
++	// ORO patch (r): same emissive-overdrive fix as PBR.fx - see the long note there. This
++	// is the LEGACY path (SHADER_LEGACY); a plain mesh defaults to SHADER_PBR, so this copy
++	// exists so the behaviour does not depend on which shader a given mesh happens to take.
++	float3 cAlbedo = cTex.rgb;			// texture colour before lighting
+ 	cTex.rgb *= saturate(Base + gMtrl.diffuse.rgb * Light_fx(cDiffLocal + cSun * dLN));
++	cTex.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
+ 
+ 	// Lit the specular surface
+ 	cSpec.rgb *= saturate(cSpecLocal + fSun * cSun);

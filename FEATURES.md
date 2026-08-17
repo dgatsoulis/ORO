@@ -10,11 +10,11 @@ This is the first time the whole thing has been listed in one place. Everything 
 | Started | 2026-07-25 |
 | Shipped to beta | 2026-08-10 (16 days) |
 | Distinct effects | **25** — 13 physiological, 12 environmental |
-| Live controls | **84** sliders/knobs, **11** colour pickers, 5 tabs + 2 sub-tabs |
-| Source | ~15,400 lines across 15 C++ files, plus 8 pixel shaders in one HLSL file |
-| Client patches | **17** (a–g, i–q) — every one of them load-bearing |
+| Live controls | **91** sliders/knobs, **12** colour pickers, 5 tabs + 2 sub-tabs, all thruster settings PER ENGINE GROUP |
+| Source | ~15,500 lines across 15 C++ files, plus 8 pixel shaders in one HLSL file |
+| Client patches | **18** (a–g, i–r) — every one of them load-bearing |
 | Worlds with auroras | 12 |
-| Settings scopes | 3 — global / per vessel class / per body |
+| Settings scopes | 3 — global / per vessel class / per body (+ a window-geometry file) |
 
 ---
 
@@ -121,7 +121,9 @@ expands through Mach 1, and the one famous aerodynamic visual nothing in Orbiter
 - **Bell glow** — the nozzle heats and cools on sim time (`T_eq = throttle^¼`, closed-form
   cooling so it survives time warp) and glows incandescent: diffuse and specular forced
   black, emissive overdriven past the bloom threshold. The banding lives in the texture's
-  alpha, so the dark streaks *are* the cold bell showing through.
+  alpha, so the dark streaks *are* the cold bell showing through. A colour pick rotates the
+  whole blackbody ramp onto any hue while keeping its shape — dull at the bottom, still
+  whitening at peak, because the white comes from the bloom rather than from the palette.
 - **Throat fire** — camera-facing discs in the bell cup, depth-clipped by the bell walls.
 - **Exhaust shimmer** — heat haze behind the plume, sharing one plume model with everything
   above so haze and jet can never disagree.
@@ -196,6 +198,18 @@ rather than rendering anything.
 - **A borrow-and-return discipline** — every light emitter, particle stream, mesh and
   suppression flag ORO takes from another vessel is handed back on *every* exit path,
   including vessel deletion mid-frame.
+- **Docked, the felt-G model switches to kinematics** — a docking latch reports the force
+  it uses to hold two ships together, and in a scenario that *starts* docked that force can
+  be large and permanent while nothing moves (a DeltaGlider parked at the ISS reads 1.5 G
+  of nothing). So while docked the model works the answer out from the motion of the whole
+  joined assembly instead. Your own engines are still felt, and so is **rotation** — dock
+  to a spinning station and you get real artificial gravity, measured from your distance to
+  the assembly's centre of mass, which is the ring's radius.
+- **Nozzles synthesised for engines that have none** — some engines are built with no
+  visible exhaust at all (the DeltaGlider-S scramjets), so they show particles and no jet.
+  ORO gives them one, sized from the hull rather than from thrust: an airbreather's rated
+  thrust changes with the air around it, so a thrust-sized nozzle would swell and shrink
+  as you fly.
 - **Crash forensics** — both abort paths hooked, each logging a stack walk resolved to
   module and offset, with a linker map so an offset resolves to a symbol.
 

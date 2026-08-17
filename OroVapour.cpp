@@ -213,8 +213,30 @@ namespace {
 // Per frame, MAIN thread. Builds the shroud into vapVtx / vapDepth and sets
 // vapActive; publishes the Mach number and the gate for the dialog readout.
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// THE SPLIT (2026-08-15, the pause fix). UpdateVapour does the oapi work - which
+// vessel, its Mach, the gates, the flow axis, the sun. BuildVapourGeometry lofts and
+// projects the cone in the render path. See ProjCam in OroModule.h.
+// ----------------------------------------------------------------------------
+namespace {
+	struct VapSnap {
+		OBJHANDLE hV;      // for the render-epoch anchor (invariant 21a)
+		double  size, mUse;
+		float   fGate;
+		VECTOR3 Cg, fwdG, downG;
+		MATRIX3 Rv;        // the radial basis is anchored to the HULL (invariant 25e) -
+		                   //   without it the theta-keyed boil spins on attitude change
+		VECTOR3 sunG;
+		bool    haveSun;
+		float   dayF;
+	};
+	VapSnap s_vap;
+	bool    s_vapValid = false;
+}
+
 void OroModule::UpdateVapour()
 {
+	s_vapValid = false;
 	vapVtxN   = 0;
 	vapActive = false;
 	g_fx.vapMach   = 0.0f;
@@ -311,7 +333,69 @@ void OroModule::UpdateVapour()
 	const VECTOR3 fwdG  = mul(Rv, flowLocal);       // direction of travel, global
 	const VECTOR3 downG = -fwdG;                    // downstream, global
 
-	CamCtx cc; GetCam(cc);
+	// --- the sun -------------------------------------------------------------
+	// HOISTED HERE 2026-08-15: it needs oapi and does NOT need the camera, so it belongs
+	// on the main thread with the rest of the world state. What it is FOR is explained
+	// where it is used, in the build.
+	VECTOR3 sunG = Cg + fwdG;                       // harmless placeholder
+	bool    haveSun = false;
+	float   dayF = 1.0f;
+	{
+		OBJHANDLE hSun = OroFindStar();
+		if (hSun) {
+			oapiGetGlobalPos(hSun, &sunG);
+			haveSun = true;
+			OBJHANDLE hRef = v->GetSurfaceRef();
+			if (hRef) {
+				VECTOR3 bp; oapiGetGlobalPos(hRef, &bp);
+				const VECTOR3 up = unit(Cg - bp);
+				const double  el = dotp(up, unit(sunG - Cg));
+				dayF = ramp(el, -0.12, 0.04);       // sun below the horizon -> dark
+			}
+		}
+	}
+
+	// --- hand the world state to the render path and stop ---------------------
+	s_vap.hV   = hV;
+	s_vap.size = size;   s_vap.mUse = mUse;   s_vap.fGate = fGate;
+	s_vap.Cg   = Cg;     s_vap.fwdG = fwdG;   s_vap.downG = downG;
+	s_vap.Rv   = Rv;
+	s_vap.sunG = sunG;   s_vap.haveSun = haveSun; s_vap.dayF = dayF;
+	s_vapValid = true;
+}
+
+// ----------------------------------------------------------------------------
+// BuildVapourGeometry - THE RENDER PATH HALF (2026-08-15). The cone is a screen-space
+// surface of revolution, so like every other projected effect it has to be rebuilt
+// against the camera the frame is actually drawn with; clbkPreStep does not run while
+// PAUSED. See ProjCam in OroModule.h.
+//
+// INVARIANT-1 AUDIT: zero oapi calls. The world state arrives in s_vap; the g_fx writes
+// (the vapWhy readout) are plain single-thread member writes, not oapi.
+// ----------------------------------------------------------------------------
+void OroModule::BuildVapourGeometry()
+{
+	vapVtxN   = 0;
+	vapActive = false;
+	if (!s_vapValid) return;
+	if (viewW == 0 || viewH == 0) return;
+
+	CamCtx cc;
+	if (!FillProjCam(cc.pos, cc.rot, cc.tanAp)) return;
+
+	const double  size = s_vap.size, mUse = s_vap.mUse;
+	float         fGate = s_vap.fGate;              // the near fade below still scales it
+	// ⚠️ RENDER-EPOCH ANCHOR (invariant 21a). Cg was sampled at pre-step in the
+	// BARYCENTRIC frame and this build runs a step later, by which time Earth has moved
+	// ~500 m at 60 fps. Pairing the render camera with a pre-step anchor put the cone
+	// several hundred metres off the hull and made it jitter with frame pacing.
+	// fwdG / downG are DIRECTIONS - a translation leaves them alone.
+	const VECTOR3 Cg = s_vap.Cg + RenderEpochShift(s_vap.hV, s_vap.Cg);
+	const VECTOR3 fwdG = s_vap.fwdG, downG = s_vap.downG;
+	const MATRIX3 Rv = s_vap.Rv;
+	const VECTOR3 sunG = s_vap.sunG;
+	const bool    haveSun = s_vap.haveSun;
+	float         dayF = s_vap.dayF;                // TEST lifts it below
 
 	// --- THE FLICKER: one number, TWO consequences ----------------------------
 	// Three octaves of REAL time (invariant 4) at the user's rate. The same value drives
@@ -378,23 +462,7 @@ void OroModule::UpdateVapour()
 	// surface of revolution reads as a flat ring), and a day factor, because on the
 	// night side there is nothing illuminating it and a bright white cone hanging off
 	// a darkened ship would be the most obvious lie in the addon.
-	VECTOR3 sunG = Cg + fwdG;                       // harmless placeholder
-	bool    haveSun = false;
-	float   dayF = 1.0f;
-	{
-		OBJHANDLE hSun = OroFindStar();
-		if (hSun) {
-			oapiGetGlobalPos(hSun, &sunG);
-			haveSun = true;
-			OBJHANDLE hRef = v->GetSurfaceRef();
-			if (hRef) {
-				VECTOR3 bp; oapiGetGlobalPos(hRef, &bp);
-				const VECTOR3 up = unit(Cg - bp);
-				const double  el = dotp(up, unit(sunG - Cg));
-				dayF = ramp(el, -0.12, 0.04);       // sun below the horizon -> dark
-			}
-		}
-	}
+	// (sunG / haveSun / dayF are gathered on the main thread - see UpdateVapour.)
 	// TEST keeps it lit: "I turned it on at night and saw nothing" is the same
 	// silent failure the god rays' backwards Threshold produced (invariant 24d).
 	if (g_fx.vapTest && dayF < 0.85f) dayF = 0.85f;

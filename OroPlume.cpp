@@ -79,6 +79,42 @@ namespace {
 	const double PLM_CELL_DECAY= 0.80;   // per-cell brightness/modulation decay
 	const double PLM_SPACE_W   = 2.0;    // cell spacing = this x wsize x the Spacing slider
 
+	// ---- THE SYNTHESISED NOZZLE (2026-08-17) -------------------------------
+	// A thruster with NO exhaust definition still deserves a jet. The DG-S's two
+	// scramjets are the case that found this: ScramSubsys.cpp:160 creates them with
+	// CreateThruster and never calls AddExhaust, so they are thrusters but not
+	// exhausts - and the plume scan walks the EXHAUST list (it needs lsize/wsize,
+	// which a THRUSTER_HANDLE simply does not carry). Particles and the bell glow
+	// walk GetThrusterCount and saw them all along; only the jet was blind, which is
+	// why the user saw scram particles with no exhaust behind them.
+	//
+	// ⚠️ THE SIZE MUST NOT COME FROM THRUST, and this hull is precisely why.
+	// ScramSubsys::clbkPostStep calls SetThrusterMax0(hScram[i], Fscram[i]/(level+eps))
+	// EVERY STEP, so a scramjet's "max thrust" is rewritten continuously as a function
+	// of air conditions and collapses toward zero as the throttle closes. Sizing a
+	// nozzle from it would make the nozzle BREATHE with flight condition and vanish at
+	// ignition. A nozzle is a piece of metal: its size is a fact about the airframe.
+	// GetSize() is the only stable geometric quantity Orbiter offers here, so the
+	// synthesis is a fraction of the hull radius - frame-invariant by construction.
+	//
+	// Calibrated against the DG's OWN specs (SetSize(10), so wsize/hull and lsize/wsize
+	// are directly readable): main 12/1.0 = 0.100 hull, hover 6/0.5 = 0.050,
+	// retro 3/0.4 = 0.040, and lsize/wsize runs 7.5..12. The synthesised engine lands
+	// between hover and retro in girth with a mid-range slenderness, which is the right
+	// scale for an auxiliary/airbreathing duct and is never the biggest thing on a hull.
+	// The per-group Width and Length knobs then correct it per class, which is exactly
+	// where a guess belongs - the user's own escape hatch, no new slider.
+	const double PLM_SYN_W_HULL = 0.045;  // synthesised wsize, as a fraction of GetSize()
+	const double PLM_SYN_LW     = 10.0;   // synthesised lsize / wsize (mid of the DG's range)
+	const double PLM_SYN_W_MIN  = 0.05;   // absolute girth clamps [m]: a probe stays visible,
+	const double PLM_SYN_W_MAX  = 2.50;   //   a station does not grow a jet the size of a house
+	const double PLM_SYN_ACC_MIN= 0.005;  // admission test [m/s^2]: is this a PROPULSIVE engine
+	                                      //   at all, or a cosmetic vent someone modelled as a
+	                                      //   thruster? Framed as acceleration so it needs no
+	                                      //   magic Newton constant and works on any mass. The
+	                                      //   DG's own hatch vent is a particle stream and not a
+	                                      //   thruster, so nothing stock is near this line.
+
 	const double PLM_W0_FRAC   = 0.55;   // core radius at the exit, as a fraction of wsize
 	const double PLM_SHEATH_X  = 1.7;    // sheath radius = this x the exit core radius
 	const double PLM_SPREAD_LO = 2.0;    // natural divergence half-angle [deg] (always)
@@ -164,6 +200,56 @@ namespace {
 // diamond band fades with altitude, so the train loses discs one by one on the
 // way up - the Diamonds slider sets the SEA-LEVEL maximum.
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// WHICH GROUP A THRUSTER IS IN - the one definition, shared by all four thruster
+// subsystems (declared in OroModule.h). Lives here because the plume is the busiest
+// caller; the bell, the shimmer and the particles all route through it so the four
+// can never disagree about what "HOVER" means.
+//
+// ⚠️ "USER" IS DEFINED BY EXCLUSION: a thruster in NO standard group. That is the
+// definition the bell glow has used since 2026-08-09, adopted rather than reinvented.
+// It is also what keeps RCS out of ORO entirely without a special case - every
+// THGROUP_ATT_* thruster IS in a standard group, so it classifies as "not ours" and
+// every caller skips it.
+// ----------------------------------------------------------------------------
+namespace {
+	// Every group Orbiter names. The first three are ours; the twelve attitude groups
+	// exist here only so a thruster in one of them is recognised as NOT user-defined.
+	const THGROUP_TYPE THR_STD[] = {
+		THGROUP_MAIN, THGROUP_RETRO, THGROUP_HOVER,
+		THGROUP_ATT_PITCHUP, THGROUP_ATT_PITCHDOWN, THGROUP_ATT_YAWLEFT,
+		THGROUP_ATT_YAWRIGHT, THGROUP_ATT_BANKLEFT, THGROUP_ATT_BANKRIGHT,
+		THGROUP_ATT_RIGHT, THGROUP_ATT_LEFT, THGROUP_ATT_UP, THGROUP_ATT_DOWN,
+		THGROUP_ATT_FORWARD, THGROUP_ATT_BACK
+	};
+	const int N_THR_STD = (int)(sizeof(THR_STD) / sizeof(THR_STD[0]));
+}
+
+int OroThrusterGroupOf(VESSEL* v, THRUSTER_HANDLE th)
+{
+	if (!v || !th) return -1;
+	for (int g = 0; g < N_THR_STD; g++) {
+		const DWORD n = v->GetGroupThrusterCount(THR_STD[g]);
+		for (DWORD i = 0; i < n; i++) {
+			if (v->GetGroupThruster(THR_STD[g], i) != th) continue;
+			if (THR_STD[g] == THGROUP_MAIN)  return ORO_THR_MAIN;
+			if (THR_STD[g] == THGROUP_HOVER) return ORO_THR_HOVER;
+			if (THR_STD[g] == THGROUP_RETRO) return ORO_THR_RETRO;
+			return -1;                       // an attitude group: RCS, never ours
+		}
+	}
+	return ORO_THR_USER;                     // in no standard group at all
+}
+
+bool OroThrusterHasUser(VESSEL* v)
+{
+	if (!v) return false;
+	const DWORD n = v->GetThrusterCount();
+	for (DWORD i = 0; i < n; i++)
+		if (OroThrusterGroupOf(v, v->GetThrusterHandleByIndex(i)) == ORO_THR_USER) return true;
+	return false;
+}
+
 void OroModule::BuildPlumeModel()
 {
 	plmModelN = 0;
@@ -181,26 +267,43 @@ void OroModule::BuildPlumeModel()
 	// zone between), disjoint by construction at any handle positions. Conditions
 	// beyond the handles simply saturate - Venus at 9 MPa is just "very
 	// overexpanded" without the track needing to reach it.
+	// ⚠️ THE REGIME IS PER GROUP NOW (2026-08-16), and that is not a mechanical change.
+	// AMBIENT PRESSURE is a fact about where the ship is, so it is computed once. THE
+	// BAND IS NOT: its high handle is the pressure an ENGINE is rated for, so a vacuum
+	// main and a sea-level hover genuinely sit in different regimes at the same instant.
+	// Hence one blend per group, evaluated up front rather than inside the plume loop -
+	// four cheap evaluations beats recomputing per plume, and it lets the readout below
+	// answer for the SELECTED group without re-deriving anything.
 	const double P  = v->GetAtmPressure();                       // [Pa]
 	const double lp = log10(P > 0.01 ? P : 0.01);
-	const double lpHi = clampd(g_fx.plumeExpHi, PLM_EXP_LPMIN + 0.5, PLM_EXP_LPMAX);
-	const double lpLo = clampd(g_fx.plumeExpLo, PLM_EXP_LPMIN, lpHi - 0.5);
-	const double win  = lpHi - lpLo;
-	const double diaRamp = PLM_FR_DIA * win, bloRamp = PLM_FR_BLO * win;
-	const float  dW = (float)clampd((lp - (lpHi - diaRamp)) / diaRamp, 0.0, 1.0);
-	const float  bW = (float)clampd(((lpLo + bloRamp) - lp) / bloRamp, 0.0, 1.0);
 	plmRho = v->GetAtmDensity();                                 // the shimmer's air gate
+
+	float dWg[ORO_THR_N], bWg[ORO_THR_N];
+	for (int gi = 0; gi < ORO_THR_N; gi++) {
+		const OroThrusterFx& T = g_fx.thr[gi];
+		const double lpHi = clampd(T.plumeExpHi, PLM_EXP_LPMIN + 0.5, PLM_EXP_LPMAX);
+		const double lpLo = clampd(T.plumeExpLo, PLM_EXP_LPMIN, lpHi - 0.5);
+		const double win  = lpHi - lpLo;
+		const double diaRamp = PLM_FR_DIA * win, bloRamp = PLM_FR_BLO * win;
+		dWg[gi] = (float)clampd((lp - (lpHi - diaRamp)) / diaRamp, 0.0, 1.0);
+		bWg[gi] = (float)clampd(((lpLo + bloRamp) - lp) / bloRamp, 0.0, 1.0);
+	}
 
 	// Readouts publish UNCONDITIONALLY once the vessel resolves (the reentryHeat
 	// discipline): the dialog must show what the model would do even from the
 	// cockpit, disarmed, or with the pill off - a regime you cannot see is a
-	// pressure blend you cannot argue with.
-	g_fx.plumeAtmKPa = (float)(P * 1e-3);
-	if      (dW >= 0.35f) strcpy_s(g_fx.plumeRegime, "overexpanded - diamonds");
-	else if (dW >  0.02f) strcpy_s(g_fx.plumeRegime, "overexpanded");
-	else if (bW >= 0.60f) strcpy_s(g_fx.plumeRegime, "vacuum - expansion bloom");
-	else if (bW >  0.02f) strcpy_s(g_fx.plumeRegime, "underexpanded - widening");
-	else                  strcpy_s(g_fx.plumeRegime, "near-ideal expansion");
+	// pressure blend you cannot argue with. It answers for the group the panel is
+	// EDITING, which is the one whose band you are dragging.
+	{
+		const int gs = (g_fx.thrSel >= 0 && g_fx.thrSel < ORO_THR_N) ? g_fx.thrSel : 0;
+		const float dW = dWg[gs], bW = bWg[gs];
+		g_fx.plumeAtmKPa = (float)(P * 1e-3);
+		if      (dW >= 0.35f) strcpy_s(g_fx.plumeRegime, "overexpanded - diamonds");
+		else if (dW >  0.02f) strcpy_s(g_fx.plumeRegime, "overexpanded");
+		else if (bW >= 0.60f) strcpy_s(g_fx.plumeRegime, "vacuum - expansion bloom");
+		else if (bW >  0.02f) strcpy_s(g_fx.plumeRegime, "underexpanded - widening");
+		else                  strcpy_s(g_fx.plumeRegime, "near-ideal expansion");
+	}
 
 	// ---- THE STACK, not one vessel (2026-08-09) ---------------------------
 	// Orbiter's Shuttle is FOUR vessels - Atlantis, Atlantis_Tank and two
@@ -235,35 +338,83 @@ void OroModule::BuildPlumeModel()
 
 	// Gather lit, qualifying exhausts across the stack; keep the strongest
 	// MAX_PLUMES (biggest + hottest wins) - ONE selection every consumer inherits.
-	// Qualifying = MAIN / RETRO / HOVER only, per vessel (the shimmer's user call -
-	// RCS puffs are tiny, numerous, and would eat the budget for no visible gain).
-	struct Cand { float w; DWORD idx; int vs; };
+	// Qualifying = MAIN / RETRO / HOVER / USER, per vessel. RCS is excluded by
+	// OroThrusterGroupOf returning -1 for every THGROUP_ATT_* thruster (the shimmer's
+	// original user call - RCS puffs are tiny, numerous, and would eat the budget for
+	// no visible gain).
+	// ⚠️ THE GROUP IS CARRIED THROUGH NOW (2026-08-16). It used to be discarded right
+	// here: the three groups were flattened into one handle set and all that survived
+	// was the exhaust index, which is why one set of sliders had to serve every engine
+	// on the ship. `grp` rides each candidate into the PlumeModel so the shape, colour,
+	// soot and expansion band can be that group's own.
+	// The POOL STAYS SHARED (his call): the six brightest plumes win whatever group
+	// they belong to. A group whose plume pill is off is skipped below, so it now
+	// frees its slots instead of holding them - a small win that falls out for free.
+	struct Cand { float w; DWORD idx; int vs; int grp; bool syn; THRUSTER_HANDLE th; };
 	Cand cand[32];
 	int nc = 0;
 	EXHAUSTSPEC es;
 	for (int s = 0; s < nStack && nc < 32; s++) {
 		VESSEL* sv = oapiGetVesselInterface(stack[s]);
 		if (!sv) continue;
-		THRUSTER_HANDLE hSet[64];
-		int nSet = 0;
-		const THGROUP_TYPE grp[3] = { THGROUP_MAIN, THGROUP_RETRO, THGROUP_HOVER };
-		for (int g = 0; g < 3; g++) {
-			const DWORD n = sv->GetGroupThrusterCount(grp[g]);
-			for (DWORD i = 0; i < n && nSet < 64; i++) hSet[nSet++] = sv->GetGroupThruster(grp[g], i);
-		}
-		if (!nSet) continue;
 		const DWORD nex = sv->GetExhaustCount();
 		for (DWORD i = 0; i < nex && nc < 32; i++) {
 			const double lvl = sv->GetExhaustLevel(i);
 			if (lvl < 0.02) continue;
 			sv->GetExhaustSpec(i, &es);
 			if (!es.lpos || !es.ldir) continue;
-			bool wanted = false;
-			for (int k = 0; k < nSet; k++) if (es.th == hSet[k]) { wanted = true; break; }
-			if (!wanted) continue;
+			const int grp = OroThrusterGroupOf(sv, es.th);
+			if (grp < 0) continue;                          // RCS / not ours
+			if (!g_fx.thr[grp].plumeEnabled) continue;      // this group draws no jet
 			cand[nc].w   = (float)(es.lsize * lvl);
 			cand[nc].idx = i;
 			cand[nc].vs  = s;
+			cand[nc].grp = grp;
+			cand[nc].syn = false;
+			cand[nc].th  = es.th;
+			nc++;
+		}
+	}
+
+	// SECOND PASS - the engines the first one structurally cannot see: lit thrusters
+	// that NO exhaust definition references. See the PLM_SYN_* block for why the size
+	// is derived from the hull and never from thrust. A thruster the author DID give an
+	// exhaust is already above, so the two passes are disjoint by construction and no
+	// engine can be drawn twice; an author who defines several exhausts for one
+	// thruster keeps every one of them and gets no synthesised extra.
+	for (int s = 0; s < nStack && nc < 32; s++) {
+		VESSEL* sv = oapiGetVesselInterface(stack[s]);
+		if (!sv) continue;
+		const DWORD nex = sv->GetExhaustCount();
+		const DWORD nth = sv->GetThrusterCount();
+		for (DWORD t = 0; t < nth && nc < 32; t++) {
+			THRUSTER_HANDLE th = sv->GetThrusterHandleByIndex(t);
+			if (!th) continue;
+			const double lvl = sv->GetThrusterLevel(th);
+			if (lvl < 0.02) continue;
+			const int grp = OroThrusterGroupOf(sv, th);
+			if (grp < 0) continue;                          // RCS / not ours
+			if (!g_fx.thr[grp].plumeEnabled) continue;
+			// Already drawn by the exhaust pass? Then it is not our business.
+			bool hasEx = false;
+			for (DWORD i = 0; i < nex && !hasEx; i++) {
+				sv->GetExhaustSpec(i, &es);
+				if (es.th == th) hasEx = true;
+			}
+			if (hasEx) continue;
+			// Is it an ENGINE? A vent modelled as a thruster is not, and should not
+			// grow a jet. Acceleration, so the test carries no mass assumption.
+			const double m = sv->GetMass();
+			if (m > 1.0 && (sv->GetThrusterMax0(th) * lvl) / m < PLM_SYN_ACC_MIN) continue;
+			const double wsyn = clampd(sv->GetSize() * PLM_SYN_W_HULL,
+			                           PLM_SYN_W_MIN, PLM_SYN_W_MAX);
+			cand[nc].w   = (float)(wsyn * PLM_SYN_LW * lvl);   // same weight metric as
+			                                                   // above: lsize x level
+			cand[nc].idx = t;                                  // THRUSTER index now
+			cand[nc].vs  = s;
+			cand[nc].grp = grp;
+			cand[nc].syn = true;
+			cand[nc].th  = th;
 			nc++;
 		}
 	}
@@ -277,30 +428,63 @@ void OroModule::BuildPlumeModel()
 	}
 	const int nkeep = nc < MAX_PLUMES ? nc : MAX_PLUMES;
 
-	// Sliders the MODEL owns (the silhouette + the train's spacing/count) - the
-	// consumers read the RESULTS and never re-apply them.
-	const float kWidth = clampf(g_fx.plumeWidth, 0.05f, 3.0f);
-	const float kLen   = clampf(g_fx.plumeLen,   0.05f, 3.0f);
-	const float kSpace = clampf(g_fx.plumeSpacing, 0.15f, 3.0f);
-	const int   nCell  = (int)(clampf(g_fx.plumeCells, 1.0f, 12.0f) + 0.5f);
-	const bool  phys   = g_fx.plumePhysics;
-
 	for (int p = 0; p < nkeep; p++) {
 		VESSEL* sv = oapiGetVesselInterface(stack[cand[p].vs]);
 		if (!sv) continue;
-		const double lvl = sv->GetExhaustLevel(cand[p].idx);
-		sv->GetExhaustSpec(cand[p].idx, &es);
-		if (!es.lpos || !es.ldir) continue;
-		if (es.wsize < 1e-3 || es.lsize < 1e-3) continue;   // degenerate spec: spacing
+		// Sliders the MODEL owns (the silhouette + the train's spacing/count) - the
+		// consumers read the RESULTS and never re-apply them. PER GROUP since
+		// 2026-08-16: these used to be hoisted out of the loop because there was only
+		// one set of them. Now each plume answers to its own engine group, so they are
+		// resolved per plume - and the regime blend comes from that group's own
+		// expansion band, which is what lets a vacuum main and a sea-level hover be in
+		// different regimes in the same frame.
+		const int    grp   = cand[p].grp;
+		const OroThrusterFx& T = g_fx.thr[grp];
+		const float  dW    = dWg[grp], bW = bWg[grp];
+		const float  kWidth = clampf(T.plumeWidth, 0.05f, 3.0f);
+		const float  kLen   = clampf(T.plumeLen,   0.05f, 3.0f);
+		const float  kSpace = clampf(T.plumeSpacing, 0.15f, 3.0f);
+		const int    nCell  = (int)(clampf(T.plumeCells, 1.0f, 12.0f) + 0.5f);
+		const bool   phys   = T.plumePhysics;
+		// THE NOZZLE, from whichever source this candidate came from. Everything below
+		// this block is source-agnostic on purpose: a synthesised nozzle is a normal
+		// plume in every other respect, so the regime, the physics factors, the puff
+		// tracker and all four consumers inherit it with no special case anywhere.
+		VECTOR3 lposL, ldirL;
+		double  sLofs, sLsize, sWsize, lvl;
+		if (cand[p].syn) {
+			if (!cand[p].th) continue;
+			sv->GetThrusterRef(cand[p].th, lposL);
+			sv->GetThrusterDir(cand[p].th, ldirL);
+			lvl    = sv->GetThrusterLevel(cand[p].th);
+			sWsize = clampd(sv->GetSize() * PLM_SYN_W_HULL, PLM_SYN_W_MIN, PLM_SYN_W_MAX);
+			sLsize = sWsize * PLM_SYN_LW;
+			sLofs  = 0.0;            // no author offset to honour: the reference point IS
+			                         // the nozzle as far as anything can tell
+		} else {
+			lvl = sv->GetExhaustLevel(cand[p].idx);
+			sv->GetExhaustSpec(cand[p].idx, &es);
+			if (!es.lpos || !es.ldir) continue;
+			lposL  = *es.lpos;
+			ldirL  = *es.ldir;
+			sLofs  = es.lofs;
+			sLsize = es.lsize;
+			sWsize = es.wsize;
+		}
+		if (sWsize < 1e-3 || sLsize < 1e-3) continue;       // degenerate spec: spacing
 		                                                    // divides by wsize below
 
 		PlumeModel& e = plmModel[plmModelN];
+		e.grp = grp;                 // every consumer reads g_fx.thr[e.grp] from here on
 
 		// Axis, world space. ldir is the THRUST direction: exhaust streams along
 		// -ldir from the nozzle at lpos - ldir*lofs (the shimmer's construction).
-		const VECTOR3 rootL = (*es.lpos) - (*es.ldir) * es.lofs;
+		const VECTOR3 rootL = lposL - ldirL * sLofs;
 		sv->Local2Global(rootL, e.rootG);
-		VECTOR3 dl = -(*es.ldir);
+		e.hOwn = sv->GetHandle();   // whose frame rootG is in - see RenderEpochShift
+		sv->GetGlobalPos(e.ownCg);  // and that vessel's CENTRE, which is what the shift
+		                            // is measured from (NOT rootG - see the header)
+		VECTOR3 dl = -ldirL;
 		const double dll = length(dl);
 		if (dll < 1e-6) continue;
 		dl = dl * (1.0 / dll);
@@ -310,7 +494,8 @@ void OroModule::BuildPlumeModel()
 		// The OD reference is the HIGH handle - the pressure this engine is RATED
 		// for. Default = Earth sea level; drag it low and the hull behaves like a
 		// vacuum engine (shuddering pinched diamonds at the pad, rated in space).
-		const double Pd = pow(10.0, lpHi);
+		// PER GROUP: the high handle is THIS engine's rated pressure, not the ship's.
+		const double Pd = pow(10.0, clampd(T.plumeExpHi, PLM_EXP_LPMIN + 0.5, PLM_EXP_LPMAX));
 		const double pc = 0.25 + 0.75 * lvl;
 		const double OD = phys ? clampd((P / Pd) / pc, 1e-4, 8.0) : 1.0;
 		const double spacingF = phys ? clampd(1.0 / sqrt(OD), 0.60, 3.0) : 1.0;
@@ -325,16 +510,16 @@ void OroModule::BuildPlumeModel()
 		// Width scales every radial size through w0; Spacing stays on the RAW
 		// wsize so the two knobs are orthogonal (widen the jet without moving
 		// the discs, and vice versa). The physics factors multiply both.
-		e.wRef    = es.wsize * kWidth;
+		e.wRef    = sWsize * kWidth;
 		e.w0      = e.wRef * PLM_W0_FRAC * widthF;
-		e.spacing = es.wsize * PLM_SPACE_W * kSpace * spacingF;
+		e.spacing = sWsize * PLM_SPACE_W * kSpace * spacingF;
 
 		// Regime-blended length (weights disjoint): mid-regime jet, diamond train
 		// (which STRETCHES with the physics spacing), vacuum bloom - then the
 		// Length knob and the throttle scale.
 		const double L_sea = e.spacing * (nCell + 1.5);
-		const double L_mid = es.lsize * 1.15;
-		const double L_vac = es.lsize * 2.3;
+		const double L_mid = sLsize * 1.15;
+		const double L_vac = sLsize * 2.3;
 		e.L = (L_mid * (1.0 - dW - bW) + L_sea * dW + L_vac * bW) * kLen * (0.30 + 0.70 * lvl);
 		if (e.L < 1e-3) continue;
 
@@ -342,7 +527,11 @@ void OroModule::BuildPlumeModel()
 		// accumulators). Exhaust index 0 exists on EVERY vessel in the stack, so the
 		// stack slot is folded in - deterministic, because the BFS above visits a
 		// given topology in the same order every frame.
-		e.exIdx = ((DWORD)cand[p].vs << 16) | cand[p].idx;
+		// ⚠️ TWO INDEX NAMESPACES SINCE 2026-08-17: cand.idx is an EXHAUST index for an
+		// authored plume and a THRUSTER index for a synthesised one, and both start at 0
+		// on the same vessel. Bit 15 separates them, so exhaust 0 and thruster 0 cannot
+		// alias - which would have crossed their puff transients and soot seeds.
+		e.exIdx = ((DWORD)cand[p].vs << 16) | (cand[p].syn ? 0x8000u : 0u) | (cand[p].idx & 0x7FFFu);
 
 		// THROTTLE-TRANSIENT PUFF (physics mode): on ignition, shutdown and
 		// throttle slams the plume blooms briefly - chamber pressure ramping
@@ -398,10 +587,19 @@ void OroModule::UpdatePlumeFx()
 	plmDkVtxN = 0;                                               // the soot layer too
 	if (viewW == 0 || viewH == 0) return;
 	if (!extGate || !g_fx.masterArmed) return;                   // EXTERNAL view only
-	if (!g_fx.plumeEnabled || g_fx.plume <= 0.001f) return;
+	// ⚠️ NO GLOBAL PILL TEST HERE ANY MORE (2026-08-16). The pill and the master
+	// strength are PER GROUP, and BuildPlumeModel has already dropped every candidate
+	// whose group is switched off - so a model entry existing at all means its group
+	// wants a jet. Testing the edit buffer here would have made whichever group the
+	// panel happened to be showing decide whether the OTHER groups draw.
 	if (plmModelN <= 0) return;                                  // nothing burning
 
-	CamCtx cc; GetCam(cc);
+	// THE RENDER CAMERA (2026-08-15). CONSUMER 1 of the plume model runs in the render
+	// path now: the jet is screen-space geometry, and clbkPreStep does not run while
+	// PAUSED, so the diamonds used to sit wherever the nozzle was when the sim stopped.
+	// The MODEL (BuildPlumeModel) stays on the main thread - it is physics, not a view.
+	CamCtx cc;
+	if (!FillProjCam(cc.pos, cc.rot, cc.tanAp)) return;
 	// Pixels of a world length w at camera depth z (the round-3.5 law: per element,
 	// at per-vertex depth - never a vessel-wide anchor).
 	auto pxAt = [&](double z, double w) -> float {
@@ -420,22 +618,8 @@ void OroModule::UpdatePlumeFx()
 	// vacuum halo. Diamond WHITE is not in either palette - it emerges from the fp16
 	// accumulation + the client's threshold bloom (patch i), with a per-vertex push
 	// toward white at the nodes so the discs saturate first.
-	int jR, jG, jB, bR, bG, bB;
-	UnpackCR(g_fx.plumeColJet,   jR, jG, jB);
-	UnpackCR(g_fx.plumeColBloom, bR, bG, bB);
-
-	const float master  = clampf(g_fx.plume, 0.0f, 1.0f);
-	const int   nCell   = (int)(clampf(g_fx.plumeCells, 1.0f, 12.0f) + 0.5f);  // Diamonds
-	                                                              //   count (int; same
-	                                                              //   rounding the model
-	                                                              //   used for L_sea)
-	const float kDia    = clampf(g_fx.plumeDiamond,  0.0f, 2.0f);
-	const float kBloomW = clampf(g_fx.plumeBloomWid, 0.0f, 2.0f);
-	const float kBloomB = clampf(g_fx.plumeBloomBri, 0.0f, 2.0f);
-	const float kThroat = clampf(g_fx.plumeThroat,   0.0f, 4.0f);
-	const float kThrOfs = clampf(g_fx.plumeThroatOfs, 0.0f, 1.0f);   // [m] downstream slide
-	const float kSoot   = clampf(g_fx.plumeSoot,     0.0f, 2.0f);
-	const float kChurn  = clampf(g_fx.plumeSootRate, 0.0f, 3.0f);
+	// (the colour picks and every draw knob are resolved PER PLUME inside the loop
+	//  since 2026-08-16 - see the block at the top of it.)
 	const float t_anim  = (float)animT;                          // REAL time (invariant 4)
 
 	auto emitDk = [&](float x0, float y0, DWORD c0, float d0,
@@ -449,10 +633,33 @@ void OroModule::UpdatePlumeFx()
 
 	for (int p = 0; p < plmModelN; p++) {
 		const PlumeModel& e = plmModel[p];
+		// THIS PLUME'S OWN GROUP decides every draw knob (2026-08-16). These were all
+		// hoisted out of the loop when one set of numbers served the whole ship; they
+		// are per plume now, which is what lets a hydrolox main and a hypergolic retro
+		// be different colours, with different soot, in the same frame.
+		const OroThrusterFx& T = g_fx.thr[(e.grp >= 0 && e.grp < ORO_THR_N) ? e.grp : 0];
+		int jR, jG, jB, bR, bG, bB;
+		UnpackCR(T.plumeColJet,   jR, jG, jB);   // core + diamond body
+		UnpackCR(T.plumeColBloom, bR, bG, bB);   // the vacuum halo
+		const float master  = clampf(T.plume, 0.0f, 1.0f);
+		const int   nCell   = (int)(clampf(T.plumeCells, 1.0f, 12.0f) + 0.5f);
+		const float kDia    = clampf(T.plumeDiamond,  0.0f, 2.0f);
+		const float kBloomW = clampf(T.plumeBloomWid, 0.0f, 2.0f);
+		const float kBloomB = clampf(T.plumeBloomBri, 0.0f, 2.0f);
+		const float kThroat = clampf(T.plumeThroat,   0.0f, 4.0f);
+		const float kThrOfs = clampf(T.plumeThroatOfs, 0.0f, 1.0f);   // [m] downstream slide
+		const float kSoot   = clampf(T.plumeSoot,     0.0f, 2.0f);
+		const float kChurn  = clampf(T.plumeSootRate, 0.0f, 3.0f);
+		if (master <= 0.001f) continue;          // this group's master is down
 		const float   dW = e.dW, bW = e.bW;
 		const double  w0 = e.w0, spacing = e.spacing, L = e.L;
 		const double  lvl = e.level;
-		const VECTOR3 rootG = e.rootG, dirG = e.dirG;
+		// ⚠️ RENDER-EPOCH ANCHOR (invariant 21a). rootG was sampled at pre-step in the
+		// BARYCENTRIC frame; this build runs a step later, by which time Earth has moved
+		// ~500 m. Without this the whole jet sits off the ship and jitters with frame
+		// pacing. dirG needs no correction - a translation does not rotate anything.
+		const VECTOR3 rootG = e.rootG + RenderEpochShift(e.hOwn, e.ownCg);
+		const VECTOR3 dirG  = e.dirG;
 
 		// The bloom's opening half-angle: a small natural divergence always, plus
 		// the vacuum expansion as ambient pressure stops confining the jet - and

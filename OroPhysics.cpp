@@ -137,6 +137,20 @@ VECTOR3 OroModule::CleanCameraOffset(VESSEL* v) const
 	return (length(cur - camApplied) > SHAKE_RESET) ? cur : (cur - camDelta);
 }
 
+// Is this vessel joined to anything? One occupied dock port is enough - the
+// constraint artifact appears the moment there is something to be held against.
+// Cheap (DockCount is a member read); called once per physics step.
+static bool OroIsDocked(VESSEL* v)
+{
+	if (!v) return false;
+	const UINT nd = v->DockCount();
+	for (UINT d = 0; d < nd; d++) {
+		OBJHANDLE h = v->GetDockStatus(v->GetDockHandle(d));
+		if (h && oapiGetObjectType(h) == OBJTP_VESSEL) return true;
+	}
+	return false;
+}
+
 // ----------------------------------------------------------------------------
 // The model. Runs every frame from clbkPreStep while PHYSICS mode is on.
 // ----------------------------------------------------------------------------
@@ -178,12 +192,124 @@ void OroModule::UpdatePhysics()
 	v->GetWeightVector(W);
 	VECTOR3 a = (F - W) / m;
 
+	// ⚠️ DOCKED: THE FORCE BUCKET IS NOT TRUSTWORTHY, so do not read it (2026-08-17).
+	// The stock "Docked with the ISS" DG scenario starts with a STEADY 1.54 g of
+	// nothing - measured: |F-W| = 369.8 kN on a 24.5 t hull, held to four figures for
+	// as long as you sit there, with thrust, lift and drag all exactly zero. It is the
+	// core holding the assembly together: a scenario-loaded dock whose saved state does
+	// not exactly satisfy the constraint gets a permanent corrective force, which is why
+	// undocking and redocking clears it, and why exiting and reloading "Current state"
+	// clears it (Orbiter re-saves the settled state).
+	//
+	// IT DOES NOT CANCEL ACROSS THE ASSEMBLY - that was the first hypothesis and the
+	// diagnostic killed it. The partner never receives an equal-and-opposite entry (the
+	// ISS logged 0.0 N against the DG's 369.8 kN), so summing over the docked stack only
+	// dilutes the artifact by the mass ratio, to 0.08 g. There is nothing to subtract.
+	//
+	// So use the physics instead of the bookkeeping: a docked assembly is in FREE FALL to
+	// within milli-g, and the force term is the only thing claiming otherwise. Drop it.
+	// ⚠️ THE ROTATION TERMS BELOW DELIBERATELY SURVIVE - a station that spins genuinely
+	// does press you into your seat, and that is felt at the head whether or not you are
+	// bolted to it. Zeroing the whole model here would have thrown away the one real
+	// effect in the situation.
+	//
+	// So while docked we stop reading the TOTAL and add up only the forces the API will
+	// NAME: thrust, lift and drag. Those are exactly the non-gravitational forces acting
+	// on the hull that we can account for, so the sum is still a proper acceleration -
+	// it simply refuses to include the "and any other forces" bucket the constraint hides
+	// in. Docked in orbit that resolves to thrust alone, which is the point: FIRING YOUR
+	// OWN ENGINES AT A DOCK IS STILL FELT. Zeroing outright was the first version of this
+	// and it silently threw that away, which is a far more reachable case than the one it
+	// was justified against.
+	//
+	// ⚠️ THE ROTATION TERMS BELOW DELIBERATELY SURVIVE - a station that spins genuinely
+	// does press you into your seat, and that is felt at the head whether or not you are
+	// bolted to it. Zeroing the whole model here would have thrown away the one real
+	// effect in the situation.
+	//
+	// WHAT IT STILL DOES NOT COVER, deliberately: an acceleration applied to the ASSEMBLY
+	// by someone else - a station reboost, or a tug pushing the stack - is not felt,
+	// because it never appears in this vessel's own thrust. That is a few milli-g in
+	// practice. Recovering it would mean differentiating GetGlobalVel, i.e. a second
+	// acceleration path with its own noise live in every docked frame; not worth it.
+	// ATTACHMENTS are also deliberately NOT treated as docking. A payload riding an
+	// accelerating carrier SHOULD feel the carrier's acceleration, and there the force
+	// bucket is very likely telling the truth.
+	//
+	// ⚠️⚠️ AND THE ROTATION MUST COME BACK AS KINEMATICS, OR A SPINNING STATION LOSES ITS
+	// ARTIFICIAL GRAVITY (his question, and it caught a regression in the first version).
+	// On a 2001-style ring the centripetal force holding your ship on its circle is
+	// delivered THROUGH THE DOCKING LATCH - it is physically real, steady, and lands in
+	// the very bucket we just stopped reading. Discarding it silently deletes the whole
+	// point of a rotating station.
+	// The two cases cannot be told apart by looking at the force: both are steady, both
+	// are large, both come from the dock. They are trivially told apart by KINEMATICS,
+	// because a rotating assembly has a rotation rate and a static one does not. So work
+	// the acceleration out from the motion instead:
+	//     a_head = w x (w x R) + alpha x R,   R = head - the ASSEMBLY's centre of mass
+	// R is measured from the whole docked stack's CoM, which is what the assembly spins
+	// about - so R is the ring's RADIUS (~150 m on a Station V), not the 7 m from the
+	// DeltaGlider's own CoM to its seat. That distinction IS the effect: using the ship's
+	// own offset would have delivered about 5% of the real gravity.
+	// It degenerates correctly at both ends: docked to a static ISS, w ~ 0 and the term
+	// vanishes (which is the bug fixed), and undocked the assembly CoM is the vessel's own
+	// CoM, so it reduces exactly to the r-from-own-CoM term used everywhere else.
+	if (OroIsDocked(v)) {
+		VECTOR3 T = _V(0, 0, 0), L = _V(0, 0, 0), D = _V(0, 0, 0);
+		v->GetThrustVector(T);
+		v->GetLiftVector(L);
+		v->GetDragVector(D);
+		a = (T + L + D) / m;                      // our OWN engines are still felt
+
+		if (g_fx.gRefCamera) {
+			// The assembly's centre of mass, mass-weighted over everything rigidly
+			// joined. GetGlobalPos IS a vessel's centre of mass, so no extra work.
+			OBJHANDLE stk[16]; int ns = 0;
+			stk[ns++] = v->GetHandle();
+			for (int s = 0; s < ns && ns < 16; s++) {
+				VESSEL* sv = oapiGetVesselInterface(stk[s]);
+				if (!sv) continue;
+				const UINT nd = sv->DockCount();
+				for (UINT d = 0; d < nd && ns < 16; d++) {
+					OBJHANDLE h = sv->GetDockStatus(sv->GetDockHandle(d));
+					if (!h || oapiGetObjectType(h) != OBJTP_VESSEL) continue;
+					bool seen = false;
+					for (int q = 0; q < ns; q++) if (stk[q] == h) { seen = true; break; }
+					if (!seen) stk[ns++] = h;
+				}
+			}
+			VECTOR3 comG = _V(0, 0, 0); double mTot = 0.0;
+			for (int s = 0; s < ns; s++) {
+				VESSEL* sv = oapiGetVesselInterface(stk[s]);
+				if (!sv) continue;
+				VECTOR3 pg; sv->GetGlobalPos(pg);
+				const double sm = sv->GetMass();
+				comG = comG + pg * sm; mTot += sm;
+			}
+			if (mTot > 1.0) {
+				comG = comG / mTot;
+				VECTOR3 headG; v->Local2Global(CleanCameraOffset(v), headG);
+				const VECTOR3 R = headG - comG;            // global, spin axis to the eye
+				VECTOR3 wL, alL, wG, alG;
+				v->GetAngularVel(wL); v->GetAngularAcc(alL);
+				v->GlobalRot(wL, wG); v->GlobalRot(alL, alG);
+				// Same handedness-immune form as the undocked path below.
+				const VECTOR3 aG = wG * dotp(wG, R) - R * dotp(wG, wG) + crossp(alG, R);
+				MATRIX3 Rm; v->GetRotationMatrix(Rm);
+				a = a + tmul(Rm, aG);                      // back into vessel-local
+			}
+		}
+	}
+
 	// --- 2. carry it out to the pilot's head ------------------------------
 	// For a point r from the CoM of a rigid body: a_P = a_CoM + w x (w x r) + alpha x r.
 	// IN ORBIT THIS TERM IS THE ENTIRE EFFECT. Free-falling with the RCS idle, a_CoM is
 	// exactly zero, so every G a spinning pilot feels comes from being off-axis - which
 	// is also why the copilot and the passengers read differently from each other.
-	if (g_fx.gRefCamera) {
+	// ⚠️ DOCKED SKIPS THIS: the block above already carried the head out from the
+	// ASSEMBLY's centre of mass, which subsumes this offset-from-own-CoM term. Running
+	// both would count the seat offset twice.
+	if (g_fx.gRefCamera && !OroIsDocked(v)) {
 		const VECTOR3 r = CleanCameraOffset(v);
 		VECTOR3 w = _V(0, 0, 0), al = _V(0, 0, 0);
 		v->GetAngularVel(w);

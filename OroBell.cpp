@@ -73,6 +73,15 @@ namespace {
 	// the slider doubles this again for the truly nuclear look.
 	const float BELL_EMIS_GAIN = 2.2f;
 
+	// The hue the Bell colour swatch maps ONTO. It is the ramp's PEAK key (1.45,1.05,0.55
+	// -> h 33 deg), not its middle, because the peak is what the complaint was about:
+	// "max. eng bell colour is yellow? Was expecting a white/red." Picking a colour puts
+	// the FULLY HOT bell on it, and the ramp's own ~22 deg internal spread rides along
+	// unchanged - a uniform rotation preserves the interval between the keys, so only the
+	// choice of which key lands exactly on the pick is in question, and that is the hot one.
+	const float BELL_HUE_REF = 33.0f;
+	float s_bellRot = 0.0f;          // degrees, refreshed per frame from the swatch
+
 	// The per-class bell configuration (one at a time - the camera target's class).
 	// ⚠️⚠️ THIS CACHE IS SESSION-SCOPED AND IT DID NOT USED TO KNOW THAT (fixed 2026-08-12,
 	// and it was the reload CTD's THIRD face - an access violation inside D3D9Client.dll
@@ -274,7 +283,8 @@ namespace {
 // ----------------------------------------------------------------------------
 void OroModule::UpdateBellGlow(double simdt)
 {
-	const float trim = clampf(g_fx.plumeBellGlow, 0.0f, 2.0f);
+	// (per-family trim, heat and cool are resolved INSIDE the loops below since
+	//  2026-08-16 - the BELL_* family indices are exactly ORO_THR_* by construction)
 
 	// The vessel we're LOOKING at (the plume model's resolution rule).
 	OBJHANDLE hObj = oapiCameraTarget();
@@ -349,10 +359,16 @@ void OroModule::UpdateBellGlow(double simdt)
 	// coolK is calibrated so the glow is ENTIRELY gone - past the alpha ramp's
 	// foot at T = 0.26, not merely past a "visibility threshold" - in Cool
 	// time seconds ("time to lose ALL the glow", his spec verbatim).
-	const double tauUp = clampf(g_fx.plumeBellHeatT, 1.0f, 20.0f) / 3.0;
-	const double coolK = 18.56 / clampf(g_fx.plumeBellCoolT, 5.0f, 120.0f);
+	// ⚠️ PER FAMILY SINCE 2026-08-16, and this is the half that was missing: the
+	// TEMPERATURE was already tracked per family (s_T[]) while the timescales driving
+	// it were shared, so a hover with a thin skirt and a main with a thick one had to
+	// heat and cool at the same rate. BELL_MAIN/HOVER/RETRO/USER are ORO_THR_* by
+	// construction (same order, same meaning), so the family index IS the group index.
 	for (int k = 0; k < BELL_NFAM; k++) {
 		if (s_cfg.grp[k] < 0) continue;
+		const OroThrusterFx& T_ = g_fx.thr[k];
+		const double tauUp = clampf(T_.plumeBellHeatT, 1.0f, 20.0f) / 3.0;
+		const double coolK = 18.56 / clampf(T_.plumeBellCoolT, 5.0f, 120.0f);
 		double lvl = 0.0;
 		switch (k) {
 		case BELL_MAIN:  lvl = v->GetThrusterGroupLevel(THGROUP_MAIN);  break;
@@ -376,7 +392,14 @@ void OroModule::UpdateBellGlow(double simdt)
 		s_T[k] = (float)T;
 	}
 
-	const bool want = g_fx.masterArmed && g_fx.plumeBellOn && trim > 0.001f;
+	// The shell is ONE mesh carrying all four families, so it is borrowed if ANY family
+	// wants to glow - a per-family pill decides which materials light up, not whether
+	// the mesh is attached at all.
+	bool want = false;
+	if (g_fx.masterArmed)
+		for (int k = 0; k < BELL_NFAM; k++)
+			if (s_cfg.grp[k] >= 0 && g_fx.thr[k].plumeBellOn
+			    && clampf(g_fx.thr[k].plumeBellGlow, 0.0f, 2.0f) > 0.001f) { want = true; break; }
 	if (!want) { ReleaseBellGlow(); return; }
 
 	// ⚠️ INVARIANT 23(k), AND THIS SITE WAS MISSED TOO (2026-08-12). Vessel::AddMesh
@@ -425,6 +448,13 @@ void OroModule::UpdateBellGlow(double simdt)
 
 	for (int k = 0; k < BELL_NFAM; k++) {
 		if (s_cfg.grp[k] < 0) continue;
+		// THIS FAMILY'S OWN trim and hue (2026-08-16). The hue pick used to be resolved
+		// once for all four; it is per family now, so a hydrolox main and a hypergolic
+		// retro can run visibly different colour temperatures on the same shell.
+		// (invariant 15b's rotation, borrowed from OroReentry.cpp - one copy of the law.)
+		const OroThrusterFx& TG = g_fx.thr[k];
+		const float trim = TG.plumeBellOn ? clampf(TG.plumeBellGlow, 0.0f, 2.0f) : 0.0f;
+		s_bellRot = OroHueRotFromPick(TG.bellTint, BELL_HUE_REF);
 		// Shared-material rule: it follows the hotter family.
 		float T = s_T[k];
 		for (int j = 0; j < BELL_NFAM; j++)
@@ -444,6 +474,13 @@ void OroModule::UpdateBellGlow(double simdt)
 		m.specular.r = m.specular.g = m.specular.b = 0.0f;
 		float r, g, b;
 		BellColour(T, r, g, b);
+		// THE HUE PICK (2026-08-15). Rotated AFTER the ramp and BEFORE the overdrive, so the
+		// blackbody STRUCTURE survives the recolour intact: dull at the bottom, saturated in
+		// the middle, and reaching white at the top through the fp16 bloom rather than through
+		// the palette. Picking blue gives a blue-hot bell that still goes white at peak, which
+		// is what hot metal of any colour temperature does. White = identity, so an untouched
+		// class is the ramp exactly as it was.
+		OroHueRotate(r, g, b, s_bellRot);
 		m.emissive.r = r * trim * BELL_EMIS_GAIN;
 		m.emissive.g = g * trim * BELL_EMIS_GAIN;
 		m.emissive.b = b * trim * BELL_EMIS_GAIN;

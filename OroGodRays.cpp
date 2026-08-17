@@ -90,8 +90,24 @@ namespace {
 // Per frame, MAIN thread. Publishes the sun's UV position, the combined fade and
 // the tint, and leaves grActive telling the render path whether to spend a pass.
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// THE SPLIT (2026-08-15, the pause fix). UpdateGodRays decides how much light there is
+// to scatter - air, solar elevation, eclipse - all of which need oapi and none of which
+// depends on where the camera is pointing. BuildGodRayScreen finds the sun on screen.
+// See ProjCam in OroModule.h.
+// ----------------------------------------------------------------------------
+namespace {
+	struct GrSnap {
+		VECTOR3 spos;                  // the star, global
+		float   fAir, fElev, fEcl;     // the light budget
+	};
+	GrSnap s_gr;
+	bool   s_grValid = false;
+}
+
 void OroModule::UpdateGodRays()
 {
+	s_grValid = false;
 	grActive = false;
 	g_fx.grayVis = 0.0f;
 	g_fx.grayWhy[0] = '\0';
@@ -103,51 +119,19 @@ void OroModule::UpdateGodRays()
 	OBJHANDLE hSun = OroFindStar();
 	if (!hSun) { strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "no star"); return; }
 
-	VECTOR3 cpos, spos;
-	oapiCameraGlobalPos(&cpos);
+	// WHERE THE SUN LANDS ON SCREEN moved to BuildGodRayScreen (2026-08-15): it is the
+	// one part of this that depends on where the camera is POINTING, and clbkPreStep
+	// does not run while paused - so the shafts used to keep radiating from wherever the
+	// sun was on screen when the sim stopped. Everything below is about how much light
+	// there is to scatter, which no amount of looking around changes.
+	if (!preStepCamValid) return;
+	const VECTOR3 cpos = preStepCam.pos;
+	VECTOR3 spos;
 	oapiGetGlobalPos(hSun, &spos);
 	VECTOR3 vS = spos - cpos;
 	const double dS = length(vS);
 	if (dS < 1.0) { strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "no star"); return; }
 	vS /= dS;
-
-	// --- where the sun lands on screen --------------------------------------
-	// The camera's rotation matrix takes GLOBAL to CAMERA-LOCAL; z is forward,
-	// x right, y up. Orbiter hands it back as a matrix we can apply directly.
-	MATRIX3 R;
-	oapiCameraRotationMatrix(&R);
-	// tmul() applies the TRANSPOSE - global -> local, which is the direction we want.
-	const VECTOR3 cs = tmul(R, vS);
-
-	if (cs.z <= 1e-4) {
-		// Sun is behind the camera plane. Nothing to radiate from, and the
-		// projection would flip the shafts to the wrong side of the screen.
-		strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "behind");
-		return;
-	}
-
-	// Perspective divide with Orbiter's aperture (the vertical half-angle).
-	const double tanAp = tan(oapiCameraAperture());
-	if (tanAp < 1e-6) { strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "no cam"); return; }
-	const double aspect = (viewH > 0) ? ((double)viewW / (double)viewH) : 1.3333;
-
-	// NDC in [-1,+1], then to UV in [0,1] with V flipped (screen y grows downward).
-	const double ndcX = (cs.x / (cs.z * tanAp * aspect));
-	const double ndcY = (cs.y / (cs.z * tanAp));
-	grSunU = (float)(0.5 + 0.5 * ndcX);
-	grSunV = (float)(0.5 - 0.5 * ndcY);
-
-	// --- screen-proximity fade ----------------------------------------------
-	// Measured from the CENTRE in aspect-corrected UV, so a sun just off the side
-	// of a widescreen viewport is treated as just-off, not far away.
-	const double du = (grSunU - 0.5) * aspect;
-	const double dv = (grSunV - 0.5);
-	const double duv = sqrt(du * du + dv * dv);
-	const float  fScreen = 1.0f - ramp(duv, GR_UV_FULL, GR_UV_MIN);
-	if (fScreen <= 0.001f) {
-		strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "off-view");
-		return;
-	}
 
 	// --- the atmosphere gate, and the elevation band ------------------------
 	// TEST bypasses both: judging a look must not require a sunset in an atmosphere.
@@ -255,7 +239,65 @@ void OroModule::UpdateGodRays()
 	const bool  eclLive = g_fx.masterArmed && (g_fx.eclipseEnabled || g_fx.eclipseTest);
 	const float fEcl    = eclLive ? (1.0f - clampf(g_fx.eclipseObsc, 0.0f, 1.0f)) : 1.0f;
 
-	grFade = fScreen * fAir * fElev * fEcl;
+	// --- hand the light budget to the render path -----------------------------
+	s_gr.spos = spos; s_gr.fAir = fAir; s_gr.fElev = fElev; s_gr.fEcl = fEcl;
+	s_grValid = true;
+}
+
+// ----------------------------------------------------------------------------
+// BuildGodRayScreen - THE RENDER PATH HALF (2026-08-15). Where the sun is on screen,
+// and therefore whether there is anything to radiate from. The light BUDGET (air,
+// elevation, eclipse) is decided on the main thread and arrives in s_gr.
+//
+// INVARIANT-1 AUDIT: zero oapi calls. The g_fx writes are the readout strings, which
+// are plain single-thread member writes.
+// ----------------------------------------------------------------------------
+void OroModule::BuildGodRayScreen()
+{
+	grActive = false;
+	if (!s_grValid) return;
+
+	VECTOR3 cpos; MATRIX3 R; double tanAp;
+	if (!FillProjCam(cpos, R, tanAp)) return;
+	if (tanAp < 1e-6) { strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "no cam"); return; }
+
+	VECTOR3 vS = s_gr.spos - cpos;
+	const double dS = length(vS);
+	if (dS < 1.0) { strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "no star"); return; }
+	vS /= dS;
+
+	// The camera's rotation matrix takes GLOBAL to CAMERA-LOCAL; z is forward, x right,
+	// y up. tmul() applies the TRANSPOSE - global -> local, which is what we want.
+	const VECTOR3 cs = tmul(R, vS);
+	if (cs.z <= 1e-4) {
+		// Sun is behind the camera plane. Nothing to radiate from, and the projection
+		// would flip the shafts to the wrong side of the screen.
+		strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "behind");
+		return;
+	}
+
+	// Perspective divide with Orbiter's aperture (the vertical half-angle).
+	const double aspect = (viewH > 0) ? ((double)viewW / (double)viewH) : 1.3333;
+
+	// NDC in [-1,+1], then to UV in [0,1] with V flipped (screen y grows downward).
+	const double ndcX = (cs.x / (cs.z * tanAp * aspect));
+	const double ndcY = (cs.y / (cs.z * tanAp));
+	grSunU = (float)(0.5 + 0.5 * ndcX);
+	grSunV = (float)(0.5 - 0.5 * ndcY);
+
+	// --- screen-proximity fade ----------------------------------------------
+	// Measured from the CENTRE in aspect-corrected UV, so a sun just off the side of a
+	// widescreen viewport is treated as just-off, not far away.
+	const double du  = (grSunU - 0.5) * aspect;
+	const double dv  = (grSunV - 0.5);
+	const double duv = sqrt(du * du + dv * dv);
+	const float  fScreen = 1.0f - ramp(duv, GR_UV_FULL, GR_UV_MIN);
+	if (fScreen <= 0.001f) {
+		strcpy_s(g_fx.grayWhy, sizeof(g_fx.grayWhy), "off-view");
+		return;
+	}
+
+	grFade = fScreen * s_gr.fAir * s_gr.fElev * s_gr.fEcl;
 	grStr  = clampf(g_fx.grayStrength, 0.0f, 1.0f);
 
 	g_fx.grayVis = grFade;

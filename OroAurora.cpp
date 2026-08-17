@@ -277,8 +277,49 @@ namespace {
 // Per frame, MAIN thread. Builds the curtain triangles into aurVtx and sets
 // aurActive; the render callback only pushes and draws (DrawAuroraPoly).
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// THE SPLIT (2026-08-15, the pause fix). UpdateAurora runs on the MAIN thread and
+// does only what needs oapi: which world we are at, its settings, and the handful of
+// world-state values the curtains are built from. BuildAuroraGeometry runs in the
+// RENDER PATH and does all the geometry, because clbkPreStep IS NOT CALLED WHILE
+// PAUSED - so a paused pan or zoom used to leave the curtains projected for a camera
+// that no longer existed, and they appeared to follow the ship. See ProjCam in
+// OroModule.h.
+//
+// Everything below the snapshot is pure math over g_fx, so the build also picks up
+// slider changes made while paused, which the old arrangement could not.
+// ----------------------------------------------------------------------------
+namespace {
+	struct AurSnap {
+		OBJHANDLE hP;       // planet handle, for the render-epoch anchor (invariant 21a)
+		VECTOR3 O;          // planet centre, global
+		double  R;          // planet radius
+		MATRIX3 Rp;         // planet rotation (the ring co-rotates with it)
+		OBJHANDLE hVc;      // occluding vessel handle - its anchor MUST be corrected:
+		                    //   a 500 m frame lag on a 20 m sphere makes the occlusion
+		                    //   test meaningless (it only runs when depthClipOK is false)
+		VECTOR3 Vc;         // occluding vessel centre, global
+		double  Vr;         // occluding vessel radius (<0 = none)
+		VECTOR3 Sg;         // the star, for the night fade. NOT corrected: 500 m against
+		                    //   1.5e11 m is a 3e-12 rad direction error.
+	};
+	AurSnap s_aur;
+	bool    s_aurValid = false;
+	// Pool-full warning, deferred out of the render path (invariant 1: no oapi there).
+	bool    s_aurPoolFull   = false;
+	bool    s_aurPoolLogged = false;
+}
+
 void OroModule::UpdateAurora()
 {
+	// The render path's deferred warning, written here where oapi is legal.
+	if (s_aurPoolFull && !s_aurPoolLogged) {
+		s_aurPoolLogged = true;
+		oapiWriteLogV("ORO: aurora triangle pool FULL (%d tri) - curtains are being clipped. "
+		              "Lower Ribbons or Thickness.", AUR_MAX_TRI);
+	}
+
+	s_aurValid = false;
 	aurVtxN   = 0;
 	aurActive = false;
 	g_fx.auroraBody[0] = 0;
@@ -302,8 +343,10 @@ void OroModule::UpdateAurora()
 	const double R = oapiGetSize(hP);
 	if (R < 1.0) { g_fx.auroraBody[0] = 0; return; }
 
-	CamCtx cc; GetCam(cc);
-	if (length(O - cc.pos) > 40.0 * R) {           // too far to matter - a sub-degree ring
+	// COARSE range gate only, so the pre-step camera is plenty - it decides whether this
+	// world is worth considering at all, not where anything lands on screen.
+	if (!preStepCamValid) return;
+	if (length(O - preStepCam.pos) > 40.0 * R) {   // too far to matter - a sub-degree ring
 		g_fx.auroraBody[0] = 0;
 		return;
 	}
@@ -318,30 +361,68 @@ void OroModule::UpdateAurora()
 	// ---- from here on it is only about DRAWING -------------------------------
 	if (!extGate && !(viewGate && depthClipOK)) return;
 
-	// ACTIVITY IS THE OPT-IN. A world with no file loaded the defaults just above, and the
-	// default activity is zero - so an unconfigured world is silent, turning this up at any
-	// world gives it curtains, and saving makes that the world's aurora. There is no second
-	// enable flag to disagree with it.
-	const float act = clampf(g_fx.auroraActivity, 0.0f, 1.0f);
-	if (act <= 0.001f) return;
-
 	MATRIX3 Rp; oapiGetRotationMatrix(hP, &Rp);
 
 	// The vessel to occlude behind: the one the camera is looking at (external), falling
 	// back to the focus vessel. Its bounding sphere hides the curtains behind it.
-	VECTOR3 Vc = { 0, 0, 0 }; double Vr = -1.0;
+	VECTOR3 Vc = { 0, 0, 0 }; double Vr = -1.0; OBJHANDLE hVc = NULL;
 	{
 		OBJHANDLE hv = oapiCameraTarget();
 		if (!hv || oapiGetObjectType(hv) != OBJTP_VESSEL) hv = oapiGetFocusObject();
 		if (hv && oapiGetObjectType(hv) == OBJTP_VESSEL) {
 			oapiGetGlobalPos(hv, &Vc);
 			Vr = oapiGetSize(hv);
+			hVc = hv;
 		}
 	}
 
 	OBJHANDLE hSun = FindStar();
 	VECTOR3 Sg = { 0, 0, 0 };
 	if (hSun) oapiGetGlobalPos(hSun, &Sg);
+
+	// ---- hand it all to the render path and stop ------------------------------
+	s_aur.hP = hP; s_aur.O  = O;  s_aur.R  = R;  s_aur.Rp = Rp;
+	s_aur.hVc = hVc; s_aur.Vc = Vc; s_aur.Vr = Vr; s_aur.Sg = Sg;
+	s_aurValid = true;
+}
+
+// ----------------------------------------------------------------------------
+// BuildAuroraGeometry - THE RENDER PATH HALF. Pure math over the snapshot and g_fx,
+// projected with the camera the frame is actually being drawn with.
+//
+// INVARIANT-1 AUDIT: zero oapi calls. Everything world-derived arrives in s_aur,
+// gcCore::GetRenderCam is a client call (the CopyResource precedent), viewW/viewH are
+// the cached copies, and the g_fx reads are the same single-thread reads the render
+// callback has always done.
+// ----------------------------------------------------------------------------
+void OroModule::BuildAuroraGeometry()
+{
+	aurVtxN   = 0;
+	aurActive = false;
+	if (!s_aurValid) return;
+	if (viewW == 0 || viewH == 0) return;
+
+	CamCtx cc;
+	if (!FillProjCam(cc.pos, cc.rot, cc.tanAp)) return;
+
+	// ACTIVITY IS THE OPT-IN. A world with no file loaded the defaults, and the default
+	// activity is zero - so an unconfigured world is silent, turning this up at any world
+	// gives it curtains, and saving makes that the world's aurora. There is no second
+	// enable flag to disagree with it. Read HERE rather than on the main thread so the
+	// slider still does something while the sim is paused.
+	const float act = clampf(g_fx.auroraActivity, 0.0f, 1.0f);
+	if (act <= 0.001f) return;
+
+	// RENDER-EPOCH ANCHORS (invariant 21a). The planet correction is sub-pixel at
+	// planetary scale - which is exactly why the aurora never showed the bug the plume
+	// did - but the VESSEL one is not optional: VesselVis tests a ~20 m sphere, and a
+	// 500 m frame lag would put it nowhere near the line of sight.
+	const VECTOR3 O  = s_aur.O + RenderEpochShift(s_aur.hP, s_aur.O);
+	const double  R  = s_aur.R;
+	const MATRIX3 Rp = s_aur.Rp;
+	const VECTOR3 Vc = s_aur.Vc + RenderEpochShift(s_aur.hVc, s_aur.Vc);
+	const double  Vr = s_aur.Vr;
+	const VECTOR3 Sg = s_aur.Sg;
 
 	// Planet spin axis + prime-meridian direction, in global. The basis is tied to the
 	// planet frame (Xaxis), so the ring co-rotates with the planet and the night fade
@@ -506,7 +587,20 @@ void OroModule::UpdateAurora()
 				DWORD cC[AUR_VB + 1]; bool cOK[AUR_VB + 1];
 
 				for (int j = 0; j <= AUR_VB; j++) {
-					const float v = (float)j / (float)AUR_VB;
+					// KNOT SPACING WARPED TOWARD THE BASE. Invariant 15's law, and this is
+					// the one place in the addon it had been missed: Gouraud can only
+					// interpolate what the geometry SAMPLES, so a feature shorter than one
+					// band is rendered as a band-long ramp however sharp the profile says
+					// it is. AuroraAlphaProfile puts its whole sharp lower border between
+					// v = 0.00 and v = 0.14 - INSIDE the first of eight evenly spaced bands -
+					// so the most recognisable feature of a real curtain was being smeared
+					// across an eighth of its height by the mesh, not by the profile.
+					// From orbit the whole column is a few dozen pixels and nothing shows.
+					// FROM THE GROUND you look up the column and it is most of the sky,
+					// which is exactly the untested viewpoint a beta tester asked about.
+					// v = u^2 puts four of the nine knots below v = 0.25 at no extra cost.
+					const float u = (float)j / (float)AUR_VB;
+					const float v = u * u;
 					const double h = H0 + (H1 - H0) * (double)v;
 					const VECTOR3 P = O + d * (R + h);
 					double pz = 1.0;
@@ -562,14 +656,9 @@ void OroModule::UpdateAurora()
 	// If the pool ever fills, the curtains are being CLIPPED - emit3 drops silently, which
 	// on screen looks like a missing chunk rather than a budget. Say so once, so it is
 	// diagnosable instead of mysterious. (Back off Ribbons or Thickness; see AUR_MAX_TRI.)
-	{
-		static bool warned = false;
-		if (!warned && aurVtxN >= AUR_MAX_TRI * 3) {
-			warned = true;
-			oapiWriteLogV("ORO: aurora triangle pool FULL (%d tri) - curtains are being clipped. "
-			              "Lower Ribbons or Thickness.", AUR_MAX_TRI);
-		}
-	}
+	// DEFERRED since the split: this is the RENDER PATH and it may not call oapi
+	// (invariant 1). Raise the flag; the next main-thread pass writes the line.
+	if (aurVtxN >= AUR_MAX_TRI * 3) s_aurPoolFull = true;
 
 	// Zero-pad the unused tail (invariant 3): the client's D3D9Triangle::Update Locks with
 	// D3DLOCK_DISCARD and draws the full CREATION count, so an unwritten tail is random

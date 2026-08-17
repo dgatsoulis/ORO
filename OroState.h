@@ -21,6 +21,87 @@
 // so the dialog survives unchanged.
 // ============================================================================
 
+// ============================================================================
+// PER-THRUSTER-GROUP SETTINGS (2026-08-16)
+// ----------------------------------------------------------------------------
+// Everything on the THRUSTER tab used to be one set of numbers applied to every
+// engine at once. That is right for a ship whose engines all burn the same thing and
+// wrong the moment they do not: the EXPANSION BAND's high handle is the pressure an
+// engine is RATED for, the Jet/Bloom swatches are its propellant's colour, and soot is
+// the difference between kerolox and hydrolox. A vacuum-rated main beside sea-level
+// hovers could not be expressed at all.
+//
+// So each group gets its own copy. The panel carries a cycler over the groups THIS
+// VESSEL ACTUALLY HAS, and everything on both sub-tabs edits the selected one.
+//
+// ⚠️ WHY THIS IS A SEPARATE STORE AND NOT SIMPLY WHERE THE FIELDS LIVE.
+// The dialog keeps editing the flat fields in OroEffectState - they are the EDIT
+// BUFFER for the selected group - and this array is the per-group STORE. That is
+// duplicated state, which is normally a smell, and it is deliberate:
+//   - the dialog's row tables hold raw `float*` baked at static-init time, so making
+//     the sliders point into a moving array means re-pointing ~40 pointers on every
+//     cycle, and a missed one edits the WRONG GROUP silently;
+//   - the flat fields carry the long rationale comments for every knob, which is the
+//     documentation for the whole family;
+//   - and the consumers need ALL FOUR groups at once (a frame can draw mains and
+//     hovers together), which the edit buffer alone can never provide.
+// The duplication is safe because the flow is one-directional at every instant and
+// there is exactly ONE sync point:
+//   dialog writes ---> flat fields ---> OroThr_SyncOut() at the top of clbkPreStep
+//                                       ---> thr[thrSel] ---> every consumer.
+// Cycling and loading go the other way (OroThr_SyncIn). NOTHING ELSE may write the
+// flat thruster fields, and no consumer may read them - consumers take the group they
+// are drawing and read thr[that group]. Grep for OroThr_ before changing any of this.
+// ============================================================================
+enum { ORO_THR_MAIN = 0, ORO_THR_HOVER, ORO_THR_RETRO, ORO_THR_USER, ORO_THR_N };
+
+struct OroThrusterFx {
+	// Shimmer
+	bool  shimmerEnabled  = true;
+	float shimmer         = 0.0f;
+	float shimmerOfs      = 0.0f;
+	// Plume expansion (the long rationale for each is on the matching flat field below)
+	bool  plumeEnabled    = true;
+	float plume           = 1.0f;
+	bool  plumePhysics    = true;
+	float plumeExpHi      = 5.0057f;
+	float plumeExpLo      = 1.0f;
+	float plumeWidth      = 1.0f;
+	float plumeLen        = 1.0f;
+	float plumeCells      = 7.0f;
+	float plumeDiamond    = 1.0f;
+	float plumeSpacing    = 1.0f;
+	float plumeBloomWid   = 1.0f;
+	float plumeBloomBri   = 1.0f;
+	float plumeThroatOfs  = 0.0f;
+	float plumeThroat     = 1.0f;
+	float plumeSootRate   = 1.0f;
+	float plumeSoot       = 0.0f;
+	DWORD plumeColJet     = 0x00A0D2FFu;
+	DWORD plumeColBloom   = 0x00FFC8AAu;
+	// Bell glow. Its TEMPERATURE was already tracked per family (OroBell.cpp's s_T[]);
+	// this is what closes the other half of that - the controls were shared while the
+	// physics was not, which was an inconsistency sitting in the panel.
+	bool  plumeBellOn     = true;
+	float plumeBellGlow   = 1.0f;
+	float plumeBellHeatT  = 8.0f;
+	float plumeBellCoolT  = 40.0f;
+	DWORD bellTint        = 0x00FFFFFFu;
+	// Orbiter's own particle streams
+	bool  prtEnabled      = false;
+	float prtOffset       = 0.0f;
+	float prtSize         = 2.0f;
+	float prtLifetime     = 0.2f;
+	float prtRate         = 13.0f;
+	float prtSpeed        = 150.0f;
+	float prtSpread       = 0.1f;
+	float prtGrowth       = 16.0f;
+	float prtSlowdown     = 1.0f;
+	bool  prtDiffuse      = false;
+	bool  prtAirFade      = true;
+	DWORD prtColour       = 0x00FFFFFFu;
+};
+
 struct OroEffectState {
 	// Master arm: the whole experience on/off (the dialog's ARMED switch;
 	// Ctrl+G toggles it from the keyboard as the panic/quick kill).
@@ -86,6 +167,15 @@ struct OroEffectState {
 	float shakeAmpY       = 0.004f; // buffet amplitude, vertical  [m]
 	float shakeAmpZ       = 0.003f; // buffet amplitude, fore/aft  [m]
 	float shakeFreq       = 8.0f;   // base buffet frequency       [Hz] (dialog 0..10)
+	// ⚠️ THE SEAT PUSH IS A SEPARATE EFFECT AND HAD NO CONTROL AT ALL (added 2026-08-15, a
+	// beta ask: "split the seat push from the buffet"). They were bundled under one pill
+	// and one intensity because they arrive together, but they are different sensations
+	// from different mechanisms - a smooth SUSTAINED lean opposite the felt acceleration
+	// versus a high-frequency RATTLE - and a pilot can easily want one without the other
+	// (the push at full on a launch, the rattle off; or a rattly runway with no lean).
+	// The buffet already had an off switch, three amplitudes at zero; the push had none.
+	// 1.0 is exactly the pre-2026-08-15 behaviour and 0 removes it entirely.
+	float shakePush       = 1.0f;   // gain on the seat-push lean (0..2), 0 = buffet only
 	bool  shakeTest       = false;  // dialog "Test" toggle: force full-intensity shake at the tuned settings
 
 	// Heartbeat: the signature ORO effect - the visual field THROBS darker with
@@ -95,6 +185,19 @@ struct OroEffectState {
 	// same beat will drive the heartbeat SOUND.)
 	bool  heartbeatEnabled = true;
 	float heartbeat        = 0.0f; // 0..1; 0 = steady, 1 = deep dim on every beat
+
+	// --- PER-THRUSTER-GROUP STORE (2026-08-16) -----------------------------
+	// See the long note above OroThrusterFx. thr[] is what every CONSUMER reads,
+	// indexed by the group the plume/stream/bell it is drawing belongs to. The flat
+	// fields below are the dialog's edit buffer for thr[thrSel] and nothing else.
+	OroThrusterFx thr[ORO_THR_N];
+	int   thrSel   = ORO_THR_MAIN;   // which group the panel is editing
+	int   thrAvail = 1 << ORO_THR_MAIN;  // BITMASK of groups this vessel actually has,
+	                                     // module-written each step. The cycler steps
+	                                     // only over set bits, so a single-engine ship
+	                                     // simply cannot cycle - there is nothing to
+	                                     // cycle to, and a control that moves between
+	                                     // identical states is worse than none.
 
 	// --- ENVIRONMENT (world effects) ---
 	// Exhaust shimmer: heat-haze REFRACTION around the engine plumes in atmospheric
@@ -231,6 +334,16 @@ struct OroEffectState {
 	                               //   Sets the -T^4 radiative constant, so the SHAPE
 	                               //   of the fade (fast off white heat, the long
 	                               //   dull-red ember tail) is preserved at any length.
+	// THE BELL'S HUE (2026-08-15, a beta ask - and it was the ONLY glowing element in the
+	// addon without a colour pick; eleven swatches existed and this one was simply missed).
+	// The trim and BELL_EMIS_GAIN both scale r/g/b uniformly, so no existing control could
+	// make the bell anything other than brighter AMBER - which is exactly what a tester
+	// reported seeing where they expected white/red. Invariant 15b's rotation, same as the
+	// plasma tint and the trail's two picks: white = the reference blackbody ramp, bit for
+	// bit. Per CLASS, beside the rest of the bell (a hull's engines are a fact about the
+	// hull), and it deliberately does NOT touch the THROAT family, which already follows
+	// the Jet swatch (invariant 23h).
+	DWORD bellTint        = 0x00FFFFFFu; // COLORREF 0x00BBGGRR; white = identity
 	// Readout - module-written, dialog-read (the discipline): which families are
 	// wired, or why nothing glows ("no bell mesh ...").
 	char  plumeBellInfo[64] = "";
@@ -265,21 +378,36 @@ struct OroEffectState {
 	bool  prtDiffuse      = false; // ltype: false = EMISSIVE (flame), true = DIFFUSE
 	                               //   (lit smoke/vapour). The single biggest look
 	                               //   switch in the whole spec.
-	bool  prtAirFade      = false; // atmsmap. ⚠ THIS ONE IS A TRAP IF HIDDEN: the
+	bool  prtAirFade      = true;  // atmsmap. ⚠ THIS ONE IS A TRAP IF HIDDEN: the
 	                               //   stock exhaust-stream mapping is ATM_PLOG over
 	                               //   1e-5..0.1, and Atm2Alpha returns 0 below amin,
 	                               //   so a stream authored that way emits NOTHING in
 	                               //   vacuum. Enable the effect in orbit with that as
 	                               //   an invisible default and the only symptom is
 	                               //   "it doesn't work". So it is a button: false =
-	                               //   ATM_FLAT with amin 1.0 (always emits, the
-	                               //   predictable lab default), true = the stock
-	                               //   atmospheric fade.
+	                               //   ATM_FLAT with amin 1.0 (always emits), true =
+	                               //   the stock atmospheric fade.
+	                               // ⚠️ DEFAULT FLIPPED 2026-08-15 (a beta report: "better
+	                               //   to set Air fade to FADES IN VACUUM by default since
+	                               //   it's strange to see exhaust clouds in orbit"). It
+	                               //   was ALWAYS ON deliberately, and that reasoning was
+	                               //   sound: of two failure modes we picked the one that
+	                               //   looks WRONG over the one that looks BROKEN. The
+	                               //   right answer turned out to be neither - REMOVE the
+	                               //   broken-looking mode instead. prtVacuum below is
+	                               //   published every frame and the panel says "in vacuum
+	                               //   - air fade is holding emission off", so the honest
+	                               //   default is now also the safe one. THE GENERAL SHAPE:
+	                               //   when a default is a choice between two bad
+	                               //   symptoms, look for the diagnostic that dissolves
+	                               //   one of them rather than voting between them.
 	DWORD prtColour       = 0x00FFFFFFu; // COLORREF 0x00BBGGRR; white = the neutral
 	                               //   stock-ish particle
 	// Readouts - module-written, dialog-read (the reentryHeat discipline).
 	char  prtInfo[64]     = "";    // how many streams, or why there are none
 	int   prtCount        = 0;     // live streams
+	bool  prtVacuum       = false; // air fade is on AND the air is below its floor, so the
+	                               //   streams are live and emitting nothing. See above.
 
 	// STOCK EXHAUST (client patch n, 2026-08-09): render the camera-target vessel's
 	// stock exhaust billboards + exhaust particle streams, or suppress them so the
@@ -309,6 +437,27 @@ struct OroEffectState {
 	// PHYSICS-DRIVEN like the camera shake: the slider is a strength trim, not the
 	// intensity. Hence the default of 1.0 rather than 0.
 	bool  reentryEnabled  = true;
+	// ⚠️ WHEN the CoP shift is allowed to act (2026-08-15, and it is a BUG FIX, not a
+	// feature). The aid exists so a stock hull can hold a high AoA THROUGH A REENTRY; it
+	// had no regime gate at all, and the shipped class cfgs turn it on (DeltaGlider 0.298,
+	// Atlantis 0.649) so testers fly with it enabled without ever having touched the knob.
+	// A beta tester duly flew a stock DG on its OWN atmospheric autopilot at ALT 1000 /
+	// SPD 250 - nowhere near an entry - and got divergent pitch oscillation that stopped
+	// the instant they pressed Ctrl+G. That is textbook PIO: two controllers closing the
+	// same pitch loop with our documented one-frame force lag between them. Invariant 9
+	// prices that lag as "irrelevant at 1x-10x", which is true for a HUMAN pilot and was
+	// never assessed against a controller.
+	// The fix is invariant 25(e)'s law - bind an effect to the physical quantity it depends
+	// on: a high-AoA REENTRY rig has no business applying a couple at Mach 0.7 at 1 km. So
+	// it is gated on MACH, which leaves his reentry scenarios untouched and makes it inert
+	// exactly where it fights an autopilot. A button rather than a hard rule because the
+	// escape hatch matters (invariant 25i: the sim owns what happens, the user owns the
+	// bounds) - but the DEFAULT is the gate, because the reported failure came from a
+	// default nobody chose.
+	bool  copReentryOnly  = true;  // true = only above COP_MACH_LO (per class, beside copShift)
+	float copMach         = 0.0f;  // readout: the focus vessel's Mach, module-written
+	bool  copGated        = false; // readout: the gate is currently holding the couple off
+
 	bool  reentryVC       = false; // round 3.5: draw the plasma GEOMETRY in the
 	                               //   VIRTUAL COCKPIT too (dialog VC toggle).
 	                               //   VC only - 2D panel and glass stay clean.
@@ -341,6 +490,37 @@ struct OroEffectState {
 	                               //   whole downstream story now)
 	float plasStreakWid   = 2.0f;  // x streak width             (0..6; range x2'd)
 	float plasWander      = 0.27f; // x streak wander amplitude  (0..3)
+	// HOW FAST THE WAKE LIVES (2026-08-15). A beta tester: the plasma effects "look a
+	// little too slow / Aurora like?" - and the resemblance is not a coincidence. Invariant
+	// 19 opens with "THE AURORA IS RIBBONS, AND ITS LAWS ARE THE PLASMA'S"; the aurora
+	// reuses this machinery wholesale, so a stranger recognised the shared substrate from
+	// the look alone. That points the fix at the TEMPORAL domain rather than the geometry,
+	// which is enormously cheaper: the wake's drift rates ran at 0.06-0.25 Hz, which is
+	// aurora pace almost exactly, while a hypersonic wake is violently turbulent.
+	// One multiplier on ONE shared wake clock rather than a dozen edited constants, so
+	// there is a single thing to judge and a single thing to move. 0 freezes it (the Soot
+	// churn idiom); 1 is the new baseline, which is WAKE_CHURN_BASE times the old rate.
+	// It is per class because how fast a wake reads depends on how big the hull is.
+	// NOTE this is deliberately NOT one of the "bake it and delete the slider" cases: the
+	// true turbulent timescale at Mach 25 over a 20 m hull is hundreds of Hz, so no
+	// physical rate is renderable and the mapping to a PERCEIVED rate is a look choice.
+	// Invariant 25(i)'s rule exactly - the sim owns what happens, the user owns the look.
+	float plasChurn       = 1.0f;  // x wake temporal rate       (0..3)
+	// THE FIN RAKE (2026-08-15). A beta tester: "the effects are set at 90 deg to the
+	// respective surface, if they could be set at 10/15 deg outwards". Reading the code
+	// says they were RIGHT and it was worse than a taste question: the fin's outward tip
+	// offset was an ABSOLUTE distance (size * 0.38 * heat) while its LENGTH varied from
+	// 0.30x to 2.00x of Lbase - so the rake angle was never one angle at all. A long fin
+	// raked ~25 deg off the flow and a SHORT one raked past 55 deg, standing nearly
+	// perpendicular to the hull. Short fins are also the most numerous (the length noise
+	// is a squared sine, which spends most of its time near zero), so what a viewer sees
+	// most of is the near-90 case they described.
+	// The offset is a fraction of each fin's OWN length now, so every fin - long, short,
+	// on any hull - carries the SAME rake, and the angle is one number instead of an
+	// emergent ratio of two constants. Their number is the default.
+	// This is the origin-tilt pattern again (round 5.10/5.11): a knob to FIND the angle,
+	// to be baked into a constant and deleted once it settles.
+	float plasFinRake     = 15.0f; // [deg] fin/streamer rake off the flow axis (0..45)
 	float plasComa        = 0.0f;  // x EDGE LIGHT gain (0..2) - round 3 repurposed
 	                               //   the retired coma knob's storage slot
 	float plasBlob        = 1.0f;  // RETIRED (round 3, blobs no longer draw);
@@ -778,6 +958,15 @@ struct OroEffectState {
 	                             // false = at the vessel CoM. In orbit the difference is the
 	                             // WHOLE effect: free-falling, the CoM feels exactly zero.
 
+	// Where the PHYSIOLOGY is allowed to draw. Default false = every internal view, which is
+	// what viewGate has always meant. True narrows it to the VIRTUAL COCKPIT alone, a beta
+	// tester's request and the mirror image of the reentry plasma's VC toggle: a 2D panel is
+	// a flat overlay pasted over the world, so a pilot who flies the VC for immersion and
+	// drops to the panel to work the systems can now keep the eye out of the second view.
+	// It narrows the SOUND with it - audibility is gated on the same viewGate (invariant 12),
+	// which is what stops a heartbeat pounding away over a view that shows nothing.
+	bool  fxVCOnly     = false;
+
 	// Per-effect gains, used ONLY in physics mode (0 = effect suppressed, 1 = full model).
 	float gainBlackout   = 1.0f;
 	float gainRedout     = 1.0f;
@@ -861,6 +1050,22 @@ const int   ORO_SCOPE_GLOBAL = 1;
 const int   ORO_SCOPE_CLASS  = 2;
 const int   ORO_SCOPE_BODY   = 4;
 bool        OroSettings_SaveScope(int mask);          // targeted save; returns false on write error
+// Targeted RE-READ: throw away everything changed since the last save of these scopes.
+// It is not simply the loaders called back to back - they early-return on "already
+// current", which is exactly the case a revert means. See the definition.
+void        OroSettings_Revert(int mask);
+
+// The panel's own height, in its own tiny file (Config\ORO\window.cfg). Separate from
+// every scope above ON PURPOSE - Orbiter's writer truncates, so persisting this through
+// the global table would rewrite Config\ORO.cfg on every resize and silently commit
+// unsaved tuning. Load returns 0 when there is nothing saved.
+int         OroSettings_LoadDlgHeight();
+void        OroSettings_SaveDlgHeight(int h);
+// ... and the HELP window's size, in the same file. There is deliberately no "was it
+// open" flag: the help window never reopens by itself, only its size is remembered.
+// Both zero = nothing saved, use the defaults.
+void        OroSettings_LoadHelpSize(int& w, int& h);
+void        OroSettings_SaveHelpSize(int w, int h);
 void        OroSettings_LoadBody(const char* body);   // swap in a body's aurora numbers
 const char* OroSettings_Body();        // body currently loaded ("" = none yet)
 // True if this world has an aurora file. The aurora's body selection uses it so a
@@ -891,3 +1096,26 @@ bool        OroStockExhaustSupported();
 // texture - so this gates the PARTICLES sub-tab's COLOUR swatch only. Every other
 // control on that tab is stock core API and works on any client.
 bool        OroParticleTintOK();
+
+// The client's POST-PROCESSING (Light glow) setting, read out of D3D9Client.cfg at
+// session start. NOT a patch and not a capability - a user setting - but it belongs
+// beside them because it changes the LOOK of two subsystems that deliberately delegate
+// "white" to the bloom: the plasma composites pre-resolve into the fp16 chain so white
+// emerges from HDR accumulation, and the bell overdrives its emissive past the same
+// threshold. With it off, both are exactly their authored colours, and both read wrong -
+// the plasma hard-edged, the bell amber. Two beta reports on 2026-08-15 were most likely
+// this, and we had no way to tell that from a real tuning fault, so the panel says it now.
+// OroBloomKnown() is false when the cfg could not be read: UNKNOWN is reported as such,
+// never as "off" - crying wolf about someone's video settings is worse than staying quiet.
+bool        OroBloomOn();
+bool        OroBloomKnown();
+
+// --- the per-group edit buffer <-> store plumbing (OroModule.cpp) ------------
+// See the long note above OroThrusterFx. SyncOut is called once per step, before any
+// consumer runs; SyncIn after anything replaces the selected group's stored values.
+// Cycle advances thrSel to the next AVAILABLE group, syncing both ways as it goes.
+void        OroThr_SyncOut();          // flat edit buffer -> thr[thrSel]
+void        OroThr_SyncIn();           // thr[thrSel] -> flat edit buffer
+void        OroThr_Cycle();            // advance to the next group the vessel has
+const char* OroThr_Name(int grp);      // "MAIN" / "HOVER" / "RETRO" / "USER"
+int         OroThr_Count();            // how many groups this vessel has (1 = no cycling)

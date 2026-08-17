@@ -12,9 +12,31 @@
 // units, but on the author's box the same numbers came out ~33% larger. So
 // OroDialog.cpp forces the CLIENT area to DLG_W x DLG_H px in WM_INITDIALOG.
 // Change the size THERE, not here.
+// WS_THICKFRAME is what makes the panel VERTICALLY resizable (2026-08-16).
+// Orbiter supports this: DialogWin::OpenWindow creates addon dialogs with a plain
+// CreateDialogParam off this template and imposes no styles of its own, and the
+// dialog manager branches on WS_SIZEBOX/WS_THICKFRAME in its own geometry code.
+// Three stock plugins already ship resizable dialogs through the identical
+// oapiOpenDialog path - ExtMFD, Framerate and LuaConsole.
+// THE WIDTH IS LOCKED IN CODE, NOT HERE: WM_GETMINMAXINFO pins the horizontal
+// track size, because the banner's height is derived from a 500 px width and the
+// slider column was deliberately narrowed to 500 in 2026-07-30. Only the height
+// is the user's, and its minimum is 500 px of client.
 IDD_ORO_CONTROL DIALOGEX 0, 0, 333, 369
-STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
 CAPTION "ORO - effects control"
+FONT 8, "MS Shell Dlg"
+BEGIN
+END
+
+// THE HELP WINDOW. Same empty-template, owner-drawn approach as the panel above and the
+// same dark palette, minus the banner. Resizable in BOTH axes, unlike the panel: nothing
+// here is pinned to a width - the text word-wraps to whatever it is given - so there is
+// no reason to take the axis away. Its size is remembered in Config\ORO\window.cfg beside
+// the panel's height; it is deliberately NOT reopened on a new session.
+IDD_ORO_HELP DIALOGEX 0, 0, 300, 320
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
+CAPTION "ORO Help"
 FONT 8, "MS Shell Dlg"
 BEGIN
 END

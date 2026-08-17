@@ -146,12 +146,25 @@ namespace {
 
 	// The applied-settings signature. Every field that would need the streams
 	// rebuilt goes in; the LEVEL does not, because that is a live pointer.
-	struct PrtSig {
-		OBJHANDLE hV;
-		int    nStream;
+	// PER GROUP since 2026-08-16. ⚠️ ONE SIGNATURE COVERING ALL FOUR GROUPS, deliberately,
+	// rather than four independent lifecycles. A stream cannot be reconfigured in place -
+	// the core COPIES the spec at construction - so any change means delete-and-re-add,
+	// and four independent rebuild clocks would mean four settle timers, four throttle
+	// windows and four sets of lingering orphan streams to reason about. Folding every
+	// group into one signature costs exactly one thing: tuning HOVER also rebuilds MAIN's
+	// streams, so MAIN's particles blink once. During an active tuning drag that is
+	// invisible against the 0.25 s settle, and it buys a rebuild path with a single
+	// state machine instead of four interleaved ones.
+	struct PrtGrpSig {
 		float  ofs, size, life, rate, speed, spread, growth, slow;
 		bool   diffuse, airfade;
 		DWORD  colour;
+		bool   on;
+	};
+	struct PrtSig {
+		OBJHANDLE hV;
+		int    nStream;
+		PrtGrpSig g[ORO_THR_N];
 		bool   on;
 		bool operator!=(const PrtSig& o) const { return memcmp(this, &o, sizeof(PrtSig)) != 0; }
 	};
@@ -187,7 +200,8 @@ void OroModule::UpdateParticles(double simdt)
 	// before the split carries no StockParticlesOn key at all, so it would load as
 	// "stock on" beside a saved "ours on". Ours wins: it is the one the user just
 	// asked for by enabling it. Runs before UpdateStockExhaust, which reads the flag.
-	if (g_fx.prtEnabled) g_fx.stockParticles = false;
+	for (int gi = 0; gi < ORO_THR_N; gi++)
+		if (g_fx.thr[gi].prtEnabled) { g_fx.stockParticles = false; break; }
 
 	// ⚠ NOT UNTIL THE SCENE HAS DRAWN A FRAME. AddExhaustStream is the one thing ORO
 	// does that hands a LONG-LIVED OBJECT to Orbiter's core and the client's scene:
@@ -208,7 +222,10 @@ void OroModule::UpdateParticles(double simdt)
 	// stack BuildPlumeModel walks, so a Shuttle's SRBs get streams too.
 	OBJHANDLE stack[STACK_MAX];
 	int nStack = 0;
-	bool want = g_fx.masterArmed && g_fx.prtEnabled;
+	bool want = false;
+	if (g_fx.masterArmed)
+		for (int gi = 0; gi < ORO_THR_N; gi++)
+			if (g_fx.thr[gi].prtEnabled) { want = true; break; }
 	if (want) {
 		OBJHANDLE h = oapiCameraTarget();
 		if (!h || oapiGetObjectType(h) != OBJTP_VESSEL) h = oapiGetFocusObject();
@@ -234,6 +251,22 @@ void OroModule::UpdateParticles(double simdt)
 		} else want = false;
 	}
 
+	// ---- is AIR FADE currently emitting nothing? ---------------------------
+	// Published every frame so the panel can SAY SO. Stock's atmospheric ramp is
+	// ATM_PLOG over 1e-5..0.1 kg/m3 and Atm2Alpha returns exactly zero below amin, so
+	// with the fade on and the ship in vacuum the streams exist, are correctly
+	// configured, and emit nothing whatsoever - which is indistinguishable from a
+	// broken tab unless something names it. That failure mode is the entire reason
+	// invariant 23j made ALWAYS ON the default; naming it is what let the default flip
+	// to the physically honest one on 2026-08-15.
+	{
+		OBJHANDLE hv = oapiCameraTarget();
+		if (!hv || oapiGetObjectType(hv) != OBJTP_VESSEL) hv = oapiGetFocusObject();
+		VESSEL* vv = (hv && oapiGetObjectType(hv) == OBJTP_VESSEL) ? oapiGetVesselInterface(hv) : NULL;
+		// The readout answers for the group the panel is EDITING.
+		g_fx.prtVacuum = g_fx.thr[g_fx.thrSel].prtAirFade && vv && (vv->GetAtmDensity() < 1e-5);
+	}
+
 	// ---- the texture (patch l), rebaked only when the colour changes --------
 	if (!prtTexTried && pCore) {
 		prtTexTried = true;
@@ -245,10 +278,11 @@ void OroModule::UpdateParticles(double simdt)
 			// every particle as a fully opaque QUAD: the "particles are squares" bug.
 			// (The lightning atlas gets away without it only because it draws
 			// additive, where black RGB contributes nothing and alpha is ignored.)
-			hPrtTex = oapiCreateSurfaceEx(PT_DIM, PT_DIM,
-			                              OAPISURFACE_TEXTURE | OAPISURFACE_NOMIPMAPS |
-			                              OAPISURFACE_ALPHA);
-		prtTexMode = (hPrtTex != NULL);
+			for (int gi = 0; gi < ORO_THR_N; gi++)
+				hPrtTex[gi] = oapiCreateSurfaceEx(PT_DIM, PT_DIM,
+				                                  OAPISURFACE_TEXTURE | OAPISURFACE_NOMIPMAPS |
+				                                  OAPISURFACE_ALPHA);
+		prtTexMode = (hPrtTex[0] != NULL);
 		oapiWriteLogV("ORO: particle tinting (patch l) %s.",
 		              prtTexMode ? "available - synthesized 2x2 particle atlas"
 		                         : "NOT available - stock particle texture, colour pick disabled");
@@ -264,28 +298,31 @@ void OroModule::UpdateParticles(double simdt)
 	// ---- rebuild only when something the core copied has changed ------------
 	PrtSig sig = {};
 	sig.hV      = nStack ? stack[0] : NULL;
-	sig.ofs     = g_fx.prtOffset;
-	sig.size    = g_fx.prtSize;
-	sig.life    = g_fx.prtLifetime;
-	sig.rate    = g_fx.prtRate;
-	sig.speed   = g_fx.prtSpeed;
-	sig.spread  = g_fx.prtSpread;
-	sig.growth  = g_fx.prtGrowth;
-	sig.slow    = g_fx.prtSlowdown;
-	sig.diffuse = g_fx.prtDiffuse;
-	sig.airfade = g_fx.prtAirFade;
-	sig.colour  = g_fx.prtColour;
+	for (int gi = 0; gi < ORO_THR_N; gi++) {
+		const OroThrusterFx& T = g_fx.thr[gi];
+		PrtGrpSig& G = sig.g[gi];
+		G.ofs = T.prtOffset;   G.size    = T.prtSize;     G.life   = T.prtLifetime;
+		G.rate = T.prtRate;    G.speed   = T.prtSpeed;    G.spread = T.prtSpread;
+		G.growth = T.prtGrowth; G.slow   = T.prtSlowdown; G.diffuse = T.prtDiffuse;
+		G.airfade = T.prtAirFade; G.colour = T.prtColour; G.on     = T.prtEnabled;
+	}
 	sig.on      = want;
 
 	// Count the qualifying thrusters too: a staging event changes the set without
 	// changing any slider, and the streams must follow the hardware.
+	// Counted through the shared classifier, so only thrusters in groups that actually
+	// want particles are counted - a group with its pill off contributes nothing here
+	// and creates nothing below.
 	int nWantStream = 0;
 	if (want) {
-		const THGROUP_TYPE grp[3] = { THGROUP_MAIN, THGROUP_RETRO, THGROUP_HOVER };
 		for (int s = 0; s < nStack; s++) {
 			VESSEL* sv = oapiGetVesselInterface(stack[s]);
 			if (!sv) continue;
-			for (int g = 0; g < 3; g++) nWantStream += (int)sv->GetGroupThrusterCount(grp[g]);
+			const DWORD nth = sv->GetThrusterCount();
+			for (DWORD i = 0; i < nth; i++) {
+				const int gi = OroThrusterGroupOf(sv, sv->GetThrusterHandleByIndex(i));
+				if (gi >= 0 && g_fx.thr[gi].prtEnabled) nWantStream++;
+			}
 		}
 		if (nWantStream > PRT_MAX_STREAM) nWantStream = PRT_MAX_STREAM;
 	}
@@ -317,50 +354,66 @@ void OroModule::UpdateParticles(double simdt)
 	s_applied = sig;
 	s_haveApplied = true;
 	if (!want || !nWantStream) {
-		strcpy_s(g_fx.prtInfo, want ? "no main/hover/retro thrusters on this vessel" : "off");
+		strcpy_s(g_fx.prtInfo, want ? "no thrusters in the enabled group(s)" : "off");
 		g_fx.prtCount = 0;
 		return;
 	}
 
 	// The tint, baked into our own texture (finding 3's 2x2 layout). tex = NULL
 	// falls through to the client's own Contrail1.dds - the stock look.
-	SURFHANDLE hTex = NULL;
-	if (prtTexMode && hPrtTex) {
-		BakeParticleTex(g_fx.prtColour);
-		if (pCore->UpdateTexture2D(hPrtTex, s_ptex, PT_DIM, PT_DIM)) hTex = hPrtTex;
-		else {
-			prtTexMode = false;
-			oapiWriteLog("ORO: particle texture upload FAILED - stock texture from here on.");
+	// ONE PER GROUP (2026-08-16): the spec has no colour field, so a per-group colour
+	// is a per-group texture. Baked here, at rebuild time, not per frame.
+	SURFHANDLE hTexG[ORO_THR_N] = {};
+	SURFHANDLE hTex = NULL;                 // (kept for the failure log below)
+	if (prtTexMode && hPrtTex[0]) {
+		for (int gi = 0; gi < ORO_THR_N; gi++) {
+			if (!hPrtTex[gi]) continue;
+			BakeParticleTex(g_fx.thr[gi].prtColour);
+			if (pCore->UpdateTexture2D(hPrtTex[gi], s_ptex, PT_DIM, PT_DIM)) hTexG[gi] = hPrtTex[gi];
+			else {
+				prtTexMode = false;
+				oapiWriteLog("ORO: particle texture upload FAILED - stock texture from here on.");
+				break;
+			}
 		}
+		hTex = hTexG[0];
 	}
 
 	// THE SPEC. These are the author's own fields, straight through - that is the
 	// entire point of the tab.
-	PARTICLESTREAMSPEC pss = {};
-	pss.flags       = 0;
-	pss.srcsize     = (double)g_fx.prtSize;
-	pss.srcrate     = (double)g_fx.prtRate;
-	pss.v0          = (double)g_fx.prtSpeed;
-	pss.srcspread   = (double)g_fx.prtSpread;
-	pss.lifetime    = (double)g_fx.prtLifetime;
-	pss.growthrate  = (double)g_fx.prtGrowth;
-	pss.atmslowdown = (double)g_fx.prtSlowdown;
-	pss.ltype       = g_fx.prtDiffuse ? PARTICLESTREAMSPEC::DIFFUSE
-	                                  : PARTICLESTREAMSPEC::EMISSIVE;
-	pss.levelmap    = PARTICLESTREAMSPEC::LVL_SQRT;   // alpha = sqrt(throttle), the
-	pss.lmin        = 0; pss.lmax = 1;               //   stock exhaust-stream mapping
-	// AIR FADE. ATM_FLAT returns amin as a CONSTANT factor (Particle.cpp:179), so
-	// amin = 1.0 means "full strength everywhere, including vacuum" - the honest lab
-	// default. The alternative is stock's own atmospheric ramp, which is correct for
-	// a contrail and emits absolutely nothing in space. See prtAirFade's comment.
-	if (g_fx.prtAirFade) {
-		pss.atmsmap = PARTICLESTREAMSPEC::ATM_PLOG;
-		pss.amin    = 1e-5; pss.amax = 0.1;
-	} else {
-		pss.atmsmap = PARTICLESTREAMSPEC::ATM_FLAT;
-		pss.amin    = 1.0;  pss.amax = 1.0;
+	// ONE SPEC PER GROUP, built up front (2026-08-16). The core copies the spec at
+	// construction, so each stream can be handed its own group's numbers and then never
+	// needs to know about groups again.
+	PARTICLESTREAMSPEC pssG[ORO_THR_N] = {};
+	for (int gi = 0; gi < ORO_THR_N; gi++) {
+		const OroThrusterFx& T = g_fx.thr[gi];
+		PARTICLESTREAMSPEC& pss = pssG[gi];
+		pss.flags       = 0;
+		pss.srcsize     = (double)T.prtSize;
+		pss.srcrate     = (double)T.prtRate;
+		pss.v0          = (double)T.prtSpeed;
+		pss.srcspread   = (double)T.prtSpread;
+		pss.lifetime    = (double)T.prtLifetime;
+		pss.growthrate  = (double)T.prtGrowth;
+		pss.atmslowdown = (double)T.prtSlowdown;
+		pss.ltype       = T.prtDiffuse ? PARTICLESTREAMSPEC::DIFFUSE
+		                               : PARTICLESTREAMSPEC::EMISSIVE;
+		pss.levelmap    = PARTICLESTREAMSPEC::LVL_SQRT;   // alpha = sqrt(throttle), the
+		pss.lmin        = 0; pss.lmax = 1;                //   stock exhaust-stream mapping
+		// AIR FADE. ATM_FLAT returns amin as a CONSTANT factor (Particle.cpp:179), so
+		// amin = 1.0 means "full strength everywhere, including vacuum". The alternative
+		// is stock's own atmospheric ramp, which is correct for a contrail and emits
+		// absolutely nothing in space - the default since 2026-08-15, with the panel
+		// saying so while it holds emission off. See prtAirFade's comment.
+		if (T.prtAirFade) {
+			pss.atmsmap = PARTICLESTREAMSPEC::ATM_PLOG;
+			pss.amin    = 1e-5; pss.amax = 0.1;
+		} else {
+			pss.atmsmap = PARTICLESTREAMSPEC::ATM_FLAT;
+			pss.amin    = 1.0;  pss.amax = 1.0;
+		}
+		pss.tex         = hTexG[gi];
 	}
-	pss.tex         = hTex;
 
 	// ---- create the streams -------------------------------------------------
 	// Patch (o): raise the exemption latch around the whole creation loop. Every
@@ -370,16 +423,21 @@ void OroModule::UpdateParticles(double simdt)
 	const bool exempt = (pCore && pCore->CanExemptStream());
 	if (exempt) pCore->ExemptNewStreams(true);
 
-	const THGROUP_TYPE grp[3] = { THGROUP_MAIN, THGROUP_RETRO, THGROUP_HOVER };
 	int made = 0;
 	for (int s = 0; s < nStack && prtStrN < PRT_MAX_STREAM; s++) {
 		VESSEL* sv = oapiGetVesselInterface(stack[s]);
 		if (!sv) continue;
-		for (int g = 0; g < 3 && prtStrN < PRT_MAX_STREAM; g++) {
-			const DWORD n = sv->GetGroupThrusterCount(grp[g]);
+		{
+			// Walk the vessel's thrusters ONCE and classify each, instead of walking
+			// three named groups: that is what admits USER-defined engines (which had
+			// a bell but never a stream) and what keeps RCS out, both from the one
+			// shared definition rather than from a list repeated in four files.
+			const DWORD n = sv->GetThrusterCount();
 			for (DWORD i = 0; i < n && prtStrN < PRT_MAX_STREAM; i++) {
-				THRUSTER_HANDLE th = sv->GetGroupThruster(grp[g], i);
+				THRUSTER_HANDLE th = sv->GetThrusterHandleByIndex(i);
 				if (!th) continue;
+				const int gi = OroThrusterGroupOf(sv, th);
+				if (gi < 0 || !g_fx.thr[gi].prtEnabled) continue;   // RCS, or group off
 				VECTOR3 pos, dir;
 				sv->GetThrusterRef(th, pos);
 				sv->GetThrusterDir(th, dir);
@@ -391,14 +449,14 @@ void OroModule::UpdateParticles(double simdt)
 				// cannot redefine a stream's position later, which is the other
 				// reason a slider change rebuilds.
 				const VECTOR3 flow = -dir;
-				const VECTOR3 src  = pos + flow * (double)g_fx.prtOffset;
+				const VECTOR3 src  = pos + flow * (double)g_fx.thr[gi].prtOffset;
 
 				PrtStream& e = prtStr[prtStrN];
 				e.hV  = stack[s];
 				e.th  = th;
 				// AddExhaustStream, not AddParticleStream (finding 2): the core drives
 				// the level from the thruster itself, so we own no level pointer.
-				e.h   = sv->AddExhaustStream(th, src, &pss);
+				e.h   = sv->AddExhaustStream(th, src, &pssG[gi]);
 				if (!e.h) continue;                // streams disabled in the Launchpad
 				prtStrN++;
 				made++;
@@ -468,7 +526,8 @@ void OroModule::ForgetParticleVessel(OBJHANDLE hVessel)
 // Session teardown: the texture is a device resource.
 void OroModule::ReleaseParticleTex()
 {
-	if (hPrtTex) { oapiDestroySurface(hPrtTex); hPrtTex = NULL; }
+	for (int gi = 0; gi < ORO_THR_N; gi++)
+		if (hPrtTex[gi]) { oapiDestroySurface(hPrtTex[gi]); hPrtTex[gi] = NULL; }
 	prtTexMode  = false;
 	prtTexTried = false;
 }
