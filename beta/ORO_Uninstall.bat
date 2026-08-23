@@ -127,7 +127,7 @@ if /i not "%GO%"=="Y" (
   goto :done
 )
 
-rem --- 4. restore the client + its six shaders, AND CHECK THAT IT WORKED -----
+rem --- 4. restore the client + its seven shaders, AND CHECK THAT IT WORKED ---
 rem  Every copy is verified by reading the file back and comparing it to the
 rem  source. That catches all three ways this can go wrong: the copy refused
 rem  (destination locked, so the old patched file is still sitting there), the
@@ -156,7 +156,7 @@ if exist "%SRC%\Modules\Plugin\D3D9Client.dll" (
   echo   [ok] D3D9Client.dll restored and verified
 )
 
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl) do (
+for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
   if exist "%SRC%\Modules\D3D9Client\%%F" (
     call :copyVerify "%SRC%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client" "%%F"
     if defined CVFAIL goto :restorefailed
@@ -183,6 +183,7 @@ if not exist "%PAY%" (
 
 del /q "%ROOT%\Modules\Plugin\ORO.dll" >nul 2>&1
 call :cleanTree "Modules\ORO"
+call :cleanTree "XRSound\ORO"
 call :cleanTree "Meshes\ORO"
 call :cleanTree "Textures\ORO"
 call :cleanTree "Scenarios\ORO_beta"
@@ -288,7 +289,7 @@ call :copyVerify "%SRC%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin" "
 if defined CVFAIL goto :restorefailed
 echo   [ok] D3D9Client.dll restored and verified
 
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl) do (
+for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
   if exist "%SRC%\Modules\D3D9Client\%%F" (
     call :copyVerify "%SRC%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client" "%%F"
     if defined CVFAIL goto :restorefailed
@@ -339,7 +340,7 @@ echo.
 echo   If it keeps failing, you can do it by hand with Orbiter closed:
 echo     copy    %SRC%\Modules\Plugin\D3D9Client.dll
 echo     over    %ROOT%\Modules\Plugin\D3D9Client.dll
-echo   and the six .fx / .hlsl files from
+echo   and the seven .fx / .hlsl files from
 echo     %SRC%\Modules\D3D9Client\
 echo   over the ones in
 echo     %ROOT%\Modules\D3D9Client\

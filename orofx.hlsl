@@ -239,6 +239,8 @@ float4 PSShimmer(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 // the resample stack and before the physiological washes darken the frame.
 // ----------------------------------------------------------------------------
 uniform extern float  fPlasma;     // 0..1 glow intensity (heat x dialog trim)
+uniform extern float  fCabin;      // 0..1 wash balance: 0 = directional pool, 1 = flat cabin
+uniform extern float  fFlash;      // >=1 flare envelope, shared with the VC sheath geometry
 uniform extern float2 vPlasmaUV;   // where the plasma projects, in UV (may be off-screen)
 uniform extern float3 vPlasmaCol;  // plasma colour for this heat band
 
@@ -247,18 +249,41 @@ uniform extern float3 vPlasmaCol;  // plasma colour for this heat band
 // Roughly halved, and the glow now RESPECTS what it is lighting: it scales with the
 // surface it lands on, so dark corners stay dark instead of everything flooding to white.
 #define PLASMA_SPREAD 1.30f        // bloom falloff - lower = broader wash
-#define PLASMA_BLOOM  0.42f        // directional component at full heat
-#define PLASMA_AMB    0.07f        // uniform cabin lift at full heat
+#define PLASMA_BLOOM  0.42f        // directional component at full heat, balance 0
+#define PLASMA_AMB    0.07f        // uniform cabin lift at full heat, balance 0
 #define PLASMA_FLOOR  0.35f        // how much glow reaches an unlit surface (rest is modulated)
+
+// CABIN WASH BALANCE (fCabin, 2026-08-20). The two terms above shipped at 6:1 in favour
+// of the DIRECTIONAL one, which means the cockpit only knows it is on fire while the fire
+// is on screen: look at the instruments during a reentry and the cabin light goes with the
+// streaks. fCabin slides energy from the pool into the flat term.
+//
+// ⚠️ IT IS A BALANCE, NOT A GAIN, AND THAT IS THE WHOLE DESIGN. The PEAK is held roughly
+// constant (0.49 -> 0.42) while the PERIPHERY rises about 4.5x, so the knob changes WHERE
+// the light lands and not how much there is - the aurora's Thickness law (invariant 19b)
+// applied to a wash. Brightness already has an owner: the Reentry trim.
+// At fCabin 0 both terms are their shipped values, so 0 is the old look bit for bit.
+#define PLASMA_BLOOM1 0.10f        // directional component at balance 1
+#define PLASMA_AMB1   0.32f        // uniform cabin lift at balance 1
 
 float4 PSPlasma(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 {
 	float4 src = tex2D(tSrc, float2(x, y));
 	float2 d   = float2(x, y) - vPlasmaUV;
 	d.x *= fAspect;                                  // circular in SCREEN space, not UV space
+	float  bal  = saturate(fCabin);
+	float  bl   = lerp(PLASMA_BLOOM, PLASMA_BLOOM1, bal);
+	float  am   = lerp(PLASMA_AMB,   PLASMA_AMB1,   bal);
 	float  r    = length(d);
-	float  glow = exp(-r * r * PLASMA_SPREAD) * PLASMA_BLOOM + PLASMA_AMB;
-	float  k    = saturate(fPlasma) * glow;
+	float  glow = exp(-r * r * PLASMA_SPREAD) * bl + am;
+	// THE FLARE. Applied AFTER the saturate, which is the whole reason it is its own
+	// uniform: heat x trim drives fPlasma several times past 1.0 in any real entry, so a
+	// flash folded in there would be clamped away before it did anything. Damped to 55%
+	// of the geometry's envelope - the sheath outside the glass is light arriving
+	// directly, the cabin is that light bounced off panels, and it should read as the
+	// quieter half of the same event. The final saturate() below clamps the peak, which
+	// is what a flare looks like anyway.
+	float  k    = saturate(fPlasma) * glow * (1.0f + (fFlash - 1.0f) * 0.55f);
 	// Light falling on a surface reveals what is already there - a purely additive wash
 	// crushes everything toward white and eats the panel text. Mix a flat term with one
 	// that scales by local luminance so bright surfaces catch the light and dark ones do
@@ -296,6 +321,44 @@ float4 PSPlasma(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 // cost with no drama to pay for it. So near-white pixels keep more of their
 // brightness. It applies ONLY while dimming: on the way out the highlights are
 // exactly what SHOULD blow first.
+// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// GLOOM - the overcast, and the cheapest half of making it rain.
+//
+// Orbiter has no weather, so a storm cannot actually put cloud between you and the sun.
+// What it CAN do is model what that does to the light reaching the camera, which is the
+// eclipse's lesson applied to a different cause: three things happen under a heavy
+// overcast and none of them needs a cloud to exist.
+//   1. COLOUR DRAINS. Diffuse skylight is nearly white and it swamps the warm direct
+//      component, so saturated things go grey - and slightly COOL grey, because what is
+//      left is scattered blue.
+//   2. IT GETS DARK. A thick deck cuts the ground illumination by most of a stop.
+//   3. CONTRAST COLLAPSES. Light arrives from every direction at once, so shadows fill
+//      in. That is the lifted black floor below, and it is the term that stops the result
+//      reading as "someone turned the brightness down".
+// EXTERNAL view only in this slice - which is also the easy domain, because there is no
+// cockpit interior that must stay unfogged.
+// ----------------------------------------------------------------------------
+uniform extern float fGloom;       // 0..1 overcast strength
+
+// ⚠️ DEMOTED 2026-08-22 to a light touch, and the reason is the lesson. This pass used
+// to carry the whole overcast - and a post-process CANNOT: the sharp sun shadows, the
+// warm directional light and the speculars are already baked into every pixel by the
+// time it runs, so all it could do was dim a sunny day. The overcast now happens at the
+// SOURCE (client patch (s) part 2: the Gloom slider collapses gSun into a lifted ambient
+// in the surface shaders, fades the projected shadows and kills the glare). What remains
+// here is the one thing the source change does not do: the slight cool desaturation of a
+// scene lit through water.
+float4 PSGloom(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
+{
+	float4 src = tex2D(tSrc, float2(x, y));
+	float  lum = dot(src.rgb, float3(0.299f, 0.587f, 0.114f));
+	float3 grey = lum * float3(0.94f, 0.98f, 1.08f);        // cool, not neutral
+	float3 c = lerp(src.rgb, grey, saturate(fGloom) * 0.45f);
+	c = lerp(c, c * 0.90f + 0.012f, saturate(fGloom));      // a whisper of the old dimmer
+	return float4(saturate(c), src.a);
+}
+
 // ----------------------------------------------------------------------------
 uniform extern float fEclGain;     // eye's brightness multiplier (1 = adapted, no change)
 uniform extern float fEclDesat;    // 0..1 scotopic colour loss

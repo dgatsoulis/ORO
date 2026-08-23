@@ -101,6 +101,7 @@ static int      g_dragAurRib = -1;        // AURORA Ribbons slider being dragged
 static int      g_dragAurK = -1;          // AURORA bipolar tilt knob being dragged, -1 = none
 static int      g_dragLtg  = -1;          // LIGHTNING slider being dragged, -1 = none
 static int      g_dragGry  = -1;          // GOD RAYS slider being dragged, -1 = none
+static int      g_dragRain = -1;          // RAIN slider being dragged, -1 = none
 static int      g_dragVcs  = -1;          // VC SHADOWS cabin-box slider being dragged, -1 = none
 static int      g_dragVap  = -1;          // VAPOUR CONE slider being dragged, -1 = none
 static int      g_dragVapP = -1;          // VAPOUR CONE bipolar apex knob being dragged, -1 = none
@@ -121,7 +122,7 @@ static void ClearDrags()
 {
 	g_dragRow = g_dragMot = g_dragShake = g_dragEnv = g_dragEnvK = g_dragPlume = g_dragPlmBand
 	          = g_dragBgl = g_dragPrt = g_dragPlas = g_dragEcl = g_dragAur = g_dragAurRib = g_dragAurK
-	          = g_dragLtg = g_dragGry = g_dragVcs = g_dragVap = g_dragVapP = g_dragVapBand
+	          = g_dragLtg = g_dragGry = g_dragRain = g_dragVcs = g_dragVap = g_dragVapP = g_dragVapBand
 	          = g_dragTol = g_dragCop = g_dragBar = -1;
 }
 
@@ -239,6 +240,15 @@ static PlasRow g_plasRows[] = {
 	                                                        // low = creamy, high = magenta
 	{ "Hull light",     &g_fx.plasLight,       2.0f, 2 },   // the stagnation light: lights
 	                                                        // the MESH, not our geometry
+	{ "VC glow",        &g_fx.plasVCGlow,      3.0f, 2 },   // the COCKPIT sheath (screen-
+	                                                        // space; the external draw list
+	                                                        // starves from inside the hull).
+	                                                        // 0 = off.
+	{ "Cabin wash",     &g_fx.plasCabin,       1.0f, 2 },   // where the cockpit glow LANDS:
+	                                                        // 0 = a directional pool that
+	                                                        // follows the plasma off screen,
+	                                                        // 1 = a flat glow that survives
+	                                                        // looking at the instruments
 	{ "Streak length",  &g_fx.plasStreakLen,  20.0f, 2 },   // x3'd, then raised to 20 when
 	                                                        // the trail was abandoned
 	{ "Streak width",   &g_fx.plasStreakWid,   6.0f, 2 },   // range x2'd on request
@@ -407,6 +417,51 @@ static PlasRow g_gryRows[] = {
 	{ "Warmth",     &g_fx.grayWarm,     1.0f, 2 },  // reddening as the sun nears the horizon
 };
 static const int NGRY = (int)(sizeof(g_gryRows) / sizeof(g_gryRows[0]));
+
+// RAIN (2026-08-20) - the runway slice. GLOBAL scope for v1 because there is only one
+// world it can happen on; when other bodies arrive it becomes a line in the per-body cfg
+// beside the aurora's, not a code change. Note there is no INTENSITY slider: the storm's
+// strength is the EVENT's, and the event is what the pill and Test drive. These four are
+// look knobs on top of it - his rule from the vapour cone, that the sim owns what happens
+// and the user owns how it looks.
+static PlasRow g_rainRows[] = {
+	{ "Gloom",      &g_fx.rainGloom,   2.0f, 2 },  // how grey and dark the world goes
+	{ "Cloud detail",&g_fx.rainCloudLvl,3.0f, 0 },  // deck texture notch: 0 = plain
+	                                               // gloom, 1/2/3 = 256/512/1024 texture
+	{ "Lightning",  &g_fx.rainLtg,     2.0f, 2 },  // flash rate: 0 = none, 2 = very
+	                                               // often; single flashes + strobes
+	{ "Bolt bloom", &g_fx.rainBoltBloom,2.0f, 2 }, // glow-pass intensity around bolts;
+	                                               // 0 = crisp filament only
+	{ "Density",    &g_fx.rainDensity, 2.0f, 2 },  // streaks in the sheet
+	{ "Fall speed", &g_fx.rainSpeed,   2.0f, 2 },
+	{ "Streak len", &g_fx.rainStreak,  2.0f, 2 },
+	{ "Streak glow",&g_fx.rainStreakA, 2.0f, 2 },  // how brightly they catch the light
+	{ "Slant (deg)",&g_fx.rainAngle,  15.0f, 0, -15.0f },  // BIPOLAR - the wind
+	{ "Splashes",   &g_fx.rainPuddle,  2.0f, 2 },  // rings where drops land; 0 = off
+	{ "Wet dark",   &g_fx.rainWetDark, 2.0f, 2 },  // how far the wet ground darkens
+	                                               // (client patch s part 3); 1 = designed
+	{ "Pool size",  &g_fx.rainPoolSize, 2.0f, 2 }, // standing-pool lattice scale; 1 = designed
+	{ "Pool reach", &g_fx.rainPoolReach,2.0f, 2 }, // how far out pools stay visible;
+	                                               // 1 = ~900 m e-fold, 0 = nearby only
+	{ "Grain",      &g_fx.rainGrainOp,  2.0f, 2 }, // broken-water texture in the pool
+	                                               // reflections; 0 = uniform pools
+	{ "Grain size", &g_fx.rainGrainSize,2.0f, 2 }, // grain feature size; 1 = designed
+	{ "Glint",      &g_fx.rainGlint,   2.0f, 2 },  // drop sparkle on hulls; 0 = off
+	{ "Reflection", &g_fx.rainRefl,    2.0f, 2 },  // vessel image in the puddles; 0 = off
+	{ "Swim size",  &g_fx.rainSwimAmp, 2.0f, 2 },  // ripple-warp amplitude on the image;
+	                                               // 1 = designed, 0 = still mirror
+	{ "Swim rate",  &g_fx.rainSwimRate,2.0f, 2 },  // ripple cadence; 1 = designed.
+	                                               // FINDING sliders (the origin-tilt
+	                                               // pattern): bake + delete when settled
+	{ "Water sheet",&g_fx.rainSheet,   2.0f, 2 },  // reflective pool mesh under the vessel
+	                                               // (env-map reflections); 0 = off
+	{ "Rain sound", &g_fx.rainSoundVol,2.0f, 2 },  // the three generated loops crossfading
+	                                               // with the envelope; 0 = silent (the
+	                                               // opt-out - no pill, 17b's law)
+	{ "Thunder",    &g_fx.rainThunder, 2.0f, 2 },  // the sourced one-shot set, delayed by
+	                                               // each flash's own distance; 0 = silent
+};
+static const int NRAIN = (int)(sizeof(g_rainRows) / sizeof(g_rainRows[0]));
 
 // THE VAPOUR CONE - transonic condensation. TWO unit sliders and one bipolar knob, and
 // the short list is the design rather than an omission: the shroud's LENGTH is not here
@@ -695,7 +750,13 @@ static int GryHdrY()      { return LtgBodyY() + 30; }                      // ca
 static int GryPillY()     { return GryHdrY() + 32; }                       // pill + Test centreline
 static int GryRowY(int i) { return GryPillY() + 24 + i * ROW_DY; }         // slider centreline
 static int GryWhyY()      { return GryRowY(NGRY - 1) + ROW_DY + 2; }       // "Shafts ..." readout
-static int AtmosBottom()  { return GryWhyY() + 24; }
+// RAIN - last on the tab, and the newest.
+static int RainHdrY()     { return GryWhyY() + 30; }                       // caption text top
+static int RainPillY()    { return RainHdrY() + 32; }                      // pill + Test centreline
+static int RainRowY(int i){ return RainPillY() + 24 + i * ROW_DY; }        // slider centreline
+static int RainBoltY()    { return RainRowY(NRAIN - 1) + ROW_DY + 2; }     // STRIKE test row
+static int RainWhyY()     { return RainBoltY() + ROW_DY; }                 // state readout
+static int AtmosBottom()  { return RainWhyY() + 24; }
 
 // ===== TAB 4 - VC : shadows + cam-shake =====
 static int VcsHdrY()      { return TabTopY(); }                            // caption text top
@@ -2183,6 +2244,103 @@ static void PaintGodRays(HDC dc, const RECT& rc)
 	DrawTextA(dc, val, -1, &rv3, DT_RIGHT | DT_TOP | DT_SINGLELINE);
 }
 
+// RAIN Test toggle - summon a storm where you are. It RAMPS UP AND HOLDS (the INDUCE
+// scenario idiom, invariant 8) rather than running a fixed cycle, because the thing you
+// mostly want it for is tuning; releasing it ramps back down and the ground dries slowly.
+static RECT RainTestBtnRect(const RECT& rc)
+{
+	const int cy = RainPillY();
+	RECT r = { rc.right - TRACK_RPAD - 78, cy - 11, rc.right - TRACK_RPAD - 6, cy + 11 };
+	return r;
+}
+
+// RAIN. EXTERNAL view, Earth only, below the weather - and the readout says which of
+// those is stopping it, because "no rain" otherwise has four indistinguishable causes.
+static void PaintRain(HDC dc, const RECT& rc)
+{
+	DrawSectionHdr(dc, rc, RainHdrY(), "R A I N");
+	const bool en = g_fx.rainEnabled;
+	char val[48];
+
+	DrawPill(dc, PillRectAt(RainPillY()), en);
+	DrawCaption(dc, LABEL_X, RainPillY() - 7, "W E A T H E R   A T   T H E   S U R F A C E");
+	DrawButton(dc, RainTestBtnRect(rc), "Test", g_fx.rainTest, CLR_ACCENT);
+
+	for (int i = 0; i < NRAIN; i++) {
+		const PlasRow& rr = g_rainRows[i];
+		const int   cy   = RainRowY(i);
+		const float span = rr.vmax - rr.vmin;      // Slant is bipolar (vmin < 0)
+		const float frac = (span > 0.0f) ? ((*rr.value - rr.vmin) / span) : 0.0f;
+		DrawRowLabel(dc, cy, rr.label, en);
+		DrawSlider(dc, TrackRectAt(rc, cy), frac, en);
+		sprintf_s(val, "%.2f", *rr.value);
+		DrawValue(dc, rc, cy, val, en);
+	}
+
+	// the STRIKE test row: button + which bolt the last press showed
+	DrawRowLabel(dc, RainBoltY(), "Test bolt", en);
+	DrawButton(dc, RowBtnRect(rc, RainBoltY()), "STRIKE", g_fx.boltTestFire, CLR_ACCENT);
+	if (g_fx.boltTestSlot >= 0) sprintf_s(val, "bolt %d/16", g_fx.boltTestSlot + 1);
+	else                        strcpy_s(val, "-");
+	DrawValue(dc, rc, RainBoltY(), val, en);
+
+	const bool active = en || g_fx.rainTest;
+	DrawRowLabel(dc, RainWhyY(), "Rain", active);
+	if      (!active)              strcpy_s(val, "-");
+	else if (g_fx.rainWhy[0])      sprintf_s(val, "%s", g_fx.rainWhy);
+	else if (g_fx.rainI > 0.004f)  sprintf_s(val, "%s%.0f%%  wet %.0f%%",
+	                                         g_fx.rainTest ? "TEST " : "",
+	                                         g_fx.rainI * 100.0f, g_fx.rainWet * 100.0f);
+	else                           strcpy_s(val, "dry");
+	SelectObject(dc, g_fontMono);
+	SetTextColor(dc, !active ? CLR_TEXT_DIM
+	                         : (g_fx.rainI > 0.004f ? CLR_ACCENT : CLR_TEXT_HI));
+	RECT rv4 = ReadRectAt(rc, RainWhyY());
+	DrawTextA(dc, val, -1, &rv4, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+}
+
+static BOOL ClickRain(HWND hDlg, const RECT& rc, int x, int y)
+{
+	if (PtIn(PillRectAt(RainPillY()), x, y, 4)) {
+		g_fx.rainEnabled = !g_fx.rainEnabled;
+		// ⚠️ TURNING THE PILL OFF ALSO CLEARS TEST (2026-08-22). Every section here
+		// treats Test as an override that works with the pill off - which is right for
+		// PREVIEWING, and wrong the moment someone reaches for the pill to make the
+		// effect stop. He pressed it "expecting the rain effect to be completely removed"
+		// and it carried on, because Test was still holding it up. An off switch that
+		// does not switch the thing off is a bug however defensible the logic is.
+		// Preview still works: pill off + Test on runs. What cannot happen any more is a
+		// deliberate OFF being quietly outvoted.
+		if (!g_fx.rainEnabled) g_fx.rainTest = false;
+		return TRUE;
+	}
+	if (PtIn(RainTestBtnRect(rc), x, y)) {
+		g_fx.rainTest = !g_fx.rainTest;
+		return TRUE;
+	}
+	if (g_fx.rainEnabled || g_fx.rainTest) {
+		if (PtIn(RowBtnRect(rc, RainBoltY()), x, y, 2)) {
+			g_fx.boltTestFire = true;          // consumed by UpdateRain next step
+			InvalidateRect(hDlg, NULL, FALSE);
+			return TRUE;
+		}
+		for (int i = 0; i < NRAIN; i++) {
+			if (PtIn(TrackRectAt(rc, RainRowY(i)), x, y, 8)) {
+				g_dragRain = i;
+				SetCapture(hDlg);
+				*g_rainRows[i].value = g_rainRows[i].vmin + TrackValueFromX(rc, x)
+				                       * (g_rainRows[i].vmax - g_rainRows[i].vmin);
+				// dec 0 = a NOTCHED row (Cloud detail): the STORE snaps to integers,
+				// not just the readout - his spec. The handle lands ON the notch.
+				if (g_rainRows[i].dec == 0)
+					*g_rainRows[i].value = floorf(*g_rainRows[i].value + 0.5f);
+				return TRUE;
+			}
+		}
+	}
+	return FALSE;
+}
+
 // VC SHADOWS - the one section where ORO draws NOTHING. Both controls drive the
 // patched client's internal-pass shadow map through gcCore::SetVCShadows. It greys out
 // wholesale on a client without patch (f), because a switch that cannot do anything is
@@ -2537,6 +2695,7 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 		PaintAurora(dc, rc);
 		PaintLightning(dc, rc);
 		PaintGodRays(dc, rc);
+		PaintRain(dc, rc);
 		break;
 	case 4:  // VC
 		PaintVCShadows(dc, rc);
@@ -2670,6 +2829,7 @@ static BOOL ClickCamShake(HWND hDlg, const RECT& rc, int x, int y)
 {
 	if (PtIn(PillRectAt(CamShakeTop()), x, y, 4)) {
 		g_fx.shakeEnabled = !g_fx.shakeEnabled;
+		if (!g_fx.shakeEnabled) g_fx.shakeTest = false;
 		return TRUE;
 	}
 	if (PtIn(ShakeTestBtnRect(rc), x, y)) {
@@ -2896,6 +3056,7 @@ static BOOL ClickEclipse(HWND hDlg, const RECT& rc, int x, int y)
 {
 	if (PtIn(PillRectAt(EclPillY()), x, y, 4)) {
 		g_fx.eclipseEnabled = !g_fx.eclipseEnabled;
+		if (!g_fx.eclipseEnabled) g_fx.eclipseTest = false;
 		return TRUE;
 	}
 	if (PtIn(EclTestBtnRect(rc), x, y)) {
@@ -2921,6 +3082,7 @@ static BOOL ClickAurora(HWND hDlg, const RECT& rc, int x, int y)
 {
 	if (PtIn(PillRectAt(AurPillY()), x, y, 4)) {
 		g_fx.auroraEnabled = !g_fx.auroraEnabled;
+		if (!g_fx.auroraEnabled) g_fx.auroraTest = false;
 		return TRUE;
 	}
 	if (PtIn(AurTestBtnRect(rc), x, y)) {
@@ -2967,6 +3129,7 @@ static BOOL ClickLightning(HWND hDlg, const RECT& rc, int x, int y)
 {
 	if (PtIn(PillRectAt(LtgPillY()), x, y, 4)) {
 		g_fx.ltgEnabled = !g_fx.ltgEnabled;
+		if (!g_fx.ltgEnabled) g_fx.ltgTest = false;
 		return TRUE;
 	}
 	if (PtIn(LtgTestBtnRect(rc), x, y)) {
@@ -2994,6 +3157,7 @@ static BOOL ClickGodRays(HWND hDlg, const RECT& rc, int x, int y)
 {
 	if (PtIn(PillRectAt(GryPillY()), x, y, 4)) {
 		g_fx.grayEnabled = !g_fx.grayEnabled;
+		if (!g_fx.grayEnabled) g_fx.grayTest = false;
 		return TRUE;
 	}
 	if (PtIn(GryTestBtnRect(rc), x, y)) {
@@ -3091,6 +3255,7 @@ static BOOL ClickVapour(HWND hDlg, const RECT& rc, int x, int y)
 {
 	if (PtIn(PillRectAt(VapPillY()), x, y, 4)) {
 		g_fx.vapEnabled = !g_fx.vapEnabled;
+		if (!g_fx.vapEnabled) g_fx.vapTest = false;
 		return TRUE;
 	}
 	if (PtIn(VapTestBtnRect(rc), x, y)) {
@@ -3563,6 +3728,21 @@ static const HelpItem HELP_REENTRY[] = {
 { HK_ROW, "Saturation", "The whole palette at once. 1 is the reference look." },
 { HK_ROW, "Hull light", "A real light source at the stagnation point, lighting the vessel's "
           "OWN mesh - not our geometry. 0 removes the light entirely." },
+{ HK_ROW, "VC glow", "THE COCKPIT'S OWN PLASMA, and it is a different thing from what you see "
+          "outside. Everything else on this tab builds detailed geometry around the hull - "
+          "which is right when you are looking AT the ship, and wrong when you are sitting "
+          "inside it, because from in there most of that geometry is behind your head. What a "
+          "pilot actually sees is a luminous sheath filling the windows, with filaments "
+          "streaming past and sudden flares. That is what this draws. It is anchored to the "
+          "relative wind, so it sits where the shock really is and slides across the glass as "
+          "the ship rotates. 0 turns it off. Brightness scales with the reentry heat, so this "
+          "is a trim, not a level." },
+{ HK_ROW, "Cabin wash", "Where the cockpit's glow LANDS, not how bright it is. Low, and it is "
+          "a pool of light centred on the plasma - turn your head to the instruments and it "
+          "goes with it. High, and the whole cabin lights up whatever you are looking at, "
+          "which is how a reentry is actually flown: eyes down, the fire caught in the corner "
+          "of your vision. The flares are timed to the ones outside the window - one event, "
+          "lighting the sheath and the cabin in the same frame." },
 { HK_ROW, "Streak length / width / wander", "The flame streamers trailing back." },
 { HK_ROW, "Wake churn", "How FAST the wake lives - fin shimmer, spark march, the drift of the "
           "striations, all on one clock so the wake stays coherent. 1 is standard, 0 freezes "
@@ -3584,7 +3764,9 @@ static const HelpItem HELP_REENTRY[] = {
           "colour and you get that colour - and white is the reference palette, unchanged." },
 { HK_ROW, "VC ON / OFF", "Whether the plasma also draws looking OUT of the virtual cockpit. "
           "This is the one deliberate crack in the internal/external wall. With a patched "
-          "client it cuts per pixel at the window frame." },
+          "client it cuts per pixel at the window frame. What you get through the glass is "
+          "the cockpit's own effect - see VC glow - and not the geometry you see from "
+          "outside." },
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "THE TRAIL", NULL },
@@ -3659,15 +3841,15 @@ static const HelpItem HELP_REENTRY[] = {
 // --- TAB 3: ATMOS -----------------------------------------------------------
 static const HelpItem HELP_ATMOS[] = {
 { HK_H,   "WHAT THIS TAB IS", NULL },
-{ HK_P,   "Four effects that belong to the WORLD rather than to your ship or your body. Each "
+{ HK_P,   "Five effects that belong to the WORLD rather than to your ship or your body. Each "
           "has a TEST toggle, and they exist for the same reason: none of these is something "
-          "you can wait for on demand. A polar night, a total eclipse and a sunset over "
-          "broken cloud are not things you can schedule around a tuning session.", NULL },
-{ HK_P,   "SAVING IS SPLIT HERE. The eclipse is GLOBAL - it models your eye, and the same "
-          "pilot sits behind every canopy. The aurora and the lightning are PER BODY: what a "
-          "world's aurora IS belongs to the world. A world with no file of its own gets the "
-          "built-in defaults back rather than inheriting the last world's look, because "
-          "arriving somewhere new must not show you Jupiter's curtains.", NULL },
+          "you can wait for on demand. A polar night, a total eclipse, a sunset over broken "
+          "cloud and a rainstorm are not things you can schedule around a tuning session.", NULL },
+{ HK_P,   "SAVING IS SPLIT HERE. The eclipse, the god rays and the rain are GLOBAL. The "
+          "aurora and the lightning are PER BODY: what a world's aurora IS belongs to the "
+          "world. A world with no file of its own gets the built-in defaults back rather "
+          "than inheriting the last world's look, because arriving somewhere new must not "
+          "show you Jupiter's curtains.", NULL },
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "ECLIPSE", NULL },
@@ -3764,6 +3946,105 @@ static const HelpItem HELP_ATMOS[] = {
           "any other in ORO, and without the line every one of them reads as a fault." },
 { HK_P,   "An eclipse kills the shafts, which is correct - there is less beam left to "
           "scatter. It is the one place the two solar effects talk to each other.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "RAIN", NULL },
+{ HK_P,   "A storm you summon at the surface. The build-up ramps over ten seconds or so - "
+          "the light collapses to overcast, the first streaks fall, the ground soaks dark, "
+          "water stands in pools - and switching the pill OFF is INSTANT on purpose, so you "
+          "can A/B the wet world against the dry one. The ground then dries out over a "
+          "couple of minutes. External view, Earth only for now, and only below the "
+          "weather: everything here - including the wet ground and the hull glint - fades "
+          "out by about nine kilometres up, so a reentry begun with the pill still on gets "
+          "a clean dry hull in space.", NULL },
+{ HK_P,   "The overcast is not a screen filter. The storm light collapses the SUN at the "
+          "source and lifts the ambient, so shadows and the warm directional cast go with "
+          "it - the same light the puddles then reflect. Falling rain is a sheet between "
+          "you and the world in three parallax layers, which is where rain actually is; one "
+          "consequence accepted knowingly is that drops pass in front of vessels, because a "
+          "drop a metre from your eye really is in front of a ship fifty metres away.", NULL },
+{ HK_P,   "The deck overhead is ORO's own cloud layer: two textured decks at two "
+          "altitudes - a ceiling and a darker scud layer hanging under it - with real "
+          "parallax, vertical relief, and no repetition. And the storm carries its own "
+          "LIGHTNING: most events light a region of the deck from within, a share become "
+          "BOLTS to the ground off a baked atlas of sixteen real channels, and a rare "
+          "giant strikes far out, single and brilliant. Re-strikes flicker down the "
+          "IDENTICAL channel, some bolts hang with a continuing glow, and every flash "
+          "blinks a real light over the ship and the wet ground - sky, bolt and scene "
+          "agree because they are one event.", NULL },
+{ HK_ROW, "TEST", "The same storm as the pill, without enabling the effect - a quick look." },
+{ HK_ROW, "Gloom", "How dark and grey the world goes: the sun's collapse, the deck overhead "
+          "and the visibility loss all ride it." },
+{ HK_ROW, "Cloud detail", "The deck texture's detail notch - 0, 1, 2, 3. Zero is the plain "
+          "darkened sky with no cloud texture at all; each step up adds a layer of finer "
+          "billow filigree (256, 512, 1024 texels). The slider snaps to whole notches." },
+{ HK_ROW, "Lightning", "How often the storm discharges. 0 is none at all; 2 is very often. "
+          "Flashes only start once the storm is properly built - lightning belongs to a "
+          "real storm, not to the first drops." },
+{ HK_ROW, "Bolt bloom", "The radiance around a bolt's channel: glow taps stacking under "
+          "the crisp core. 0 is the bare filament; 2 wraps the channel in a storm-photo "
+          "blaze." },
+{ HK_ROW, "Density", "How many streaks are in the falling sheet." },
+{ HK_ROW, "Fall speed", "How fast they fall." },
+{ HK_ROW, "Streak len", "How long each streak draws." },
+{ HK_ROW, "Streak glow", "How brightly the streaks catch the light." },
+{ HK_ROW, "Slant (deg)", "Wind. Tilts the whole sheet up to fifteen degrees either way." },
+{ HK_ROW, "Splashes", "Rings where drops land, on ground and on water. Two fields - one "
+          "around the camera, one around the ship - so a chase view still sees the ground "
+          "fizzing where the eye actually looks." },
+{ HK_ROW, "Wet dark", "How far the wet ground darkens. 1 is the designed look; 2 is "
+          "near-black; standing water darkens further still." },
+{ HK_ROW, "Pool size", "How large the standing pools grow. Pools only START once the ground "
+          "is properly soaked - about seventy percent wet - because soil soaks first and "
+          "water stands later. Three pattern scales give sheets in one stretch and speckle "
+          "in the next, and the pools are PINNED TO THE GROUND: drive and they stay put, "
+          "new ones ahead, old ones behind." },
+{ HK_ROW, "Pool reach", "How far out pools stay visible before blending away - roughly "
+          "nine hundred metres at 1. The damp sheen carries on past them, so distant "
+          "ground still reads wet without the pattern marching to the horizon." },
+{ HK_ROW, "Grain / Grain size", "The broken-water texture INSIDE the pool reflections - "
+          "irregular matte patches torn through the mirror, static in the world like the "
+          "pools themselves. Grain is how deeply they dig (0 = uniform pools); Grain size "
+          "is how coarse the patches are." },
+{ HK_ROW, "Glint", "Raindrop sparkle on hulls - every vessel in the scene, not just yours. "
+          "It rides the SKY light, because a sparkle hung on the sun could not exist in "
+          "the weather that makes things wet." },
+{ HK_ROW, "Reflection", "The vessel image in the wet ground - a real mirrored render, so "
+          "the reflection is upside down at the contact points and geometrically correct, "
+          "concentrated in the pools. The grey sky in the pools is always there; this "
+          "slider adds the SHIPS." },
+{ HK_ROW, "Swim size / Swim rate", "The rain-pocked ripple on that reflection: how far the "
+          "image warps, and how fast it flickers. Size 0 is a dead-still mirror." },
+{ HK_ROW, "Water sheet", "An experiment kept for the curious: a reflective pool MESH under "
+          "the vessel using the client's own environment mapping. It reflects sky, sun and "
+          "OTHER ships but never its own carrier - a vessel is excluded from its own "
+          "environment map - which is why the Reflection slider above superseded it. "
+          "Leave it at 0 unless experimenting." },
+{ HK_ROW, "Rain sound", "The storm's sound: three rain loops (patter / steady / downpour) "
+          "crossfading as the storm builds, played through XRSound. This is the volume - "
+          "1 is the designed mix against Orbiter's other ambient sounds, 0 is silent. It "
+          "follows the storm's own gates, so it fades out above the weather. In the "
+          "virtual cockpit the storm drops to a muffled 45% and a fourth loop takes its "
+          "place: raindrops drumming on the hull itself. Needs XRSound.dll - absent, "
+          "the row does nothing and the rain stays visual only." },
+{ HK_ROW, "Thunder", "Every lightning flash sends its thunder, delayed by ITS OWN distance "
+          "at the speed of sound - six to twenty-six seconds after the light, which is "
+          "the realism, not a miss. Close bolts CRACK, in-cloud and distant flashes "
+          "rumble, the rare positive giant hits hardest, and inside the cockpit it all "
+          "arrives muffled through the hull. Nine real recordings (freesound.org, "
+          "credited in XRSound\\ORO\\README.txt); this is their volume, 0 = silent." },
+{ HK_ROW, "Test bolt / STRIKE", "The lightning test rig: each press plants the NEXT of "
+          "the sixteen atlas bolts directly on the focus vessel with a fixed, repeatable "
+          "flicker, cycling 1 to 16 - the readout names the one you are looking at. It "
+          "needs the storm running but ignores the Lightning rate, so the bolts can be "
+          "judged on demand. The crack follows the flash by the CAMERA's distance from "
+          "the strike - press it beside the ship for the whole bolt-then-thunder beat, "
+          "or from kilometres out for the delayed boom." },
+{ HK_ROW, "Rain", "Readout: the storm's build-up and how wet the ground is, or the honest "
+          "reason nothing is drawn - external only (and the virtual cockpit, which sees "
+          "the storm through its windows and stays dry inside), Earth only, above the "
+          "weather. Vessels with large interiors can seal them with an authored roof "
+          "mesh, Meshes\\ORO\\<class>_rainshield.msh - see the docs." },
 };
 
 // --- TAB 4: VC --------------------------------------------------------------
@@ -4332,7 +4613,8 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 			break;
 		case 3:  // ATMOSPHERIC
 			handled = ClickEclipse(hDlg, rc, x, dy) || ClickAurora(hDlg, rc, x, dy)
-			       || ClickLightning(hDlg, rc, x, dy) || ClickGodRays(hDlg, rc, x, dy);
+			       || ClickLightning(hDlg, rc, x, dy) || ClickGodRays(hDlg, rc, x, dy)
+		       || ClickRain(hDlg, rc, x, dy);
 			break;
 		case 4:  // VC
 			handled = ClickVCShadows(hDlg, rc, x, dy) || ClickCamShake(hDlg, rc, x, dy);
@@ -4392,6 +4674,8 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		else if (g_dragAurK  >= 0) *g_aurKnobs[g_dragAurK].value   = EnvKnobValueFromX(rc, x, g_aurKnobs[g_dragAurK].vmax);
 		else if (g_dragLtg   >= 0) *g_ltgRows[g_dragLtg].value     = TrackValueFromX(rc, x) * g_ltgRows[g_dragLtg].vmax;
 		else if (g_dragGry   >= 0) *g_gryRows[g_dragGry].value     = TrackValueFromX(rc, x) * g_gryRows[g_dragGry].vmax;
+		else if (g_dragRain  >= 0) *g_rainRows[g_dragRain].value   = g_rainRows[g_dragRain].vmin
+		         + TrackValueFromX(rc, x) * (g_rainRows[g_dragRain].vmax - g_rainRows[g_dragRain].vmin);
 		else if (g_dragVap   >= 0) *g_vapRows[g_dragVap].value     = TrackValueFromX(rc, x) * g_vapRows[g_dragVap].vmax;
 		else if (g_dragVapP  >= 0) g_fx.vapPos = EnvKnobValueFromX(rc, x, VAP_POS_MAX);
 		else if (g_dragVapBand >= 0) VapBandDrag(TrackValueFromX(rc, x));
@@ -4412,7 +4696,7 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		    || g_dragEnvK >= 0 || g_dragPlume >= 0 || g_dragPlmBand >= 0 || g_dragBgl >= 0
 		    || g_dragPrt >= 0 || g_dragPlas >= 0
 		    || g_dragEcl >= 0 || g_dragAur >= 0 || g_dragAurRib >= 0
-		    || g_dragAurK >= 0 || g_dragLtg >= 0 || g_dragGry >= 0 || g_dragVcs >= 0 || g_dragTol >= 0
+		    || g_dragAurK >= 0 || g_dragLtg >= 0 || g_dragGry >= 0 || g_dragRain >= 0 || g_dragVcs >= 0 || g_dragTol >= 0
 		    || g_dragVap >= 0 || g_dragVapP >= 0 || g_dragVapBand >= 0
 		    || g_dragCop >= 0 || g_dragBar >= 0) {
 			ClearDrags();

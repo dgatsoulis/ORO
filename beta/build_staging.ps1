@@ -15,24 +15,49 @@ $payload = @(
   # 1. the two DLLs
   @("Modules\Plugin\ORO.dll",                  "Modules\Plugin\ORO.dll"),
   @("Modules\Plugin\D3D9Client.dll",           "Modules\Plugin\D3D9Client.dll"),
-  # 2. the six deployed shaders (patched; must match the DLL)
+  # 2. the SEVEN deployed shaders (patched; must match the DLL). Mesh.fx joined
+  #    with patch (s)'s base-tile ground work - the 260823 audit caught it
+  #    missing from this list while already being load-bearing in the sim.
   @("Modules\D3D9Client\D3D9Client.fx",        "Modules\D3D9Client\D3D9Client.fx"),
   @("Modules\D3D9Client\Vessel.fx",            "Modules\D3D9Client\Vessel.fx"),
   @("Modules\D3D9Client\PBR.fx",               "Modules\D3D9Client\PBR.fx"),
   @("Modules\D3D9Client\Metalness.fx",         "Modules\D3D9Client\Metalness.fx"),
   @("Modules\D3D9Client\Sketchpad.fx",         "Modules\D3D9Client\Sketchpad.fx"),
   @("Modules\D3D9Client\NewPlanet.hlsl",       "Modules\D3D9Client\NewPlanet.hlsl"),
-  # 3. ORO's own runtime assets
+  @("Modules\D3D9Client\Mesh.fx",              "Modules\D3D9Client\Mesh.fx"),
+  # 3. ORO's own runtime assets. Sounds live under XRSound\ORO since 2026-08-23
+  #    (the Orbiter convention); README.txt is the freesound CREDIT LEDGER and
+  #    ships wherever the thunder wavs do - CC-BY requires it.
   @("Modules\ORO\banner.bmp",                  "Modules\ORO\banner.bmp"),
   @("Modules\ORO\orofx.hlsl",                  "Modules\ORO\orofx.hlsl"),
-  @("Modules\ORO\sounds\heartbeat.wav",        "Modules\ORO\sounds\heartbeat.wav"),
-  @("Modules\ORO\sounds\Induce_gloc.wav",      "Modules\ORO\sounds\Induce_gloc.wav"),
-  # 4. meshes and textures
+  @("XRSound\ORO\heartbeat.wav",               "XRSound\ORO\heartbeat.wav"),
+  @("XRSound\ORO\Induce_gloc.wav",             "XRSound\ORO\Induce_gloc.wav"),
+  @("XRSound\ORO\Rain_light.wav",              "XRSound\ORO\Rain_light.wav"),
+  @("XRSound\ORO\Rain_medium.wav",             "XRSound\ORO\Rain_medium.wav"),
+  @("XRSound\ORO\Rain_heavy.wav",              "XRSound\ORO\Rain_heavy.wav"),
+  @("XRSound\ORO\Rain_hull.wav",               "XRSound\ORO\Rain_hull.wav"),
+  @("XRSound\ORO\Thunder_close_1.wav",         "XRSound\ORO\Thunder_close_1.wav"),
+  @("XRSound\ORO\Thunder_close_2.wav",         "XRSound\ORO\Thunder_close_2.wav"),
+  @("XRSound\ORO\Thunder_close_3.wav",         "XRSound\ORO\Thunder_close_3.wav"),
+  @("XRSound\ORO\Thunder_mid_1.wav",           "XRSound\ORO\Thunder_mid_1.wav"),
+  @("XRSound\ORO\Thunder_mid_2.wav",           "XRSound\ORO\Thunder_mid_2.wav"),
+  @("XRSound\ORO\Thunder_mid_3.wav",           "XRSound\ORO\Thunder_mid_3.wav"),
+  @("XRSound\ORO\Thunder_far_1.wav",           "XRSound\ORO\Thunder_far_1.wav"),
+  @("XRSound\ORO\Thunder_far_2.wav",           "XRSound\ORO\Thunder_far_2.wav"),
+  @("XRSound\ORO\Thunder_far_3.wav",           "XRSound\ORO\Thunder_far_3.wav"),
+  @("XRSound\ORO\README.txt",                  "XRSound\ORO\README.txt"),
+  # 4. meshes and textures. The rain shields are HIS authored roofs (stock
+  #    classes only - the XR2's stays local, the XR2Ravenstar.cfg rule);
+  #    bolt_atlas.dds is the baked lightning-bolt atlas (derived work - the
+  #    raw Resource Boy pack NEVER ships, only this derivative).
   @("Meshes\ORO\DG-S.msh",                     "Meshes\ORO\DG-S.msh"),
   @("Meshes\ORO\DeltaGlider.msh",              "Meshes\ORO\DeltaGlider.msh"),
   @("Meshes\ORO\DG-S_bell.msh",                "Meshes\ORO\DG-S_bell.msh"),
   @("Meshes\ORO\DeltaGlider_bell.msh",         "Meshes\ORO\DeltaGlider_bell.msh"),
+  @("Meshes\ORO\DG-S_rainshield.msh",          "Meshes\ORO\DG-S_rainshield.msh"),
+  @("Meshes\ORO\DeltaGlider_rainshield.msh",   "Meshes\ORO\DeltaGlider_rainshield.msh"),
   @("Textures\ORO\bell_glow.dds",              "Textures\ORO\bell_glow.dds"),
+  @("Textures\ORO\bolt_atlas.dds",             "Textures\ORO\bolt_atlas.dds"),
   # 5. settings - his tuned look
   @("Config\ORO.cfg",                          "Config\ORO.cfg"),
   @("Config\ORO\Atlantis.cfg",                 "Config\ORO\Atlantis.cfg"),
@@ -54,6 +79,13 @@ function Put($srcFull, $dstFull) {
 }
 
 if (-not (Test-Path $OUT)) { New-Item -ItemType Directory -Path $OUT -Force | Out-Null }
+
+# Clean the payload + stock trees first: staging only ever ADDED files, so a
+# path REMOVED from the list above (the 260823 sound move) would linger from a
+# previous run and ship both layouts at once. Deliberate, after exactly that
+# nearly happened.
+if (Test-Path $PAY)         { Remove-Item $PAY -Recurse -Force }
+if (Test-Path "$OUT\stock") { Remove-Item "$OUT\stock" -Recurse -Force }
 
 $n = 0
 foreach ($p in $payload) { Put "$R\$($p[0])" "$PAY\$($p[1])"; $n++ }

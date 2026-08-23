@@ -32,7 +32,9 @@ namespace { void OroLogMemory(const char* when); }
 
 // XRSound sound IDs for this module - must be unique and < 10000 (XRSound reserves
 // 10000+ for its own default sounds). Heartbeat is one id; each INDUCE/RECOVER
-// scenario gets SND_SCEN_BASE + its index (see INDUCE_SEQ[]).
+// scenario gets SND_SCEN_BASE + its index (see INDUCE_SEQ[]). The RAIN loops own
+// 30..33 (SND_RAIN_BASE in OroModule.h - declared there because UpdateRainSound
+// lives in OroRain.cpp); the THUNDER set owns 40..48 (SND_THUNDER_BASE, same place).
 enum { SND_HEARTBEAT = 1, SND_SCEN_BASE = 10 };
 
 // ----------------------------------------------------------------------------
@@ -238,6 +240,126 @@ void OroModule::DrawLightningPoly(oapi::Sketchpad* pSkp)
 // as its siblings (invariant 3; UpdateVapour pads vapVtx), and the same patch-(g) depth
 // clip - which matters more here than anywhere else, because the cone WRAPS the hull and
 // its far half is genuinely behind the ship.
+// THE RAIN poly. Alpha-blended for the same reason the vapour cone is (invariant 25a):
+// water SCATTERS and occludes, and an additive layer can only ever brighten what is
+// behind it. Depth-clipped, so a drop behind the hull disappears per pixel instead of
+// painting the ship out - but note the client's depth buffer contains vessels and the
+// cockpit ONLY, so the GROUND cannot clip rain and the build does that by hand.
+void OroModule::DrawRainPoly(oapi::Sketchpad* pSkp)
+{
+	if ((rainVtxN <= 0 && gndVtxN <= 0 && ringCN <= 0 && ringVN <= 0 && deckN <= 0) || !pCore) return;
+
+	// TWO POLYS, ONE CEILING EACH (see RAIN_GND_TRI in OroModule.h): the 65535-vertex cap
+	// is per HPOLY, so the deck + ring fields and the streak sheet each get their own
+	// buffer - and drawing GND first is also the correct painter's order, since the
+	// streaks are the layer nearest the eye.
+	DWORD blend = (DWORD)oapi::Sketchpad::BlendState::ALPHABLEND;
+	if (depthClipOK) blend |= 0x100;
+	pSkp->SetBlendState((oapi::Sketchpad::BlendState)blend);
+
+	// the TEXTURED deck (patch l - the synthesized cloud cover); the Gouraud gndVtx
+	// block below is its no-(l) fallback and is empty whenever this one draws
+	if (deckN > 0 && hRainCloudTex) {
+		if (!hRainDeckPoly) {
+			static gcCore::texVtx zeroD[RAIN_GND_TRI * 3];   // zero-init: degenerate, alpha 0
+			hRainDeckPoly = pCore->CreateTrianglesTex(NULL, zeroD, NULL, RAIN_GND_TRI * 3, PF_TRIANGLES, hRainCloudTex);
+		}
+		if (hRainDeckPoly) {
+			pCore->CreateTrianglesTex(hRainDeckPoly, (const gcCore::texVtx*)deckVtx,
+			                          depthClipOK ? deckDepth : NULL, RAIN_GND_TRI * 3, PF_TRIANGLES, hRainCloudTex);
+			pSkp->DrawPoly(hRainDeckPoly);
+		}
+	}
+	if (gndVtxN > 0) {
+		if (!hRainGndPoly) {
+			static gcCore::clrVtx zeroG[RAIN_GND_TRI * 3];   // zero-init: degenerate, alpha 0
+			hRainGndPoly = pCore->CreateTriangles(NULL, zeroG, RAIN_GND_TRI * 3, PF_TRIANGLES);
+		}
+		if (hRainGndPoly) {
+			if (depthClipOK) pCore->CreateTrianglesDepth(hRainGndPoly, (const gcCore::clrVtx*)gndVtx, gndDepth, RAIN_GND_TRI * 3, PF_TRIANGLES);
+			else             pCore->CreateTriangles(hRainGndPoly, (const gcCore::clrVtx*)gndVtx, RAIN_GND_TRI * 3, PF_TRIANGLES);
+			pSkp->DrawPoly(hRainGndPoly);
+		}
+	}
+	// THE BOLTS (rain lightning part 2): additive textured quads - a bolt is light,
+	// so it takes the additive state the alpha polys around it do not
+	if (boltN > 0 && hBoltTex) {
+		if (!hRainBoltPoly) {
+			static gcCore::texVtx zeroB[RAIN_BOLT_TRI * 3];
+			hRainBoltPoly = pCore->CreateTrianglesTex(NULL, zeroB, NULL, RAIN_BOLT_TRI * 3, PF_TRIANGLES, hBoltTex);
+		}
+		if (hRainBoltPoly) {
+			pCore->CreateTrianglesTex(hRainBoltPoly, (const gcCore::texVtx*)boltVtx,
+			                          depthClipOK ? boltDepth : NULL, RAIN_BOLT_TRI * 3, PF_TRIANGLES, hBoltTex);
+			DWORD bb = padAdditive ? 0x5 : (DWORD)oapi::Sketchpad::BlendState::ALPHABLEND;
+			if (depthClipOK) bb |= 0x100;
+			pSkp->SetBlendState((oapi::Sketchpad::BlendState)bb);
+			pSkp->DrawPoly(hRainBoltPoly);
+			pSkp->SetBlendState((oapi::Sketchpad::BlendState)blend);   // back to the alpha state
+		}
+	}
+	// the two splash-ring polys (one per field - the more-groups trick): between the
+	// deck and the streak sheet in painter's order
+	if (ringCN > 0) {
+		if (!hRainRingCPoly) {
+			static gcCore::clrVtx zeroRC[RAIN_RINGP_TRI * 3];
+			hRainRingCPoly = pCore->CreateTriangles(NULL, zeroRC, RAIN_RINGP_TRI * 3, PF_TRIANGLES);
+		}
+		if (hRainRingCPoly) {
+			if (depthClipOK) pCore->CreateTrianglesDepth(hRainRingCPoly, (const gcCore::clrVtx*)ringVtxC, ringDepC, RAIN_RINGP_TRI * 3, PF_TRIANGLES);
+			else             pCore->CreateTriangles(hRainRingCPoly, (const gcCore::clrVtx*)ringVtxC, RAIN_RINGP_TRI * 3, PF_TRIANGLES);
+			pSkp->DrawPoly(hRainRingCPoly);
+		}
+	}
+	if (ringVN > 0) {
+		if (!hRainRingVPoly) {
+			static gcCore::clrVtx zeroRV[RAIN_RINGP_TRI * 3];
+			hRainRingVPoly = pCore->CreateTriangles(NULL, zeroRV, RAIN_RINGP_TRI * 3, PF_TRIANGLES);
+		}
+		if (hRainRingVPoly) {
+			if (depthClipOK) pCore->CreateTrianglesDepth(hRainRingVPoly, (const gcCore::clrVtx*)ringVtxV, ringDepV, RAIN_RINGP_TRI * 3, PF_TRIANGLES);
+			else             pCore->CreateTriangles(hRainRingVPoly, (const gcCore::clrVtx*)ringVtxV, RAIN_RINGP_TRI * 3, PF_TRIANGLES);
+			pSkp->DrawPoly(hRainRingVPoly);
+		}
+	}
+	if (rainVtxN > 0) {
+		if (!hRainPoly) {
+			static gcCore::clrVtx zero[RAIN_MAX_TRI * 3];    // zero-init: degenerate, alpha 0
+			hRainPoly = pCore->CreateTriangles(NULL, zero, RAIN_MAX_TRI * 3, PF_TRIANGLES);
+		}
+		if (hRainPoly) {
+			if (depthClipOK) pCore->CreateTrianglesDepth(hRainPoly, (const gcCore::clrVtx*)rainVtx, rainDepth, RAIN_MAX_TRI * 3, PF_TRIANGLES);
+			else             pCore->CreateTriangles(hRainPoly, (const gcCore::clrVtx*)rainVtx, RAIN_MAX_TRI * 3, PF_TRIANGLES);
+			pSkp->DrawPoly(hRainPoly);
+		}
+	}
+	pSkp->SetBlendState(oapi::Sketchpad::BlendState::ALPHABLEND);        // leave the pad as found
+}
+
+// THE GLOOM resample - the overcast. Self-gating one-liner at its call site, exactly like
+// DrawEclipsePass, and it runs immediately after it for the same reason: both decide what
+// the LIGHT is doing before anything is drawn into it. Was EXTERNAL only until 2026-08-23;
+// with the rain visible from the VC (rainVC) the internal call site activates too, and the
+// mild frame-wide desaturation deliberately covers the panel as well - the eclipse's eye
+// already treats the whole frame, and a cockpit under a storm ceiling IS greyer. The heavy
+// lifting stays with the client-side storm light (patch s part 2), which dims only the SUN.
+void OroModule::DrawGloomPass()
+{
+	if (rainIntensityLive <= 0.002f || !ipiReady || !pCore || !hFrameTex || !pIPIGloom) return;
+	// The SLIDER is read HERE, in the render path, not in clbkPreStep - which does not run
+	// while paused, so folding it in on the main thread made the control dead in exactly
+	// the state the look gets judged in (invariant 1).
+	float gs = g_fx.rainGloom; if (gs < 0.0f) gs = 0.0f; if (gs > 2.0f) gs = 2.0f;
+	const float gl = rainIntensityLive * gs * 0.5f;
+	if (gl <= 0.002f) return;
+	SURFHANDLE hBB = pCore->GetBackBufferHandle();
+	if (!hBB || !pCore->CopyResource(hFrameTex, hBB)) return;
+	pIPIGloom->SetTexture("tSrc", hFrameTex, IPF_CLAMP_U | IPF_CLAMP_V | IPF_LINEAR);
+	pIPIGloom->SetOutput(0, hBB);
+	pIPIGloom->SetFloat("fGloom", gl > 1.0f ? 1.0f : gl);
+	pIPIGloom->Execute((DWORD)0, true, gcIPInterface::Rect);
+}
+
 void OroModule::DrawVapourPoly(oapi::Sketchpad* pSkp)
 {
 	if (vapVtxN <= 0 || !pCore) return;
@@ -505,6 +627,32 @@ namespace {
 		// so it lives in the class file (below) - the same split the shimmer uses. Test is
 		// transient and never written: a saved TEST would hang a permanent shroud on a
 		// parked ship at the next session start.
+		// RAIN - the runway slice. GLOBAL for v1: one world, one storm. The pill only;
+		// rainTest is deliberately NOT saved, for the same reason CANCEL THRUST is not
+		// (23i) - a test rig that comes back on at load reads as a bug in the weather.
+		{ "RainOn",           &g_fx.rainEnabled,      ST_B },
+		{ "RainGloom",        &g_fx.rainGloom,        ST_F },
+		{ "RainDensity",      &g_fx.rainDensity,      ST_F },
+		{ "RainStreak",       &g_fx.rainStreak,       ST_F },
+		{ "RainStreakGlow",   &g_fx.rainStreakA,      ST_F },
+		{ "RainSpeed",        &g_fx.rainSpeed,        ST_F },
+		{ "RainAngle",        &g_fx.rainAngle,        ST_F },
+		{ "RainPuddle",       &g_fx.rainPuddle,       ST_F },
+		{ "RainWetDark",      &g_fx.rainWetDark,      ST_F },
+		{ "RainGlint",        &g_fx.rainGlint,        ST_F },
+		{ "RainRefl",         &g_fx.rainRefl,         ST_F },
+		{ "RainSwimAmp",      &g_fx.rainSwimAmp,      ST_F },
+		{ "RainSwimRate",     &g_fx.rainSwimRate,     ST_F },
+		{ "RainPoolSize",     &g_fx.rainPoolSize,     ST_F },
+		{ "RainPoolReach",    &g_fx.rainPoolReach,    ST_F },
+		{ "RainCloudLvl",     &g_fx.rainCloudLvl,     ST_F },
+		{ "RainGrainOp",      &g_fx.rainGrainOp,      ST_F },
+		{ "RainGrainSize",    &g_fx.rainGrainSize,    ST_F },
+		{ "RainLtg",          &g_fx.rainLtg,          ST_F },
+		{ "RainBoltBloom",    &g_fx.rainBoltBloom,    ST_F },
+		{ "RainSheet",        &g_fx.rainSheet,        ST_F },
+		{ "RainSound",        &g_fx.rainSoundVol,     ST_F },
+		{ "RainThunder",      &g_fx.rainThunder,      ST_F },
 		{ "VapourOn",         &g_fx.vapEnabled,       ST_B },
 		// pilot / felt-G model
 		{ "PhysicsMode",      &g_fx.physicsMode,      ST_B },
@@ -572,6 +720,8 @@ namespace {
 		{ "PlasWander",       &g_fx.plasWander,       ST_F },
 		{ "PlasChurn",        &g_fx.plasChurn,        ST_F },   // how fast the wake lives
 		{ "PlasFinRake",      &g_fx.plasFinRake,      ST_F },   // ... and how far it splays
+		{ "PlasVCGlow",       &g_fx.plasVCGlow,       ST_F },   // the cockpit sheath
+		{ "PlasCabinWash",    &g_fx.plasCabin,        ST_F },   // where the cockpit glow lands
 		{ "PlasEdgeLight",    &g_fx.plasComa,         ST_F },
 		{ "PlasSpark",        &g_fx.plasSpark,        ST_F },
 		{ "PlasSparkLife",    &g_fx.plasSparkLife,    ST_F },
@@ -1399,6 +1549,45 @@ OroModule::~OroModule()
 		pCore->DeletePoly(hPlumeDkPoly);
 		hPlumeDkPoly = NULL;
 	}
+	if (pCore && hRainPoly) {
+		pCore->DeletePoly(hRainPoly);
+		hRainPoly = NULL;
+	}
+	if (pCore && hRainGndPoly) {
+		pCore->DeletePoly(hRainGndPoly);
+		hRainGndPoly = NULL;
+	}
+	if (pCore && hRainRingCPoly) {
+		pCore->DeletePoly(hRainRingCPoly);
+		hRainRingCPoly = NULL;
+	}
+	if (pCore && hRainRingVPoly) {
+		pCore->DeletePoly(hRainRingVPoly);
+		hRainRingVPoly = NULL;
+	}
+	if (pCore && hRainDeckPoly) {
+		pCore->DeletePoly(hRainDeckPoly);
+		hRainDeckPoly = NULL;
+	}
+	if (pCore && hRainBoltPoly) {
+		pCore->DeletePoly(hRainBoltPoly);
+		hRainBoltPoly = NULL;
+	}
+	// patch (s): give the client its dry ground back. A world left wet by an addon that
+	// is no longer running is a bug the user cannot even attribute to us.
+	if (pCore && pCore->CanSetSurfaceWetness()) { pCore->SetSurfaceWetness(0.0f); wetPushed = -1.0f; }
+	if (pCore && pCore->CanSetStormLight())     { pCore->SetStormLight(0.0f);     stormPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetDarkness())    { pCore->SetWetDarkness(1.0f);    wetDarkPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetGlint())       { pCore->SetWetGlint(1.0f);       glintPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetReflection())  { pCore->SetWetReflection(1.0f, 1.0f, 1.0f, 1.0f, 1.0f);  reflPushed = -1.0f; swimAmpPushed = -1.0f; swimRatePushed = -1.0f; poolSizePushed = -1.0f; poolReachPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetGrain())       { pCore->SetWetGrain(1.0f, 1.0f);  grainOpPushed = -1.0f; grainSizePushed = -1.0f; }
+	if (rainLtgLight && rainLtgLightV && oapiIsVessel(rainLtgLightV)) {
+		VESSEL* lv = oapiGetVesselInterface(rainLtgLightV);
+		if (lv) lv->DelLightEmitter(rainLtgLight);      // invariant 14: hand it back
+	}
+	rainLtgLight = NULL; rainLtgLightV = NULL; rainLtgLI = 0.0;
+	ReleaseSheet();
+	if (hSheetTmpl) { oapiDeleteMesh(hSheetTmpl); hSheetTmpl = NULL; }   // 23(m): dies with the session
 	if (pCore && hVapourPoly) {
 		pCore->DeletePoly(hVapourPoly);
 		hVapourPoly = NULL;
@@ -1419,10 +1608,15 @@ OroModule::~OroModule()
 	if (pCore && pIPIPlasma) { pCore->ReleaseIPInterface(pIPIPlasma); pIPIPlasma = nullptr; }
 	if (pCore && pIPIEclipse) { pCore->ReleaseIPInterface(pIPIEclipse); pIPIEclipse = nullptr; }
 	if (pCore && pIPIGodRay) { pCore->ReleaseIPInterface(pIPIGodRay); pIPIGodRay = nullptr; }
+	if (pCore && pIPIGloom)  { pCore->ReleaseIPInterface(pIPIGloom);  pIPIGloom  = nullptr; }
 	if (hFrameTex)         { oapiDestroySurface(hFrameTex); hFrameTex = NULL; }
 	if (hBlurTex)          { oapiDestroySurface(hBlurTex);  hBlurTex  = NULL; }
 	if (hLtgAtlas)         { oapiDestroySurface(hLtgAtlas); hLtgAtlas = NULL; }
 	ltgTexMode = false; ltgTexTried = false;
+	if (hRainCloudTex)     { oapiDestroySurface(hRainCloudTex); hRainCloudTex = NULL; }
+	rainCloudBuilt = -1; rainCloudN = 0;
+	if (hBoltTex)          { oapiReleaseTexture(hBoltTex); hBoltTex = NULL; }
+	boltTexTried = false;
 
 	// Defensive: normally released in clbkSimulationEnd; guard teardown paths that skip it.
 	ReleaseStockExhaust();
@@ -1449,6 +1643,8 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	// end, so a previous crash or a forced exit cannot leave a stale handle armed for this
 	// run. Reusing one was the reload CTD's access-violation face; see OroBell_Reset.
 	OroBell_Reset();
+	OroRain_ShieldReset();   // same rule: re-probe the shield mesh next storm (he
+	                         // iterates on the file between runs)
 	pCore = gcGetCoreInterface();
 	if (!pCore) {
 		oapiWriteLogV("ORO: D3D9Client interface NOT found - effects disabled (is D3D9Client the active graphics client?).");
@@ -1491,6 +1687,12 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		              vcShadowSupported ? "available" : "NOT available");
 		oapiWriteLogV("ORO: stock exhaust suppression (patch n) %s.",
 		              g_stockExSupported ? "available" : "NOT available");
+		oapiWriteLogV("ORO: surface wetness (patch s) %s.",
+		              pCore->CanSetSurfaceWetness() ? "available - rain can wet the ground"
+		                                            : "NOT available - rain falls on dry ground");
+		oapiWriteLogV("ORO: storm light (patch s part 2) %s.",
+		              pCore->CanSetStormLight() ? "available - overcast collapses the sun"
+		                                        : "NOT available - storms stay sunlit");
 		oapiWriteLogV("ORO: additive sketchpad blend (patch d, probed by binding) %s; gcAPIVer reads %u (diagnostic only, known-broken).",
 		              padAdditive ? "available" : "NOT available (plasma will alpha-blend)", specs.gcAPIVer);
 	}
@@ -1616,22 +1818,64 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	// defers the actual file read to the first PlayWav - and returns false if the file is
 	// missing, so a not-yet-sourced wav is a soft "no sound", not an error. Module sounds
 	// must use PlaybackType::Global (XRSound.h); we do our own cockpit/arm gating.
+	// SOUNDS LIVE IN XRSound\ORO\ (his call, 2026-08-23): the Orbiter convention -
+	// textures in Textures\, meshes in Meshes\, sounds under XRSound\<addon>\, exactly
+	// where ChessMFD and CrewMFD put theirs. (They lived in Modules\ORO\sounds\ before.)
 	if (!pXRSound) pXRSound = XRSound::CreateInstance("ORO");
+	rainSndLoaded = false;   // re-proven every session, never inherited
 	if (pXRSound && pXRSound->IsPresent()) {
 		oapiWriteLogV("ORO: XRSound %.2f connected.", pXRSound->GetVersion());
-		if (!pXRSound->LoadWav(SND_HEARTBEAT, "Modules\\ORO\\sounds\\heartbeat.wav", XRSound::PlaybackType::Global))
-			oapiWriteLogV("ORO: heartbeat.wav not found - drop a WAV at Modules\\ORO\\sounds\\heartbeat.wav (heartbeat sound stays off until then).");
+		if (!pXRSound->LoadWav(SND_HEARTBEAT, "XRSound\\ORO\\heartbeat.wav", XRSound::PlaybackType::Global))
+			oapiWriteLogV("ORO: heartbeat.wav not found - drop a WAV at XRSound\\ORO\\heartbeat.wav (heartbeat sound stays off until then).");
 		// Scenario clips (Induce_*/Recover_*): one per INDUCE_SEQ entry, id SND_SCEN_BASE + i.
 		// Missing files are fine - that button just runs silent; the user adds them over time.
 		for (int i = 0; i < NSCEN; i++) {
 			char path[MAX_PATH];
-			sprintf_s(path, "Modules\\ORO\\sounds\\%s", INDUCE_SEQ[i].wav);
+			sprintf_s(path, "XRSound\\ORO\\%s", INDUCE_SEQ[i].wav);
 			if (!pXRSound->LoadWav(SND_SCEN_BASE + i, path, XRSound::PlaybackType::Global))
 				oapiWriteLogV("ORO: scenario clip %s not found - that button runs silent.", INDUCE_SEQ[i].wav);
+		}
+		// The RAIN loops (tools/raingen.py). All-or-nothing: a crossfade missing one
+		// tier would leave a silent hole in the middle of the envelope, so one missing
+		// file disables the rain sound rather than degrading it confusingly. The
+		// fourth is the interior hull-tap loop (2026-08-23) - generated by the same
+		// tool, shipped with its siblings.
+		static const char* RAIN_WAVS[] = { "Rain_light.wav", "Rain_medium.wav", "Rain_heavy.wav", "Rain_hull.wav" };
+		rainSndLoaded = true;
+		for (int i = 0; i < SND_RAIN_N; i++) {
+			char path[MAX_PATH];
+			sprintf_s(path, "XRSound\\ORO\\%s", RAIN_WAVS[i]);
+			if (!pXRSound->LoadWav(SND_RAIN_BASE + i, path, XRSound::PlaybackType::Global)) {
+				oapiWriteLogV("ORO: %s not found - rain sound disabled (visuals unaffected).", RAIN_WAVS[i]);
+				rainSndLoaded = false;
+			}
+		}
+		if (rainSndLoaded) oapiWriteLogV("ORO: rain sound loops loaded (3 tiers).");
+		// The THUNDER set (sourced from freesound - the credit ledger is
+		// XRSound\ORO\README.txt; leveled by tools/thunderprep.py). Per-file
+		// tolerant: a missing variant narrows the pick, an empty class skips.
+		{
+			static const char* THUN_CLS[] = { "close", "mid", "far" };
+			int nThun = 0;
+			for (int i = 0; i < THUN_FILES; i++) {
+				char path[MAX_PATH];
+				sprintf_s(path, "XRSound\\ORO\\Thunder_%s_%d.wav", THUN_CLS[i / 3], (i % 3) + 1);
+				thunLoaded[i] = pXRSound->LoadWav(SND_THUNDER_BASE + i, path, XRSound::PlaybackType::Global);
+				if (thunLoaded[i]) nThun++;
+			}
+			oapiWriteLogV("ORO: thunder set - %d of %d files loaded.", nThun, (int)THUN_FILES);
 		}
 	} else {
 		oapiWriteLogV("ORO: XRSound not present - sounds disabled (visuals unaffected).");
 	}
+	// Fresh session, fresh mixer: no loop is playing yet, whatever a previous
+	// session's state said (the 23(m) sweep - state reset belongs at START).
+	for (int i = 0; i < SND_RAIN_N; i++) {
+		rainSndLvl[i] = 0.0f; rainSndOn[i] = false; rainSndPushed[i] = 0.0f;
+	}
+	for (int q = 0; q < THUN_Q; q++) thunQ[q].vol = 0.0f;
+	thunPrimed = false;
+	thunLastStrikeT0 = boltTestT0;   // whatever the stamp holds, it is not a NEW press
 }
 
 void OroModule::clbkSimulationEnd()
@@ -1675,6 +1919,8 @@ void OroModule::clbkSimulationEnd()
 			pXRSound->SetPaused(SND_SCEN_BASE + i, false);   // never leave a voice parked paused
 			pXRSound->StopWav(SND_SCEN_BASE + i);
 		}
+		for (int i = 0; i < SND_RAIN_N; i++) pXRSound->StopWav(SND_RAIN_BASE + i);
+		for (int i = 0; i < THUN_FILES; i++) pXRSound->StopWav(SND_THUNDER_BASE + i);
 		delete pXRSound; pXRSound = nullptr;
 	}
 	seqSoundPlaying = false;
@@ -1733,6 +1979,20 @@ void OroModule::ReleaseSceneOwnedBorrows(bool fromShutdownProc)
 	}
 	if (hLtgAtlas) { oapiDestroySurface(hLtgAtlas); hLtgAtlas = NULL; }
 	ltgTexMode = false; ltgTexTried = false;   // re-probed + recreated next session
+	// the rain's cloud-deck texture: same shape exactly - its POLY holds it bound,
+	// so the poly goes first (23l's dependency ordering, third instance)
+	if (pCore && hRainDeckPoly) {
+		pCore->DeletePoly(hRainDeckPoly);
+		hRainDeckPoly = NULL;
+	}
+	if (pCore && hRainBoltPoly) {
+		pCore->DeletePoly(hRainBoltPoly);
+		hRainBoltPoly = NULL;
+	}
+	if (hRainCloudTex) { oapiDestroySurface(hRainCloudTex); hRainCloudTex = NULL; }
+	rainCloudBuilt = -1; rainCloudN = 0;       // recreated next session
+	if (hBoltTex) { oapiReleaseTexture(hBoltTex); hBoltTex = NULL; }
+	boltTexTried = false;
 	ReleaseParticleTex();                      // ... and it points at nothing now
 
 	// THE CAPTURE PAIR, moved here 2026-08-12 for the same reason. Fixing the first two
@@ -1792,6 +2052,45 @@ void OroModule::ReleaseDeviceResources()
 		pCore->DeletePoly(hPlumeDkPoly);
 		hPlumeDkPoly = NULL;
 	}
+	if (pCore && hRainPoly) {
+		pCore->DeletePoly(hRainPoly);
+		hRainPoly = NULL;
+	}
+	if (pCore && hRainGndPoly) {
+		pCore->DeletePoly(hRainGndPoly);
+		hRainGndPoly = NULL;
+	}
+	if (pCore && hRainRingCPoly) {
+		pCore->DeletePoly(hRainRingCPoly);
+		hRainRingCPoly = NULL;
+	}
+	if (pCore && hRainRingVPoly) {
+		pCore->DeletePoly(hRainRingVPoly);
+		hRainRingVPoly = NULL;
+	}
+	if (pCore && hRainDeckPoly) {
+		pCore->DeletePoly(hRainDeckPoly);
+		hRainDeckPoly = NULL;
+	}
+	if (pCore && hRainBoltPoly) {
+		pCore->DeletePoly(hRainBoltPoly);
+		hRainBoltPoly = NULL;
+	}
+	// patch (s): give the client its dry ground back. A world left wet by an addon that
+	// is no longer running is a bug the user cannot even attribute to us.
+	if (pCore && pCore->CanSetSurfaceWetness()) { pCore->SetSurfaceWetness(0.0f); wetPushed = -1.0f; }
+	if (pCore && pCore->CanSetStormLight())     { pCore->SetStormLight(0.0f);     stormPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetDarkness())    { pCore->SetWetDarkness(1.0f);    wetDarkPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetGlint())       { pCore->SetWetGlint(1.0f);       glintPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetReflection())  { pCore->SetWetReflection(1.0f, 1.0f, 1.0f, 1.0f, 1.0f);  reflPushed = -1.0f; swimAmpPushed = -1.0f; swimRatePushed = -1.0f; poolSizePushed = -1.0f; poolReachPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetGrain())       { pCore->SetWetGrain(1.0f, 1.0f);  grainOpPushed = -1.0f; grainSizePushed = -1.0f; }
+	if (rainLtgLight && rainLtgLightV && oapiIsVessel(rainLtgLightV)) {
+		VESSEL* lv = oapiGetVesselInterface(rainLtgLightV);
+		if (lv) lv->DelLightEmitter(rainLtgLight);      // invariant 14: hand it back
+	}
+	rainLtgLight = NULL; rainLtgLightV = NULL; rainLtgLI = 0.0;
+	ReleaseSheet();
+	if (hSheetTmpl) { oapiDeleteMesh(hSheetTmpl); hSheetTmpl = NULL; }   // 23(m): dies with the session
 	if (pCore && hVapourPoly) {
 		pCore->DeletePoly(hVapourPoly);
 		hVapourPoly = NULL;
@@ -1814,10 +2113,15 @@ void OroModule::ReleaseDeviceResources()
 	if (pCore && pIPIPlasma) { pCore->ReleaseIPInterface(pIPIPlasma); pIPIPlasma = nullptr; }
 	if (pCore && pIPIEclipse) { pCore->ReleaseIPInterface(pIPIEclipse); pIPIEclipse = nullptr; }
 	if (pCore && pIPIGodRay) { pCore->ReleaseIPInterface(pIPIGodRay); pIPIGodRay = nullptr; }
+	if (pCore && pIPIGloom)  { pCore->ReleaseIPInterface(pIPIGloom);  pIPIGloom  = nullptr; }
 	if (hFrameTex)         { oapiDestroySurface(hFrameTex); hFrameTex = NULL; }
 	if (hBlurTex)          { oapiDestroySurface(hBlurTex);  hBlurTex  = NULL; }
 	if (hLtgAtlas)         { oapiDestroySurface(hLtgAtlas); hLtgAtlas = NULL; }
 	ltgTexMode = false; ltgTexTried = false;   // re-probed + recreated next session
+	if (hRainCloudTex)     { oapiDestroySurface(hRainCloudTex); hRainCloudTex = NULL; }
+	rainCloudBuilt = -1; rainCloudN = 0;
+	if (hBoltTex)          { oapiReleaseTexture(hBoltTex); hBoltTex = NULL; }
+	boltTexTried = false;
 	texW = texH = 0;
 	ipiTried = false;
 	ipiReady = false;
@@ -1880,6 +2184,19 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	// overlays would sit fully inside the glow with nothing reading as "outside").
 	vcGate = g_fx.reentryVC && oapiCameraInternal()
 	      && (oapiCockpitMode() == COCKPIT_VIRTUAL);
+
+	// THE RAIN'S VC GATE (2026-08-23, his ask: "just to be able to see the rain from
+	// the VC"). Same shape as the plasma's crack in the wall, VIRTUAL cockpit only
+	// (2D panels and the glass cockpit are flat overlays - the plasma's reasoning
+	// holds unchanged) - but no dialog toggle: like the aurora and the lightning
+	// through the windows, it simply follows the view. ⚠️ depthClipOK is EMBEDDED:
+	// the whole trick is patch (g) cutting every streak at the window frame per
+	// pixel (the scene depth includes the cockpit - the aurora's mechanism), and
+	// without real depth the VC must have NO rain rather than rain painted over
+	// the cabin. Opening this gate also opens s_gateF in the VC, so the client
+	// pushes (wet ground, storm light) and the sounds come inside with it.
+	rainVC = oapiCameraInternal() && (oapiCockpitMode() == COCKPIT_VIRTUAL)
+	      && depthClipOK;
 
 	// Viewport size for the render pass (tunnel geometry) - cached HERE because the
 	// render callback makes no oapi calls by policy.
@@ -2114,6 +2431,16 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	// FIRST - a cloud occludes what is behind it, so it must be laid down before the
 	// additive layers add light on top (graveyard G11's shelved recipe, invariant 25).
 	UpdateVapour();
+	UpdateRain();
+	PushSurfaceWet();          // patch (s) - client state, pushed on change (invariant 18)
+	UpdateRainSound();         // the loop crossfade rides the envelope just published
+	UpdateThunder();           // flash events -> delayed one-shots (dist/340 s)
+	UpdateRainFlashLight();    // rain lightning's borrowed scene light - unconditional,
+	                           //   so every gate failure RETURNS the borrow (inv. 14)
+	UpdateSheet();             // the water sheet (his design) - called UNCONDITIONALLY,
+	                           //   because its own release logic must run when the rain
+	                           //   gates fail (a sheet that stays borrowed after the pill
+	                           //   goes off is a leak, not an effect)
 
 	if (ipiReady && (eclActive ||
 	                 (g_fx.greyoutEnabled    && g_fx.greyout    > 0.001f) ||
@@ -2213,6 +2540,13 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 
 void OroModule::clbkDeleteVessel(OBJHANDLE hVessel)
 {
+	// the rain-lightning light rides the focus vessel; if that vessel dies, return
+	// the borrow while the handle is still valid (the callback precedes destruction)
+	if (hVessel == rainLtgLightV && rainLtgLight) {
+		VESSEL* lv = oapiGetVesselInterface(hVessel);
+		if (lv) lv->DelLightEmitter(rainLtgLight);
+		rainLtgLight = NULL; rainLtgLightV = NULL; rainLtgLI = 0.0;
+	}
 	// Mandatory: we may be holding a LightEmitter* belonging to this vessel and the handle
 	// dies the moment we return. See OroReentry.cpp.
 	ReentryForget(hVessel);
@@ -2274,8 +2608,9 @@ void OroModule::EnsureIPI()
 	pIPIPlasma  = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSPlasma", NULL, NULL);
 	pIPIEclipse = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSEclipse", NULL, NULL);
 	pIPIGodRay  = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSGodRay", NULL, NULL);
+	pIPIGloom   = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSGloom",  NULL, NULL);
 
-	oapiWriteLogV("ORO: premium IPI pipeline ready - grey-out %s, blur %s, aberration %s, swim %s, tilt %s, shimmer %s, plasma %s, eclipse %s, god rays %s.",
+	oapiWriteLogV("ORO: premium IPI pipeline ready - grey-out %s, blur %s, aberration %s, swim %s, tilt %s, shimmer %s, plasma %s, eclipse %s, god rays %s, gloom %s.",
 	              pIPIGrey   ? "live" : "FAILED (shader compile?)",
 	              pIPIBlur   ? "live" : "FAILED (shader compile?)",
 	              pIPIChroma ? "live" : "FAILED (shader compile?)",
@@ -2284,7 +2619,8 @@ void OroModule::EnsureIPI()
 	              pIPIShimmer ? "live" : "FAILED (shader compile?)",
 	              pIPIPlasma ? "live" : "FAILED (shader compile?)",
 	              pIPIEclipse ? "live" : "FAILED (shader compile?)",
-	              pIPIGodRay ? "live" : "FAILED (shader compile?)");
+	              pIPIGodRay ? "live" : "FAILED (shader compile?)",
+	              pIPIGloom  ? "live" : "FAILED (shader compile?)");
 }
 
 // ----------------------------------------------------------------------------
@@ -2788,9 +3124,24 @@ void OroModule::DrawPreResolve(oapi::Sketchpad* pSkp)
 		BuildVapourGeometry();     // render-path since 2026-08-15 (the pause fix)
 		if (vapActive) DrawVapourPoly(pSkp);
 	}
+	// RAIN - alpha-blended, so it goes with the cone and before every additive layer
+	// below. EXTERNAL, and since 2026-08-23 the VIRTUAL COCKPIT too (his ask): in the
+	// VC the patch-(g) clip cuts every streak, splash and bolt at the window frame
+	// per pixel - the aurora's mechanism, the scene depth includes the cockpit.
+	// rainVC embeds depthClipOK, so a depthless client keeps the VC dry rather than
+	// painting drops over the cabin.
+	if (extGate || rainVC) {
+		BuildRainGeometry();
+		if (rainActive) DrawRainPoly(pSkp);
+	}
 	if (extGate || vcGate) {
 		ProjectTrail();
-		BuildPlasmaGeometry();     // render-path since 2026-08-15 (the pause fix)
+		// TWO VIEWPOINTS, TWO TECHNIQUES (2026-08-20). The geometric draw list is built
+		// from a point field ON THE SKIN and starves once the camera is inside the hull
+		// (measured: 49/417 points, 56 triangles), which is what made the cockpit look
+		// faceted. Inside, the honest thing to draw is the luminous sheath a pilot
+		// actually sees - see BuildVCGlow. External is untouched.
+		if (vcGate) BuildVCGlow(); else BuildPlasmaGeometry();
 		DrawTrailPoly(pSkp, /*depthClip=*/true);
 		DrawPlasmaPoly(pSkp, /*depthClip=*/true);
 	}
@@ -2836,6 +3187,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 	if (extGate) {
 		// ECLIPSE first of all - it sets the light the rest of the frame is seen by.
 		DrawEclipsePass();
+		DrawGloomPass();   // the overcast, before anything is drawn into the frame
 
 		// GOD RAYS second: still world illumination, but they ADD light to the frame
 		// the eye has just decided the brightness of, so they must follow the eclipse
@@ -2928,9 +3280,15 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 	// patch (g) depthClipOK is false and this degrades to exactly the old overlay.
 	// FALLBACK SLOT since the Firefly rework, same rule as the external branch: a
 	// patch-(i) client draws the VC plasma in DrawPreResolve instead.
+	// The RAIN's fallback rides the same condition, alpha FIRST (G11's order):
+	// on a patch-(i) client both drew in DrawPreResolve already.
+	if (rainVC && !preResolveLive) {
+		BuildRainGeometry();
+		if (rainActive) DrawRainPoly(pSkp);
+	}
 	if (vcGate && !preResolveLive) {
 		ProjectTrail();
-		BuildPlasmaGeometry();     // render-path since 2026-08-15 (the pause fix)
+		BuildVCGlow();             // the cockpit's own technique - see the pre-resolve slot
 		DrawTrailPoly(pSkp, /*depthClip=*/true);
 		DrawPlasmaPoly(pSkp, /*depthClip=*/true);
 	}
@@ -2967,6 +3325,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		// same kind of thing (world content), and a reentry inside a shadow is not a
 		// coincidence worth contorting the order for.
 		DrawEclipsePass();
+		DrawGloomPass();   // the overcast, before anything is drawn into the frame
 
 		// GOD RAYS - world light too, and they come through the window like anything
 		// else out there, so the physiological stack below treats them as scenery. After
@@ -3068,6 +3427,16 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 				pIPIPlasma->SetTexture("tSrc", hFrameTex, IPF_CLAMP_U | IPF_CLAMP_V | IPF_LINEAR);
 				pIPIPlasma->SetOutput(0, hBB);
 				pIPIPlasma->SetFloat("fPlasma", plasmaGlow);
+				pIPIPlasma->SetFloat("fCabin", g_fx.plasCabin);
+				// THE FLASH LIGHTS THE CABIN (2026-08-20 round 3). Same envelope, same
+				// frame, as the sheath outside the glass - see PlasmaFlashNow. It is
+				// passed SEPARATELY rather than folded into fPlasma because the shader
+				// saturate()s that one: with heat x trim already several times over 1.0
+				// a multiplier there would be swallowed whole and the cabin would never
+				// flicker. Gated on the VC glow being on, so switching the sheath off
+				// does not leave the cockpit strobing with nothing to explain it.
+				pIPIPlasma->SetFloat("fFlash",
+					(g_fx.plasVCGlow > 0.001f) ? PlasmaFlashNow() : 1.0f);
 				pIPIPlasma->SetFloat("vPlasmaUV", plasmaUV, sizeof(plasmaUV));
 				pIPIPlasma->SetFloat("vPlasmaCol", plasmaCol, sizeof(plasmaCol));
 				pIPIPlasma->SetFloat("fAspect", (float)viewW / (float)viewH);

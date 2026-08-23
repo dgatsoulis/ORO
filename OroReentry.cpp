@@ -928,8 +928,17 @@ void OroModule::UpdateReentry()
 void OroModule::SampleHull(int i, VESSEL* v)
 {
 	ReentryVessel& e = rentry[i];
-	e.nHull = 0;
+	e.nHull = SampleHullPoints(v, e.hull, MAX_HULLPT);
 	e.hullSampled = true;
+}
+
+// The walk itself, split out 2026-08-22: the rain's hull-water cache fills from the
+// SAME sampler, because the slot table above enlists vessels on HEAT and a parked
+// ship in a rainstorm has no slot to borrow a field from. Main thread only (mesh
+// template reads are oapi calls).
+int OroModule::SampleHullPoints(VESSEL* v, HullPt* out, int maxN)
+{
+	int nOut = 0;
 
 	// The heatshield override applies here too ("the shell and anything else we
 	// need" - the user's spec): when the authored envelope exists, the hull point
@@ -962,11 +971,11 @@ void OroModule::SampleHull(int i, VESSEL* v)
 			if (gr) total += gr->nVtx;
 		}
 	}
-	const DWORD stride = (total > (DWORD)MAX_HULLPT) ? (total / MAX_HULLPT + 1) : 1;
+	const DWORD stride = (total > (DWORD)maxN) ? (total / maxN + 1) : 1;
 
 	// Pass 2: collect every stride-th vertex, skipping degenerate normals.
 	DWORD walk = 0;
-	for (UINT m = 0; m < nm && e.nHull < MAX_HULLPT; m++) {
+	for (UINT m = 0; m < nm && nOut < maxN; m++) {
 		MESHHANDLE hM;
 		VECTOR3 ofs = _V(0, 0, 0);
 		if (hOverride) hM = hOverride;
@@ -977,10 +986,10 @@ void OroModule::SampleHull(int i, VESSEL* v)
 			v->GetMeshOffset(m, ofs);
 		}
 		const DWORD ng = oapiMeshGroupCount(hM);
-		for (DWORD g = 0; g < ng && e.nHull < MAX_HULLPT; g++) {
+		for (DWORD g = 0; g < ng && nOut < maxN; g++) {
 			MESHGROUP* gr = oapiMeshGroup(hM, g);
 			if (!gr || !gr->Vtx) continue;
-			for (DWORD k = 0; k < gr->nVtx && e.nHull < MAX_HULLPT; k++, walk++) {
+			for (DWORD k = 0; k < gr->nVtx && nOut < maxN; k++, walk++) {
 				if (walk % stride) continue;
 				const NTVERTEX& n = gr->Vtx[k];
 				const double nl = (double)n.nx * n.nx + (double)n.ny * n.ny + (double)n.nz * n.nz;
@@ -993,7 +1002,7 @@ void OroModule::SampleHull(int i, VESSEL* v)
 				// radius is suspect; drop it.
 				const double sz = v->GetSize() > 1.0 ? v->GetSize() : 1.0;
 				if (length(p) > sz * 1.15) continue;
-				HullPt& hp = e.hull[e.nHull++];
+				HullPt& hp = out[nOut++];
 				hp.pos = p;
 				hp.nrm = _V(n.nx, n.ny, n.nz);   // template normals are unit-ish; good enough
 			}
@@ -1002,16 +1011,17 @@ void OroModule::SampleHull(int i, VESSEL* v)
 
 	// Fallback: nothing readable (all-NULL templates). Synthesize a bounding shell so
 	// the effect still runs - it just degrades to the pre-conformance look.
-	if (e.nHull < 12) {
-		e.nHull = 0;
+	if (nOut < 12) {
+		nOut = 0;
 		const double R = (v->GetSize() > 1.0 ? v->GetSize() : 1.0) * 0.55;
-		for (int k = 0; k < N_EMIT; k++) {       // reuse the icosahedron directions
-			HullPt& hp = e.hull[e.nHull++];
+		for (int k = 0; k < N_EMIT && nOut < maxN; k++) {   // reuse the icosahedron directions
+			HullPt& hp = out[nOut++];
 			hp.pos = EMIT_DIR[k] * R;
 			hp.nrm = EMIT_DIR[k];
 		}
 		oapiWriteLogV("ORO: no readable mesh for hull sampling - plasma uses a bounding shell.");
 	}
+	return nOut;
 }
 
 // ----------------------------------------------------------------------------
@@ -2369,6 +2379,325 @@ void OroModule::ProjectTrail()
 // the most forgiving case there is - in the reference shots the glow visibly
 // blooms ACROSS the craft's silhouette, so soft errors read as plasma, not bugs.
 // ----------------------------------------------------------------------------
+// ============================================================================
+// THE FLASH CLOCK (2026-08-20 round 3) - ONE event, TWO consumers.
+//
+// Shuttle cockpit footage is not a steady lamp: it FLARES, irregularly, hard onset and
+// slower fall. This returns that envelope as a multiplier around 1.0, and it is a pure
+// function of REAL time (invariant 4) with NO stored state - the lightning/soot cadence
+// idiom, which is what makes it warp-proof, pause-correct and G10-clean: nothing
+// accumulates, so nothing can go stale.
+//
+// ⚠️ IT IS A SHARED FUNCTION RATHER THAN A LOCAL BECAUSE THE FLASH HAS TO LIGHT THE
+// CABIN TOO. The sheath outside the glass and the cockpit wash inside it are drawn by
+// two different subsystems in two different places (BuildVCGlow here, PSPlasma over in
+// the internal IPI stack), and a flare that brightens the window without brightening the
+// panel in the SAME FRAME reads as a video effect rather than as light entering the
+// cockpit. Two clocks would drift; one function cannot. Same reasoning as invariant
+// 25(j), where opacity and size had to ride one number because a real condensation event
+// is denser and bigger at the same instant.
+//
+// ⚠️ AND NOT AN ORBITER POINT LIGHT. That was tried and is in the graveyard (G9): a
+// VIS_ALWAYS emitter at the cockpit lit the cabin THROUGH THE FLOOR, because Orbiter's
+// local lights have no occlusion. The screen-space wash already models what a flash
+// actually does to a pilot's view, and it cannot leak through geometry.
+// ============================================================================
+float OroModule::PlasmaFlashNow()
+{
+	const float FLASH_PER = 0.62f;                  // mean seconds between events
+	const float fpos  = (float)animT / FLASH_PER;
+	const int   fslot = (int)floorf(fpos);
+	const float ffr   = fpos - (float)fslot;
+	auto hashf = [](int n) -> float {
+		n = (n << 13) ^ n;
+		const int m = (n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff;
+		return (float)(m % 1000) * 0.001f;
+	};
+	if (hashf(fslot) <= 0.34f) return 1.0f;         // some slots stay quiet
+	const float amp  = 0.45f + 1.75f * hashf(fslot * 7 + 3);
+	const float rise = 0.045f + 0.05f * hashf(fslot * 13 + 5);   // hard onset
+	return 1.0f + amp * ((ffr < rise) ? (ffr / rise) : expf(-(ffr - rise) * 8.5f));
+}
+
+// ============================================================================
+// THE VC GLOW (2026-08-20) - what a reentry looks like FROM INSIDE.
+//
+// ⚠️ THIS REPLACES THE GEOMETRIC DRAW LIST IN THE COCKPIT, AND THE REASON IS
+// STRUCTURAL, NOT COSMETIC. The whole fin/envelope/streak build assumes the camera
+// is OUTSIDE the hull: it is rooted on a point field sampled ON THE SKIN, and every
+// element is sized and placed from those points. Put the eye INSIDE and most of that
+// field is behind the near plane by construction - MEASURED IN THE SIM at 49 of 417
+// points surviving, which left FIFTY-SIX triangles out of a 16384 budget stretched
+// across a windscreen an arm's length away. That is why the cockpit view read as
+// "geometric/triangle-y": not a shading problem, a STARVATION problem, and no amount
+// of tuning could ever reach it, because the builder was being fed 12% of its input.
+// Graveyard G8 already recorded this shape of failure - a vessel-wide screen anchor
+// is meaningless with the camera inside the hull.
+//
+// WHAT A PILOT ACTUALLY SEES is not resolvable structure. There are no discernible
+// fins or individual streaks from in there; there is a luminous sheath, brighter
+// toward the windward side, filling a large solid angle. So this draws that: a
+// smooth radial field in SCREEN space, ~576 triangles instead of 56.
+//
+// ⚠️ IT IS NOT A DECAL, AND THAT IS THE ONE RULE THAT KEEPS IT HONEST. The field is
+// centred on the UPSTREAM DIRECTION (the relative wind, patch-k camera), so it slides
+// across the windows as the ship rotates and sits where the shock actually is. Anchor
+// it to the window instead and it reads as a fixture the moment you yaw - exactly what
+// sank the round-1 vapour cone Mach band. Invariant 25(e), and his own rule from that
+// effect: the sim owns what happens, the user owns the look.
+//
+// THREE THINGS FALL OUT OF THE SUBSTRATE CHOICE (Sketchpad, not IPI):
+//  - IPI has no depth buffer, which is why the shimmer is external-only and why the
+//    cabin wash can only ever be a soft full-frame lift. Pad triangles carry per-vertex
+//    depth, so patch (g) cuts this at the window frames PER PIXEL and the panel, the
+//    frame and the seat occlude it for free.
+//  - The depth is a single far constant. The sheath is metres from the skin, but what
+//    matters here is only "further than anything in the cabin"; a real per-vertex
+//    distance would buy nothing and reintroduce the near-plane problem this function
+//    exists to stop caring about.
+//  - There is no aim CLIFF. Brightness follows the angle between the view axis and the
+//    wind through a smooth falloff WITH A FLOOR, because a plasma sheath surrounds the
+//    vehicle - look aft and you are looking at the wake, which is also burning. A cliff
+//    is what produced the original bug report.
+// ============================================================================
+void OroModule::BuildVCGlow()
+{
+	static_assert(sizeof(PlasVtx) == sizeof(gcCore::clrVtx),
+	              "PlasVtx must mirror gcCore::clrVtx - the render proc casts between them");
+
+	plasVtxN = 0;
+	if (!s_plasValid) return;
+	if (viewW == 0 || viewH == 0) return;
+
+	ReentryVessel& e = rentry[s_plas.slot];
+	const float heat = (e.heat > 0.01f) ? e.heat : 0.0f;
+	if (heat <= 0.0f) return;                       // cold reads as EXACTLY zero
+
+	const float gain = clampf(g_fx.plasVCGlow, 0.0f, 3.0f);
+	if (gain <= 0.001f) return;                     // 0 = off, the section's usual idiom
+
+	// The palette knobs, read once, exactly as the external build reads them - Tint,
+	// Fringe and Saturation must mean the same thing in both views, or the cockpit
+	// would not match the ship it is inside.
+	g_palSat     = clampf(g_fx.plasSat, 0.25f, 2.0f);
+	g_palHueRot  = HueRotFromPick(g_fx.plasmaTint,  PAL_HUE_BODY);
+	g_palHueRot2 = HueRotFromPick(g_fx.plasmaTint2, PAL_HUE_FRINGE);
+
+	// The camera the frame is ACTUALLY drawn with (patch k). While paused this is the
+	// only one of the two that still moves, which is the entire point of the split.
+	CamCtx cc;
+	if (!FillProjCam(cc.pos, cc.rot, cc.tanAp)) return;
+
+	// ---- WHERE THE FIRE IS ---------------------------------------------------
+	// flowG points UPSTREAM (into the oncoming air) - the same convention the external
+	// build uses, where downstream is its negation. Taken as a DIRECTION and rotated
+	// into camera space, never projected as a point: a point off the nose is only a hull
+	// away from an eye that sits inside the hull, so it would keep failing the very
+	// near-plane test this function exists to escape.
+	const VECTOR3 u = unit(s_plas.flowG);
+	const VECTOR3 d = tmul(cc.rot, u);              // unit vector, camera axes
+	const double  horiz = sqrt(d.x * d.x + d.y * d.y);
+	const double  ang   = atan2(horiz, d.z);        // 0 = dead ahead, pi = dead astern
+
+	// AIM. Smooth, and FLOORED: the sheath wraps the vehicle, so facing away from the
+	// windward side dims the view without extinguishing it.
+	float aim = clampf(1.0f - (float)(ang / 2.90), 0.0f, 1.0f);
+	aim = aim * aim * (3.0f - 2.0f * aim);          // smoothstep
+	aim = 0.30f + 0.70f * aim;
+
+	// ⚠️ HEAT RESPONSE IS A ROOT, NOT LINEAR (2026-08-20 round 2). Linear heat meant the
+	// cockpit stayed dark until past 50% while the exterior was already showing streaks
+	// at 20% - the same entry reading as two different events depending which seat you
+	// were in. The external draw list gets its low-heat presence from having HUNDREDS of
+	// separate elements, any one of which is visible on its own; a single field has only
+	// its own alpha, so it needs the curve bent to match.
+	const float heatf = powf(heat, 0.55f);          // 0.20 -> 0.41, 0.50 -> 0.69
+
+	// The field's screen centre: tan() of the off-axis angle in half-screen units, the
+	// same mapping ProjPx uses, clamped short of the asymptote so a wind direction at or
+	// past 90 deg parks the centre off-screen instead of at infinity.
+	// ⚠️ AND THEN DELIBERATELY COMPRESSED (VC_DRIFT). At a 55-70 deg AoA the wind comes
+	// from far below the nose, so the true off-axis angle drops the field's centre well
+	// under the windows and only its dim outer rim reaches the glass ("too low outside
+	// the window"). The physical justification is that the sheath is not a source AT the
+	// shock - it WRAPS the vehicle, so its apparent centre is only weakly displaced. The
+	// centre still tracks attitude, which is what stops it being a decal; it just tracks
+	// it at less than half rate.
+	const float VC_DRIFT = 0.42f;
+	double aC = ang; if (aC > 1.30) aC = 1.30;      // ~74.5 deg
+	const float pxOff = (float)(tan(aC) / cc.tanAp * (viewH * 0.5)) * VC_DRIFT;
+	const float ux = (horiz > 1e-9) ? (float)(d.x / horiz) : 1.0f;
+	const float uy = (horiz > 1e-9) ? (float)(d.y / horiz) : 0.0f;
+	const float cx = viewW * 0.5f + ux * pxOff;
+	const float cy = viewH * 0.5f - uy * pxOff;     // ProjPx maps camera +y to screen -y
+
+	// SIZE. Deliberately huge - a sheath filling a solid angle, not a fireball in the
+	// middle distance. It grows with heat, so the view closes in as the entry deepens.
+	const float R = (float)viewH * (0.95f + 0.50f * heatf) * (0.75f + 0.25f * gain);
+
+	const float flash = PlasmaFlashNow();
+
+	const float A = 255.0f * heatf * (g_fx.reentry * REN_TRIM_GAIN) * gain * aim * flash;
+	if (A < 2.0f) return;
+
+	// ⚠️ THE COCKPIT CLOCK RUNS FAR FASTER THAN THE EXTERNAL WAKE CLOCK, AND THAT IS A
+	// DELIBERATE DIVERGENCE (round 3). At the shared 2.6x baseline the sheath "danced"
+	// - his word for it was too reminiscent of the aurora, which is precisely the
+	// critique a beta tester made of the EXTERNAL plasma on 2026-08-15 ("too slow /
+	// Aurora like?"), and for the same underlying reason: both are built out of the same
+	// smooth low-frequency ribbon machinery.
+	// The physical argument for splitting them is scale. From outside you are watching a
+	// wake tens of metres across from hundreds of metres away, and large structures do
+	// evolve slowly. From the seat your eye is INSIDE the shock layer with the flow going
+	// past at kilometres per second and nothing between you and it, so what reaches you
+	// is the small-scale turbulence, which is violent. Same phenomenon, different
+	// observer, different apparent rate - the eclipse's lesson (model the observer)
+	// applied to a clock.
+	// Still rides plasChurn, so 0 freezes it exactly as it does everywhere else.
+	const float twv = (float)animT * 9.0f * clampf(g_fx.plasChurn, 0.0f, 3.0f);
+
+	// ---- THE FIELD -----------------------------------------------------------
+	// A centre fan plus concentric quad rings. NSEG is high enough that no angular facet
+	// shows at arm's length - the round-5.3 lesson, where an 8-segment fan read as
+	// "polygons in the plume" and 20 fixed it at a fraction of this size.
+	// NSEG raised 64 -> 96 to carry the streak structure below: the highest angular
+	// frequency in it is 17, and under ~5 samples per period a filament aliases into a
+	// flicker instead of reading as a streak.
+	const int NSEG = 96, NRING = 7;
+	const float VCDEPTH = 300.0f;  // beyond anything in the cabin; patch (g) does the rest
+
+	auto emitV = [&](float ax, float ay, DWORD ac, float bx, float by, DWORD bc,
+	                 float ex, float ey, DWORD ec) {
+		if (plasVtxN + 3 > PLAS_MAX_TRI * 3) return;
+		plasVtx[plasVtxN].x = ax; plasVtx[plasVtxN].y = ay; plasVtx[plasVtxN].c = ac;
+		plasDepth[plasVtxN] = VCDEPTH; plasVtxN++;
+		plasVtx[plasVtxN].x = bx; plasVtx[plasVtxN].y = by; plasVtx[plasVtxN].c = bc;
+		plasDepth[plasVtxN] = VCDEPTH; plasVtxN++;
+		plasVtx[plasVtxN].x = ex; plasVtx[plasVtxN].y = ey; plasVtx[plasVtxN].c = ec;
+		plasDepth[plasVtxN] = VCDEPTH; plasVtxN++;
+	};
+
+	// ---- STREAKS -------------------------------------------------------------
+	// ⚠️ THE FIELD WAS "TOO UNIFORM" FOR TWO SEPARATE REASONS AND THIS IS THE SECOND ONE.
+	// (The first is the soft ceiling below.) A real sheath is filamentary - shuttle
+	// cockpit footage shows structure streaming past, not an even lamp. Three drifting
+	// angular octaves, SHARPENED so the troughs sit dark and only the peaks read, which
+	// is what turns a wobble into filaments. Amplitude ramps in with tt: there is no
+	// structure at the stagnation point, it develops as the flow runs aft, which is both
+	// what the footage shows and what stops the core boiling.
+	// A pure function of the angle, so a vertex shared by two segments gets the same
+	// value in both and no seam can open - invariant 15(d)'s safety argument.
+	// ⚠️ ROUND 3 - SHARPER AND FASTER. Three changes, all aimed at "more violent":
+	//  - the octaves DRIFT at very different rates (0.9 / 2.3 / 4.1 against the already
+	//    9x clock) instead of near-identical slow ones. Similar rates read as one shape
+	//    sliding past; divergent rates read as structure being torn apart, which is what
+	//    turbulence looks like.
+	//  - CUBED rather than squared. A higher power narrows the surviving peaks and pushes
+	//    everything between them dark, so the field resolves into distinct filaments
+	//    instead of a rippling sheet.
+	//  - an INTERMITTENCY term. Real filaments do not slide smoothly across the view,
+	//    they appear and die. A second fast, low-frequency-in-angle factor gates whole
+	//    sectors in and out, so the streaks flicker rather than parade.
+	// All still pure functions of (angle, time): a vertex shared by two segments gets
+	// identical values in both, so no seam can open - invariant 15(d)'s safety argument.
+	auto streakAt = [&](float th, float tt) -> float {
+		float s = 0.55f * sinf(th *  5.0f + twv * 0.90f)
+		        + 0.30f * sinf(th *  9.0f - twv * 2.30f)
+		        + 0.18f * sinf(th * 17.0f + twv * 4.10f);
+		s = clampf(s * 0.5f + 0.5f, 0.0f, 1.0f);
+		s = s * s * s;                               // narrow the peaks into filaments
+		const float gate = 0.55f + 0.45f * sinf(th * 2.0f + twv * 3.10f)
+		                                 * sinf(th * 3.0f - twv * 1.70f);
+		return 1.0f + (1.85f * s * gate - 0.42f) * clampf(tt * 1.7f, 0.0f, 1.0f);
+	};
+
+	// The radial palette: white-hot core through the body orange to the magenta cast,
+	// which is the route round 5.5 settled - to white THROUGH pink, never through cream.
+	// ⚠️ THE ALPHA CEILING IS SOFT, AND THAT IS THE FIX FOR "TOO UNIFORM". The first
+	// build hard-clamped at 255. With the Reentry trim at 50 the incoming alpha is around
+	// five times saturation, so EVERY vertex out to the far rim pinned at 255 and the
+	// whole Gouraud gradient - profile, streaks, flashes, all of it - flattened into one
+	// even wash. That is graveyard G9 verbatim, and the external draw list already had
+	// the answer in its fin code: an exponential ceiling, which compresses without ever
+	// reaching a flat top, so structure survives at any trim.
+	auto vcol = [&](float th, float tt, float k) -> DWORD {
+		int r, g, b;
+		if (tt < 0.45f) { const float m = tt / 0.45f;
+			r = 255; g = (int)(235.0f - 105.0f * m); b = (int)(215.0f - 155.0f * m); }
+		else            { const float m = (tt - 0.45f) / 0.55f;
+			r = 255; g = (int)(130.0f -  40.0f * m); b = (int)( 60.0f + 110.0f * m); }
+		const float CEIL = 255.0f;
+		float a = A * k * streakAt(th, tt);
+		if (a < 0.0f) a = 0.0f;
+		a = CEIL * (1.0f - expf(-a / CEIL));         // soft ceiling (G9)
+		return PCol(r, g, b, (int)a);
+	};
+
+	// Per-angle width: two counter-drifting octaves, so the rim breathes while the
+	// centreline never moves - invariant 15(d)'s law (modulate WIDTH, never the path).
+	// A wobble that is a pure function of the angle cannot open a gap at a seam.
+	float rad[NSEG + 1];
+	for (int s = 0; s <= NSEG; s++) {
+		const float th = (float)s / (float)NSEG * 6.2831853f;
+		rad[s] = R * (1.0f + 0.34f * (0.50f * sinf(th * 2.0f + twv * 1.30f)
+		                            + 0.32f * sinf(th * 3.0f - twv * 2.10f)
+		                            + 0.18f * sinf(th * 7.0f + twv * 3.70f)));
+	}
+	rad[NSEG] = rad[0];                             // close the ring exactly
+
+	// Radial profile: 1 at the core, EXACTLY 0 at the rim, so there is no terminating
+	// edge anywhere. The soft shoulder is what makes it read as light rather than as a
+	// disc - G9's law about hard clamps flattening Gouraud gradients into cutouts.
+	// ⚠️ WITH A PLATEAU. The first build fell as (1-tt)^1.8 straight from the centre, so
+	// the only genuinely bright part was the innermost fifth - a small hot spot inside a
+	// large dim halo, which is why it read as weak even at full gain. A sheath has a
+	// broad bright body and falls off at its edge; the plateau is that body.
+	float prof[NRING + 1];
+	for (int q = 0; q <= NRING; q++) {
+		const float tt = (float)q / (float)NRING;
+		prof[q] = (tt < 0.35f) ? 1.0f : powf((1.0f - tt) / 0.65f, 1.5f);
+	}
+
+	for (int s = 0; s < NSEG; s++) {
+		const float th0 = (float)s       / (float)NSEG * 6.2831853f;
+		const float th1 = (float)(s + 1) / (float)NSEG * 6.2831853f;
+		const float c0 = cosf(th0), s0 = sinf(th0);
+		const float c1 = cosf(th1), s1 = sinf(th1);
+
+		// ring 0 is the centre POINT: a fan, not a quad. The centre carries tt 0, where
+		// streakAt is identically 1 - no structure at the stagnation point.
+		const float tR = 1.0f / NRING;
+		const float r1a = rad[s] * tR, r1b = rad[s + 1] * tR;
+		emitV(cx, cy, vcol(th0, 0.0f, prof[0]),
+		      cx + c0 * r1a, cy + s0 * r1a, vcol(th0, tR, prof[1]),
+		      cx + c1 * r1b, cy + s1 * r1b, vcol(th1, tR, prof[1]));
+
+		for (int q = 1; q < NRING; q++) {
+			const float f0 = (float)q / NRING, f1 = (float)(q + 1) / NRING;
+			const float ra0 = rad[s] * f0, ra1 = rad[s] * f1;
+			const float rb0 = rad[s + 1] * f0, rb1 = rad[s + 1] * f1;
+			// Colour is per VERTEX now, not per ring - the streaks vary along the ring,
+			// so the two ends of every quad must be evaluated at their own angles.
+			const DWORD a0 = vcol(th0, f0, prof[q]),     b0 = vcol(th1, f0, prof[q]);
+			const DWORD a1 = vcol(th0, f1, prof[q + 1]), b1 = vcol(th1, f1, prof[q + 1]);
+			emitV(cx + c0 * ra0, cy + s0 * ra0, a0,
+			      cx + c1 * rb0, cy + s1 * rb0, b0,
+			      cx + c0 * ra1, cy + s0 * ra1, a1);
+			emitV(cx + c1 * rb0, cy + s1 * rb0, b0,
+			      cx + c1 * rb1, cy + s1 * rb1, b1,
+			      cx + c0 * ra1, cy + s0 * ra1, a1);
+		}
+	}
+
+	// Zero-pad the tail: the render proc hands the client the FULL buffer every frame and
+	// D3D9Triangle::Update locks with D3DLOCK_DISCARD, so an unwritten tail is random VRAM
+	// drawn as flashing triangles (invariant 3, "the green flashes").
+	if (plasVtxN > 0 && plasVtxN < PLAS_MAX_TRI * 3) {
+		memset(&plasVtx[plasVtxN],   0, sizeof(PlasVtx) * (PLAS_MAX_TRI * 3 - plasVtxN));
+		memset(&plasDepth[plasVtxN], 0, sizeof(float)   * (PLAS_MAX_TRI * 3 - plasVtxN));
+	}
+}
+
 void OroModule::BuildPlasmaGeometry()
 {
 	static_assert(sizeof(PlasVtx) == sizeof(gcCore::clrVtx),

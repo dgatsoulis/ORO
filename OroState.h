@@ -482,6 +482,109 @@ struct OroEffectState {
 	                               //   vessel's REAL mesh - our geometry is emissive and
 	                               //   ignores it - so it owns the sides, the leeward
 	                               //   hull, and every vessel that is not the camera target.
+	// --- RAIN (2026-08-20, the runway slice) ------------------------------------
+	// EXTERNAL view, Earth only, TRIGGERED rather than found. See OroRain.cpp.
+	bool  rainEnabled     = false; // the pill. Off by default: this is weather, and a world
+	                               //   that rains the moment you install an addon is wrong.
+	bool  rainTest        = false; // TEST: summon a storm where you are. Ramps up and HOLDS
+	                               //   (the INDUCE idiom, invariant 8) so it can be tuned;
+	                               //   releasing it ramps back down.
+	float rainGloom       = 1.0f;  // x how grey and dark the world goes (0..2)
+	float rainDensity     = 1.0f;  // x how many drops are in the air  (0..2)
+	float rainStreak      = 1.0f;  // x streak LENGTH (0..2)
+	float rainStreakA     = 1.0f;  // x streak brightness (0..2)
+	float rainSpeed       = 1.0f;  // x how fast it falls (0..2)
+	float rainAngle       = 0.0f;  // [deg] BIPOLAR wind slant, -15..+15. Deliberately a
+	                               //   narrow band: his call. Rain driven fully sideways
+	                               //   reads as a cartoon, and the slant that actually
+	                               //   sells weather is a few degrees off vertical.
+	float rainPuddle      = 1.0f;  // x the rings where drops land (0..2); 0 = off
+	float rainWetDark     = 1.0f;  // x how far the wet ground DARKENS (0..2; 1 = the
+	                               //   designed look, 0 = wet without darkening, 2 =
+	                               //   near-black pools). Albedo only - the mirror and
+	                               //   the puddle mask ride the wetness itself.
+	float rainGlint       = 1.0f;  // x the drop-glint on hulls (0..2; 1 = designed,
+	                               //   0 = off). Client patch (s) part 5.
+	float rainRefl        = 1.0f;  // x the vessel reflection in the puddles (0..2;
+	                               //   1 = designed, 0 = off). Client patch (s) part 6 -
+	                               //   the planar mirror pass.
+	float rainSwimAmp     = 1.0f;  // x the ripple-warp AMPLITUDE on the reflected image
+	                               //   (0..2; 1 = designed, 0 = a still mirror). His ask
+	                               //   2026-08-22: "I want to find the right setting
+	                               //   myself" - the found value gets baked, the slider
+	                               //   deleted (the origin-tilt pattern).
+	float rainSwimRate    = 1.0f;  // x the ripple CADENCE (0..2; 1 = designed). Same
+	                               //   deal as rainSwimAmp - a finding slider.
+	float rainPoolSize    = 1.0f;  // x the standing-pool lattice scale (0..2; 1 =
+	                               //   designed, bigger = larger pools). Part 7.
+	float rainPoolReach   = 1.0f;  // x the pool visibility distance (0..2; 1 = the
+	                               //   designed ~900 m e-fold, 0 = camera vicinity
+	                               //   only). His round-2 note: pools to the horizon
+	                               //   read as a pattern - cut and blend the far ones.
+	float rainCloudLvl    = 3.0f;  // cloud-deck TEXTURE detail notch (0..3, INTEGER -
+	                               //   the Diamonds row's convention): 0 = no texture,
+	                               //   the plain Gouraud deck; 1/2/3 = 256/512/1024.
+	                               //   His design: four notches on one slider.
+	float rainGrainOp     = 1.0f;  // pool grain opacity (0..2; 0 = uniform pools,
+	                               //   1 = designed). Client patch (s) part 7.
+	float rainGrainSize   = 1.0f;  // pool grain feature size (0..2; 1 = designed,
+	                               //   bigger = coarser patches).
+	float rainLtg         = 1.0f;  // RAIN LIGHTNING rate (0..2; 0 = none at all,
+	                               //   2 = very often - his spec). Flashes in the
+	                               //   storm deck + a borrowed scene light; some
+	                               //   single, some strobing (item 3, part 1).
+	// THE STRIKE TEST RIG (never saved): the button plants the NEXT atlas bolt ~60 m
+	// beside the focus vessel with a fixed repeatable envelope, so the sixteen bolt
+	// textures can be judged and compared up close instead of waiting for a random
+	// distant one. boltTestSlot is the last slot shown (-1 = none yet).
+	bool  boltTestFire    = false;
+	int   boltTestSlot    = -1;
+	float rainBoltBloom   = 1.0f;  // BOLT BLOOM (0..2): two wider, dimmer copies of the
+	                               //   bolt stack additively under the core - radiance
+	                               //   the baked halo alone could not reach. 0 = crisp
+	                               //   filament only.
+	// (rainHullRun lived here for one day - the hull water feature, cut whole on
+	//  2026-08-22, his call. A stale RainHullRun key in an old cfg is simply ignored.)
+	float rainSheet       = 1.0f;  // x THE WATER SHEET (0..2; 0 = off) - his design,
+	                               //   2026-08-22: a reflective pool MESH attached under
+	                               //   the vessel, reflecting through the client's own
+	                               //   ENV-MAP system (the stock Reflection settings).
+	                               //   Entirely stock rendering; no client patch.
+	float rainSoundVol    = 1.0f;  // x RAIN SOUND volume (0..2; 0 = silent). The three
+	                               //   generated loops (tools/raingen.py) crossfade with
+	                               //   the storm envelope in UpdateRainSound; 1 = the
+	                               //   designed mix, 2 = double. No pill - volume 0 IS
+	                               //   the off switch (invariant 17b's opt-in law).
+	float rainThunder     = 1.0f;  // x THUNDER volume (0..2; 0 = silent, same opt-out).
+	                               //   Nine sourced one-shots fired dist/340 s after
+	                               //   each flash event - see UpdateThunder.
+	// live readouts, never saved (they are the storm's current STATE, like the eye's)
+	float rainI           = 0.0f;  // the event envelope, 0..1
+	float rainWet         = 0.0f;  // ground wetness, lags rainI - build B consumes it
+	char  rainWhy[32]     = "";    // why it is not drawing, when it is not
+
+	float plasVCGlow      = 1.0f;  // x THE VC GLOW (0..3), 2026-08-20. Brightness and reach
+	                               //   of the cockpit's luminous sheath - the screen-space
+	                               //   field that REPLACES the geometric draw list when the
+	                               //   camera is inside the hull. 0 = off (the section's
+	                               //   opt-out idiom, as with edge light and trail density).
+	                               //   Per class: how much of the sheath a pilot can see is
+	                               //   a question about the windows, which is a fact about
+	                               //   the hull. See BuildVCGlow in OroReentry.cpp.
+
+	float plasCabin       = 0.45f; // CABIN WASH BALANCE (0..1), 2026-08-20. PSPlasma lights
+	                               //   the cockpit in two parts: a DIRECTIONAL bloom centred
+	                               //   where the plasma projects on screen, and a UNIFORM
+	                               //   lift. They shipped at 0.42 / 0.07 - six to one - so
+	                               //   turning your head away from the fire took the cabin
+	                               //   light with it. That is exactly backwards for the way
+	                               //   a reentry is actually flown: eyes on the instruments,
+	                               //   the outside caught in the periphery. This knob slides
+	                               //   the balance without changing the peak: 0 = the old
+	                               //   6:1 pool, 1 = an almost flat cabin glow that does not
+	                               //   care where you are looking. NOT a brightness (that is
+	                               //   the Reentry trim) - it is WHERE the light lands, the
+	                               //   same shape of knob as the aurora's Thickness.
 	// (there is no origin-tilt field: the rake the streaks start on is computed from
 	//  the ANGLE OF ATTACK in BuildPlasmaGeometry - round 5.11. It had a slider for
 	//  one round to find the curve, and lost it once the curve was found.)
@@ -1022,6 +1125,8 @@ void        OroLightning_Close();
 // reload is a use-after-free that lands as an access violation inside D3D9Client.dll - the
 // reload CTD's third face. See the long note on BellCfg.
 void        OroBell_Reset();
+void        OroRain_ShieldReset();  // rain-shield class cache clear (session boundary -
+                                    //   the mesh file is iterated on between runs)
 
 float       OroPhys_GzThreshold();     // the +Gz symptom threshold [G] the current
                                          // tolerance / G-suit / posture produce - the

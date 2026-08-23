@@ -1,4 +1,4 @@
-﻿diff --git a/OVP/D3D9Client/D3D9Client.cpp b/OVP/D3D9Client/D3D9Client.cpp
+diff --git a/OVP/D3D9Client/D3D9Client.cpp b/OVP/D3D9Client/D3D9Client.cpp
 index f9c5ff7..d88e102 100644
 --- a/OVP/D3D9Client/D3D9Client.cpp
 +++ b/OVP/D3D9Client/D3D9Client.cpp
@@ -172,34 +172,61 @@ index d867b73..d1709db 100644
 +#endif
  }
 diff --git a/OVP/D3D9Client/D3D9Effect.cpp b/OVP/D3D9Client/D3D9Effect.cpp
-index 8c40c0f..6676689 100644
+index 8c40c0f..0717601 100644
 --- a/OVP/D3D9Client/D3D9Effect.cpp
 +++ b/OVP/D3D9Client/D3D9Effect.cpp
-@@ -92,6 +92,7 @@ D3DXHANDLE D3D9Effect::eFogColor = 0;	// Fog color input
+@@ -92,6 +92,16 @@ D3DXHANDLE D3D9Effect::eFogColor = 0;	// Fog color input
  D3DXHANDLE D3D9Effect::eTexOff = 0;		// Surface tile texture offsets
  D3DXHANDLE D3D9Effect::eTime = 0;		// FLOAT Simulation elapsed time
  D3DXHANDLE D3D9Effect::eMix = 0;		// FLOAT Auxiliary factor/multiplier
 +D3DXHANDLE D3D9Effect::eVCShdDepth = 0;	// FLOAT ORO patch (p)
++D3DXHANDLE D3D9Effect::eSurfWet = 0;	// FLOAT ORO patch (s)
++D3DXHANDLE D3D9Effect::eStorm = 0;	// FLOAT ORO patch (s) part 2
++D3DXHANDLE D3D9Effect::eWetDark = 0;	// FLOAT ORO patch (s) part 3
++D3DXHANDLE D3D9Effect::eWetTime = 0;	// FLOAT ORO patch (s): sparkle clock
++D3DXHANDLE D3D9Effect::eWetGlint = 0;	// FLOAT ORO patch (s) part 5
++D3DXHANDLE D3D9Effect::eWetReflTex = 0;	// TEXTURE ORO patch (s) part 6
++D3DXHANDLE D3D9Effect::eWetReflPrm = 0;	// FLOAT4 ORO patch (s) part 6
++D3DXHANDLE D3D9Effect::eWetSwimPrm = 0;	// FLOAT4 ORO patch (s) part 6: swim scales
++D3DXHANDLE D3D9Effect::eWetGrainPrm = 0;	// FLOAT4 ORO patch (s) part 7: grain
  D3DXHANDLE D3D9Effect::eFogDensity = 0;	// 
  D3DXHANDLE D3D9Effect::ePointScale = 0;
  D3DXHANDLE D3D9Effect::eSHD = 0;
-@@ -445,6 +446,7 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
+@@ -445,6 +455,16 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
  	eEast		  = FX->GetParameterByName(0,"gEast");
  	ePointScale   = FX->GetParameterByName(0,"gPointScale");
  	eMix		  = FX->GetParameterByName(0,"gMix");
 +	eVCShdDepth   = FX->GetParameterByName(0,"gVCShdDepth");
++	eSurfWet      = FX->GetParameterByName(0,"gSurfWet");
++	eStorm        = FX->GetParameterByName(0,"gStorm");
++	eWetDark      = FX->GetParameterByName(0,"gWetDark");
++	eWetTime      = FX->GetParameterByName(0,"gWetTime");
++	eWetGlint     = FX->GetParameterByName(0,"gWetGlint");
++	eWetReflTex   = FX->GetParameterByName(0,"gWetReflTex");
++	eWetReflPrm   = FX->GetParameterByName(0,"gWetReflPrm");
++	eWetSwimPrm   = FX->GetParameterByName(0,"gWetSwimPrm");
++	eWetGrainPrm  = FX->GetParameterByName(0,"gWetGrainPrm");
  	eTime		  = FX->GetParameterByName(0,"gTime");
  	eMtrlAlpha	  = FX->GetParameterByName(0,"gMtrlAlpha");
  	eGlowConst    = FX->GetParameterByName(0,"gGlowConst");
 diff --git a/OVP/D3D9Client/D3D9Effect.h b/OVP/D3D9Client/D3D9Effect.h
-index c9213f3..3f89586 100644
+index c9213f3..fce43d6 100644
 --- a/OVP/D3D9Client/D3D9Effect.h
 +++ b/OVP/D3D9Client/D3D9Effect.h
-@@ -142,6 +142,7 @@ public:
+@@ -142,6 +142,16 @@ public:
  	static D3DXHANDLE	eOITEnable;	   ///< BOOL
  	static D3DXHANDLE	eInvProxySize;
  	static D3DXHANDLE	eMix;          ///< FLOAT Auxiliary factor/multiplier
 +	static D3DXHANDLE	eVCShdDepth;   ///< FLOAT ORO patch (p): VC shadow ambient bite, 0..1
++	static D3DXHANDLE	eSurfWet;      ///< FLOAT ORO patch (s): ground wetness, 0..1
++	static D3DXHANDLE	eStorm;        ///< FLOAT ORO patch (s) part 2: overcast factor, 0..1
++	static D3DXHANDLE	eWetDark;      ///< FLOAT ORO patch (s) part 3: wet albedo darkening, 0..2
++	static D3DXHANDLE	eWetTime;      ///< FLOAT ORO patch (s): real-time clock for the rain sparkle
++	static D3DXHANDLE	eWetGlint;     ///< FLOAT ORO patch (s) part 5: hull glint gain, 0..2
++	static D3DXHANDLE	eWetReflTex;   ///< TEXTURE ORO patch (s) part 6: the planar mirror
++	static D3DXHANDLE	eWetReflPrm;   ///< FLOAT4 ORO patch (s) part 6: 1/W, 1/H, gain, live
++	static D3DXHANDLE	eWetSwimPrm;   ///< FLOAT4 ORO patch (s) part 6: swim amp scale, rate scale, 0, 0
++	static D3DXHANDLE	eWetGrainPrm;  ///< FLOAT4 ORO patch (s) part 7: grain opacity, grain size, 0, 0
  	static D3DXHANDLE   eColor;        ///< Auxiliary color input
  	static D3DXHANDLE   eFogColor;     ///< Fog color input
  	static D3DXHANDLE   eTexOff;       ///< Surface tile texture offsets
@@ -399,7 +426,7 @@ index 73822d4..d75ed66 100644
  
  #endif
 diff --git a/OVP/D3D9Client/D3D9Pad2.cpp b/OVP/D3D9Client/D3D9Pad2.cpp
-index 7568bcd..6e833f2 100644
+index 7568bcd..5683de6 100644
 --- a/OVP/D3D9Client/D3D9Pad2.cpp
 +++ b/OVP/D3D9Client/D3D9Pad2.cpp
 @@ -962,12 +962,12 @@ void D3D9PolyLine::Update(const FVECTOR2 *_pt, int _npt, bool bConnect)
@@ -417,7 +444,32 @@ index 7568bcd..6e833f2 100644
  }
  
  
-@@ -1000,7 +1000,7 @@ void D3D9Triangle::Draw(D3D9Pad* pSkp, LPDIRECT3DDEVICE9 pDev)
+@@ -991,16 +991,32 @@ void D3D9Triangle::Release()
+ //
+ void D3D9Triangle::Draw(D3D9Pad* pSkp, LPDIRECT3DDEVICE9 pDev)
+ {
++	// ORO patch (l) extension: a TEXTURED poly can tile a world-anchored pattern (the
++	// rain's cloud deck), so its texture must WRAP. The pad's sampler_state is CLAMP,
++	// which is right for the blit paths (no edge bleed on images) and wrong for a
++	// tiling surface. Set at the DEVICE - after the effect pass has applied its own
++	// sampler states, so this wins for exactly this draw - and restored so every
++	// other pad draw keeps its clamp. In-bounds UVs (the lightning atlas) see no
++	// change beyond the outermost half-texel of the whole texture.
++	const bool bWrap = (pTex != NULL);
++	if (bWrap) {
++		pDev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
++		pDev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
++	}
+ 	pDev->SetStreamSource(0, pVB, 0, sizeof(SkpVtx));
+ 	if (style == PF_TRIANGLES) 	pDev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, nPt / 3);
+ 	if (style == PF_FAN) pDev->DrawPrimitive(D3DPT_TRIANGLEFAN, 0, nPt - 2);
+ 	if (style == PF_STRIP) pDev->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, nPt - 2);
++	if (bWrap) {
++		pDev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
++		pDev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
++	}
+ }
+ 
  
  // ===============================================================================================
  //
@@ -426,7 +478,7 @@ index 7568bcd..6e833f2 100644
  {
  	SkpVtx *Vtx = NULL;
  	HR(pVB->Lock(0, 0, (LPVOID*)&Vtx, D3DLOCK_DISCARD));
-@@ -1010,8 +1010,39 @@ void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt)
+@@ -1010,8 +1026,39 @@ void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt)
  	for (int i = 0; i < npt; i++) {
  		Vtx[i].x = pt[i].pos.x;
  		Vtx[i].y = pt[i].pos.y;
@@ -488,10 +540,24 @@ index 0f9904d..2011f36 100644
  {
  	const char *months[] = { "???","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
 diff --git a/OVP/D3D9Client/Mesh.cpp b/OVP/D3D9Client/Mesh.cpp
-index decef76..795cd5e 100644
+index decef76..3b29b77 100644
 --- a/OVP/D3D9Client/Mesh.cpp
 +++ b/OVP/D3D9Client/Mesh.cpp
-@@ -2777,7 +2777,28 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
+@@ -2632,6 +2632,13 @@ void D3D9Mesh::RenderBaseTile(const LPD3DXMATRIX pW)
+ 
+ 
+ 	FX->SetTechnique(eBaseTile);
++	// ORO patch (s): how wet the ground looks. Base tiles are the runway, the aprons and
++	// the taxiways - a different render path from the terrain around them (NewPlanet.hlsl),
++	// which is why the wetness has to be handed to both. 0 is stock.
++	{
++		extern float g_gcSurfaceWet;
++		if (eSurfWet) FX->SetFloat(eSurfWet, g_gcSurfaceWet);
++	}
+ 	FX->SetVector(eColor, ptr(D3DXVECTOR4(0, 0, 0, 0)));
+ 	FX->SetMatrix(eGT, gc->GetIdentity());
+ 	FX->SetMatrix(eW, pW);
+@@ -2777,7 +2784,49 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
  	{
  		if (Grp[g].UsrFlag & 0x2) continue;
  		if (Grp[g].UsrFlag & 0x1) continue;
@@ -515,7 +581,28 @@ index decef76..795cd5e 100644
 +		// approximation is: a material that is clearly not opaque does not cast. The
 +		// threshold is deliberately high - only genuinely translucent materials are
 +		// excused, and a 0.95-alpha decal still shadows as before.
-+		if (opt != 1 && Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
++		//
++		// ⚠️ EXTENDED 2026-08-20 TO THE NORMAL/DEPTH PASS (opt == 1), AND THE ORIGINAL
++		// `opt != 1 &&` GUARD WAS A BUG. This function serves two passes, and the skip
++		// was applied to the shadow map only - so the same 0.5-alpha canopy that no
++		// longer casts a solid shadow went on writing FULLY OPAQUE DEPTH into
++		// GBUF_DEPTH. That buffer's whole purpose is "what can this point see" (SSAO,
++		// sun/local-light visibility, and patch (g)'s per-pixel clip for addon
++		// geometry), so a transparent pane recorded at ~1 m from the eye answers "you
++		// can see nothing" for every pixel of the windscreen.
++		//
++		// The symptom that found it: ORO's reentry plasma vanished when the pilot
++		// looked straight ahead out of the DeltaGlider's VC while the exterior view
++		// showed the ship engulfed. Not the plasma failing to draw - the plasma
++		// correctly clipped behind a windscreen the depth buffer believed was a wall.
++		// The aurora and the lightning read the same buffer and were losing the same
++		// pixels.
++		//
++		// The reasoning below applies unchanged to both passes: a material that is
++		// clearly not opaque does not block. If anything it is MORE obviously right
++		// here, because depth is a visibility question and shadowing is only one
++		// consumer of it.
++		if (Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
 +		    && Mtrl[Grp[g].MtrlIdx].Diffuse.w < 0.9f) continue;
 +
  		MeshShader::ps_bools.bOIT = (Grp[g].UsrFlag & 0x20) != 0;
@@ -618,7 +705,7 @@ index 959af8d..b14de2f 100644
  
  class ReentryStream: public D3D9ParticleStream {
 diff --git a/OVP/D3D9Client/Scene.cpp b/OVP/D3D9Client/Scene.cpp
-index ebed069..7bc8741 100644
+index ebed069..ba2346d 100644
 --- a/OVP/D3D9Client/Scene.cpp
 +++ b/OVP/D3D9Client/Scene.cpp
 @@ -29,6 +29,10 @@
@@ -632,7 +719,34 @@ index ebed069..7bc8741 100644
  static D3DXMATRIX ident;
  
  const double LABEL_DISTLIMIT = 0.6;
-@@ -245,6 +249,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+@@ -80,6 +84,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+ 	pOffscreenTarget = NULL;
+ 	pLocalCompute = NULL;
+ 	pRenderGlares = NULL;
++	ptWetRefl = NULL;
++	psWetRefl = NULL;
++	psWetReflDS = NULL;
++	bWetReflLive = false;
+ 	pCreateGlare = NULL;
+ 	viewH = h;
+ 	viewW = w;
+@@ -181,6 +189,15 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+ 
+ 	CreateSunGlare();
+ 
++	// ------------------------------------------------------------------------------
++	// ORO patch (s) part 6: the WET-GROUND PLANAR REFLECTION target. Half resolution -
++	// the image lands in rippling puddles through a mask, so full res would buy nothing.
++	// Created unconditionally (~2 MB); the PASS that fills it is gated on wetness, so a
++	// dry world never pays a frame cost.
++	HR(pDevice->CreateTexture(viewW / 2, viewH / 2, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &ptWetRefl, NULL));
++	if (ptWetRefl) HR(ptWetRefl->GetSurfaceLevel(0, &psWetRefl));
++	HR(pDevice->CreateDepthStencilSurface(viewW / 2, viewH / 2, D3DFMT_D24X8, D3DMULTISAMPLE_NONE, 0, true, &psWetReflDS, NULL));
++
+ 
+ 	// ------------------------------------------------------------------------------
+ 	// Initialize a shaders for local lights visibility checks and rendering 
+@@ -245,6 +262,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
  		HR(pDevice->CreateDepthStencilSurface(viewW, viewH, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &pDepthNormalDS, NULL));
  		HR(D3DXCreateTexture(pDevice, viewW, viewH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &ptgBuffer[GBUF_DEPTH]));
  	}
@@ -643,7 +757,7 @@ index ebed069..7bc8741 100644
  
  
  	// Initialize post processing effects --------------------------------------------------------------------------------------------------
-@@ -328,6 +336,7 @@ Scene::~Scene ()
+@@ -328,6 +349,7 @@ Scene::~Scene ()
  	pDevice->SetRenderTarget(2, NULL);
  	pDevice->SetRenderTarget(3, NULL);
  
@@ -651,7 +765,17 @@ index ebed069..7bc8741 100644
  	for (int i = 0; i < ARRAYSIZE(psgBuffer); i++) SAFE_RELEASE(psgBuffer[i]);
  	for (int i = 0; i < ARRAYSIZE(ptgBuffer); i++) SAFE_RELEASE(ptgBuffer[i]);
  	for (int i = 0; i < ARRAYSIZE(pTextures); i++) SAFE_RELEASE(pTextures[i]);
-@@ -1246,7 +1255,15 @@ void Scene::RenderMainScene()
+@@ -349,6 +371,9 @@ Scene::~Scene ()
+ 	SAFE_RELEASE(pIrradTemp2);
+ 	SAFE_RELEASE(pIrradTemp3);
+ 	SAFE_RELEASE(pDepthNormalDS);
++	SAFE_RELEASE(psWetRefl);
++	SAFE_RELEASE(ptWetRefl);
++	SAFE_RELEASE(psWetReflDS);
+ 	SAFE_RELEASE(pLocalResults);
+ 	SAFE_RELEASE(pLocalResultsSL);
+ 	SAFE_RELEASE(pSunTex);
+@@ -1246,12 +1271,47 @@ void Scene::RenderMainScene()
  
  	if (!UpdateCamVis()) {
  		if (SUCCEEDED(gc->BeginScene())) {
@@ -668,7 +792,192 @@ index ebed069..7bc8741 100644
  			gc->EndScene();
  		}
  		return; // Scene not yet properly inilialized, return
-@@ -1956,6 +1973,60 @@ void Scene::RenderMainScene()
+ 	}
+ 
++	// ORO patch (s): ground wetness, pushed ONCE PER FRAME into the shared effect so every
++	// shader in it can read gSurfWet - base tiles for the ground, and the vessel shaders
++	// for a wet hull. Pushing it only in RenderBaseTile (where it started) left the value
++	// stale or unset for everything else in the frame. 0 is stock, so this line changes
++	// nothing until an addon asks for it.
++	{
++		extern float g_gcSurfaceWet;
++		extern float g_gcStormLight;
++		extern float g_gcWetDark;
++		if (D3D9Effect::eSurfWet) D3D9Effect::FX->SetFloat(D3D9Effect::eSurfWet, g_gcSurfaceWet);
++		if (D3D9Effect::eStorm)   D3D9Effect::FX->SetFloat(D3D9Effect::eStorm,   g_gcStormLight);
++		if (D3D9Effect::eWetDark) D3D9Effect::FX->SetFloat(D3D9Effect::eWetDark, g_gcWetDark);
++		// REAL time for the drop-sparkle animation (a blink stays a blink at 100x warp) -
++		// but ACCUMULATED only while the sim runs, because raw system time kept the hull
++		// glint dancing through a pause while the rain streaks (ORO's clock, which stops
++		// with clbkPreStep) hung frozen mid-air: two clocks, one scene, visibly absurd.
++		// His report. Wrapped hourly so float precision never decays.
++		{
++			static double wetT = 0.0, wetLast = -1.0;
++			const double now = oapiGetSysTime();
++			if (wetLast >= 0.0 && !oapiGetPause()) wetT += now - wetLast;
++			wetLast = now;
++			if (D3D9Effect::eWetTime) D3D9Effect::FX->SetFloat(D3D9Effect::eWetTime, (float)fmod(wetT, 3600.0));
++		}
++		{ extern float g_gcWetGlint; if (D3D9Effect::eWetGlint) D3D9Effect::FX->SetFloat(D3D9Effect::eWetGlint, g_gcWetGlint); }
++	}
++
+ 
+ 	// Update Vessel Animations
+ 	//
+@@ -1436,6 +1496,152 @@ void Scene::RenderMainScene()
+ 
+ 
+ 	// -------------------------------------------------------------------------------------------------------
++	// -------------------------------------------------------------------------------------------------------
++	// ORO patch (s) part 6: WET-GROUND PLANAR REFLECTIONS. Render the VESSELS - only the
++	// vessels: no terrain, no sky, no bases - through a camera mirrored about the local
++	// ground plane, into the half-res target. BaseTilePS then samples it at each pixel's
++	// own screen position, masked by the puddle lattice and the Fresnel term, so the
++	// image appears as rippling patches in the standing water rather than as a mirror.
++	//
++	// The mirrored view-projection is THE standard planar trick: pre-multiplying the
++	// reflection matrix means a real point P renders exactly where the main camera sees
++	// its virtual image - so the ground shader lookup is just its own VPOS. A mirror
++	// flips the winding, hence the CULLMODE swap. The pass runs under CUSTOMCAM (the
++	// pass id that already means "the scene, rendered again elsewhere") and costs
++	// nothing when the world is dry.
++	// -------------------------------------------------------------------------------------------------------
++	bWetReflLive = false;
++	{
++		extern float g_gcSurfaceWet;
++		if (g_gcSurfaceWet > 0.01f && psWetRefl && psWetReflDS && Camera.hObj_proxy)
++		{
++			VECTOR3 pC; oapiGetGlobalPos(Camera.hObj_proxy, &pC);
++			VECTOR3 rel = Camera.pos - pC;
++			double  cr  = length(rel);
++			double  lng = 0.0, lat = 0.0, rad = 0.0;
++			oapiGlobalToEqu(Camera.hObj_proxy, Camera.pos, &lng, &lat, &rad);
++			double  elv  = oapiSurfaceElevation(Camera.hObj_proxy, lng, lat);
++			double  hAGL = cr - (oapiGetSize(Camera.hObj_proxy) + elv);
++			// ⚠️ THE PLANE ANCHORS TO THE GROUND UNDER THE FOCUS VESSEL, NOT UNDER THE
++			// CAMERA (round 4: "the reflection changes altitude as I rotate the view").
++			// The elevation sampled under the CAMERA changes as it orbits across
++			// undulating terrain, so a camera-anchored plane made the image rise and
++			// sink while the vessel never moved - paused or not, since it is pure
++			// camera position. The vessel's own ground level is constant under an
++			// orbiting camera, which pins the image; one plane cannot match every
++			// terrain height at once, so it is matched where the eye looks: the ship.
++			// Falls back to the camera anchor when there is no focus vessel nearby or
++			// the camera sits below the vessel's ground plane (a mirror plane above
++			// the camera is nonsense for this use).
++			double planeAGL = hAGL;
++			OBJHANDLE hFoc = oapiGetFocusObject();
++			if (hFoc) {
++				VECTOR3 fpos; oapiGetGlobalPos(hFoc, &fpos);
++				if (length(fpos - Camera.pos) < 2000.0) {
++					double lngF = 0.0, latF = 0.0, radF = 0.0;
++					oapiGlobalToEqu(Camera.hObj_proxy, fpos, &lngF, &latF, &radF);
++					double elvF = oapiSurfaceElevation(Camera.hObj_proxy, lngF, latF);
++					double pa   = cr - (oapiGetSize(Camera.hObj_proxy) + elvF);
++					if (pa > 0.3 && pa < 400.0) planeAGL = pa;
++				}
++			}
++			if (cr > 1.0 && hAGL > 1.0 && hAGL < 250.0)
++			{
++				VECTOR3 up = rel / cr;
++				// plane through the ground point under the FOCUS VESSEL (see above),
++				// in the client's camera-relative world space (camera = origin)
++				D3DXPLANE plane((float)up.x, (float)up.y, (float)up.z, (float)planeAGL);
++				D3DXMATRIX mRefl, mVP1;
++				D3DXMATRIX mSave = Camera.mProjView;
++				D3DXMatrixReflect(&mRefl, &plane);
++				D3DXMatrixMultiply(&mVP1, &mRefl, &mSave);
++				// ⚠️ A SECOND MIRROR, IN CLIP SPACE, AND IT IS THE WHOLE TRICK (round 2).
++				// One reflection makes every triangle wind backwards, and a cull-mode
++				// override cannot fix that here: D3D9Mesh::Render RE-SETS the cull mode
++				// PER GROUP (Mesh.cpp:1924/1927), so any state set before the loop dies
++				// at the first group - the mirrored vessels rendered inside-out and
++				// culled to nothing, which is why round 1 drew an empty target.
++				// Flipping clip-space X is a second mirror: two mirrors = even = the
++				// meshes' own culling is correct untouched. The image lands horizontally
++				// flipped in the RT, and the sampler flips it back (BaseTilePS).
++				D3DXMATRIX mFlipX; D3DXMatrixIdentity(&mFlipX); mFlipX._11 = -1.0f;
++				D3DXMatrixMultiply(&Camera.mProjView, &mVP1, &mFlipX);
++				// ⚠️ AND PUSH IT INTO THE EFFECT (round 3, the actual bug). The meshes do
++				// NOT fetch the view-projection per draw - gVP is set ONCE per camera
++				// update (SetCameraAperture) and every mesh trusts the stored value. So
++				// overriding Camera.mProjView alone mirrored NOTHING: the pass rendered a
++				// plain right-side-up image with the normal camera, and the sampler then
++				// displayed it at x-flipped positions - upright ghost vessels orbiting
++				// the wrong way as the camera turned, which is exactly what he reported.
++				D3D9Effect::SetViewProjMatrix(&Camera.mProjView);
++
++				// the RT must not be bound as a sampler while it is the target
++				if (D3D9Effect::eWetReflTex) D3D9Effect::FX->SetTexture(D3D9Effect::eWetReflTex, NULL);
++
++				BeginPass(RENDERPASS_CUSTOMCAM);
++				gc->PushRenderTarget(psWetRefl, psWetReflDS, RENDERPASS_CUSTOMCAM);
++				RecallDefaultState();
++				HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0L));
++				for (auto* vVes : RenderList)
++					if (vVes->CamDist() < 1500.0) vVes->Render(pDevice, false);
++				gc->PopRenderTargets();
++				PopPass();
++
++				Camera.mProjView = mSave;
++				D3D9Effect::SetViewProjMatrix(&Camera.mProjView);   // hand the frame back
++				bWetReflLive = true;
++			}
++
++			// one-shot breadcrumbs: the difference between "the pass never ran" and
++			// "it ran and the look is wrong" costs a fly-and-report round otherwise
++			static int logLive = 0, logSkip = 0;
++			if (bWetReflLive && logLive == 0) {
++				oapiWriteLogV("D3D9: ORO wet-mirror pass LIVE (hAGL %.1f m)", hAGL);
++				logLive = 1;
++			}
++			if (!bWetReflLive && logSkip == 0) {
++				oapiWriteLogV("D3D9: ORO wet-mirror pass skipped (hAGL %.1f m, need 1..250)", hAGL);
++				logSkip = 1;
++			}
++		}
++
++		// feed the shaders either way: .w tells BaseTilePS whether the mirror is live
++		extern float g_gcWetRefl;
++		extern float g_gcWetSwimAmp;
++		extern float g_gcWetSwimRate;
++		extern float g_gcWetPoolSize;
++		extern float g_gcWetPoolReach;
++		extern float g_gcWetGrainOp;
++		extern float g_gcWetGrainSize;
++		if (D3D9Effect::eWetReflPrm) {
++			D3DXVECTOR4 wrp(1.0f / (float)viewW, 1.0f / (float)viewH,
++			                g_gcWetRefl, bWetReflLive ? 1.0f : 0.0f);
++			D3D9Effect::FX->SetVector(D3D9Effect::eWetReflPrm, &wrp);
++		}
++		if (D3D9Effect::eWetSwimPrm) {
++			D3DXVECTOR4 wsp(g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach);
++			D3D9Effect::FX->SetVector(D3D9Effect::eWetSwimPrm, &wsp);
++		}
++		if (D3D9Effect::eWetGrainPrm) {
++			D3DXVECTOR4 wgp(g_gcWetGrainOp, g_gcWetGrainSize, 0.0f, 0.0f);
++			D3D9Effect::FX->SetVector(D3D9Effect::eWetGrainPrm, &wgp);
++		}
++		if (bWetReflLive && D3D9Effect::eWetReflTex)
++			D3D9Effect::FX->SetTexture(D3D9Effect::eWetReflTex, ptWetRefl);
++
++		// one-shot: the handles and what the effect ACTUALLY stored after SetVector -
++		// splits "handle never bound" from "value set but not reaching the shader"
++		static int logRb = 0;
++		if (logRb == 0 && bWetReflLive) {
++			D3DXVECTOR4 rb(0, 0, 0, 0);
++			if (D3D9Effect::eWetReflPrm) D3D9Effect::FX->GetVector(D3D9Effect::eWetReflPrm, &rb);
++			oapiWriteLogV("D3D9: ORO wet-mirror handles Prm=%p Tex=%p readback %.5f %.5f %.2f %.1f",
++			              (void*)D3D9Effect::eWetReflPrm, (void*)D3D9Effect::eWetReflTex,
++			              rb.x, rb.y, rb.z, rb.w);
++			logRb = 1;
++		}
++	}
++
+ 	// Start Main Scene Rendering
+ 	// -------------------------------------------------------------------------------------------------------
+ 
+@@ -1956,6 +2162,60 @@ void Scene::RenderMainScene()
  
  	if (oapiCameraInternal() && vFocus) {
  
@@ -729,7 +1038,7 @@ index ebed069..7bc8741 100644
  		// switch cockpit lights on, external-only lights off
  		//
  		if (bLocalLight) {
-@@ -1975,7 +2046,13 @@ void Scene::RenderMainScene()
+@@ -1975,7 +2235,25 @@ void Scene::RenderMainScene()
  		if (znear>1.0)  znear=1.0;
  		OBJHANDLE hFocus = oapiGetFocusObject();
  		SetCameraFrustumLimits(znear, oapiGetSize(hFocus)*2.0);
@@ -738,12 +1047,24 @@ index ebed069..7bc8741 100644
 +		// exterior pass keeps stock shading no matter what the addon asked for.
 +		extern float g_gcVCShadowDep;
 +		if (D3D9Effect::eVCShdDepth) D3D9Effect::FX->SetFloat(D3D9Effect::eVCShdDepth, g_gcVCShadowDep);
++		// ORO patch (s) extension (2026-08-23): the cockpit INTERIOR is dry - no
++		// drop glint sparkling on the instrument panel, no wet sheen or darkening
++		// on the cabin walls. Both ride gSurfWet (the glint also has its own gain),
++		// so both uniforms are zeroed for the cockpit draw only and restored after:
++		// vessels seen THROUGH the window keep their full wet look. Same bracket,
++		// same reasoning as patch (p) above.
++		extern float g_gcWetGlint;
++		extern float g_gcSurfaceWet;
++		if (D3D9Effect::eWetGlint) D3D9Effect::FX->SetFloat(D3D9Effect::eWetGlint, 0.0f);
++		if (D3D9Effect::eSurfWet)  D3D9Effect::FX->SetFloat(D3D9Effect::eSurfWet, 0.0f);
  		vFocus->Render(pDevice, true);
 +		if (D3D9Effect::eVCShdDepth) D3D9Effect::FX->SetFloat(D3D9Effect::eVCShdDepth, 0.0f);
++		if (D3D9Effect::eWetGlint) D3D9Effect::FX->SetFloat(D3D9Effect::eWetGlint, g_gcWetGlint);
++		if (D3D9Effect::eSurfWet)  D3D9Effect::FX->SetFloat(D3D9Effect::eSurfWet, g_gcSurfaceWet);
  	}
  
  	pDevice->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
-@@ -1984,9 +2061,24 @@ void Scene::RenderMainScene()
+@@ -1984,9 +2262,24 @@ void Scene::RenderMainScene()
  	// End Of Main Scene Rendering ---------------------------------------------
  	//
  
@@ -770,7 +1091,27 @@ index ebed069..7bc8741 100644
  
  
  
-@@ -3406,6 +3498,8 @@ bool Scene::UpdateCameraFromOrbiter(DWORD dwPass)
+@@ -2958,6 +3251,19 @@ void Scene::RenderVesselShadows (OBJHANDLE hPlanet, float depth) const
+ 	// If this planet is not a proxy body skip the rest
+ 	if (hPlanet != oapiCameraProxyGbody()) return;
+ 
++	// ORO patch (s) part 2: a sharp projected shadow under a storm deck is the single
++	// loudest "this is actually a sunny day" tell. The shader-side sun collapse fades the
++	// shadow-MAP shadows automatically (they only modulate the sun term), but these
++	// stencil-projected ground shadows are drawn as dark geometry with their own alpha,
++	// so they need fading explicitly. 0 storm = stock exactly.
++	// ⚠️ `depth` IS AN INVERSE ALPHA - RenderGroundShadow draws at (1 - depth) opacity
++	// (VVessel.cpp: `alpha = (1.0f - alpha) * saturate(scale)`). The first version
++	// multiplied depth toward ZERO, which drove the drawn shadow toward FULLY BLACK:
++	// the storm was making non-focus vessels' shadows DARKER while the focus vessel's
++	// map shadow faded correctly - exactly the two-DeltaGlider screenshot. The fade
++	// must push depth toward ONE instead.
++	{ extern float g_gcStormLight; depth = 1.0f - (1.0f - depth) * (1.0f - g_gcStormLight); }
++
+ 	// render vessel shadows
+ 	VOBJREC *pv;
+ 	for (pv = vobjFirst; pv; pv = pv->next) {
+@@ -3406,6 +3712,8 @@ bool Scene::UpdateCameraFromOrbiter(DWORD dwPass)
  
  	oapiCameraGlobalDir(&Camera.dir);
  	oapiCameraRotationMatrix(&grot);
@@ -779,8 +1120,19 @@ index ebed069..7bc8741 100644
  	D3DXMatrixIdentity(&Camera.mView);
  	D3DMAT_SetRotation(&Camera.mView, &grot);
  
+@@ -3688,6 +3996,10 @@ void Scene::RenderGlares()
+ 			if (WorldToScreenSpace2(pos, &pt))
+ 			{
+ 				float cis = 1.0f, glare = float(Config->GFXGlare) * saturate(8.0 * AU / sdst);
++				// ORO patch (s) part 2: no sun disc under an overcast, so no glare. Fading
++				// the INTENSITY, not disabling the glare system - GBUF_DEPTH (patch g's
++				// depth buffer) is created by the glare config flags and must survive.
++				{ extern float g_gcStormLight; glare *= (1.0f - g_gcStormLight); }
+ 				FVECTOR4 clr = FVECTOR4(1, 1, 1, 1);
+ 
+ 				vPlanet* vp = GetCameraNearVisual();
 diff --git a/OVP/D3D9Client/Scene.h b/OVP/D3D9Client/Scene.h
-index 917f38b..ca5da63 100644
+index 917f38b..6338ebb 100644
 --- a/OVP/D3D9Client/Scene.h
 +++ b/OVP/D3D9Client/Scene.h
 @@ -134,6 +134,10 @@ public:
@@ -821,8 +1173,24 @@ index 917f38b..ca5da63 100644
  	VECTOR3			GetCameraGDir() const { return Camera.dir; }
  	OBJHANDLE		GetCameraProxyBody() const { return Camera.hObj_proxy; }
  	vPlanet *		GetCameraProxyVisual() const { return Camera.vProxy; }
+@@ -519,6 +536,15 @@ private:
+ 	LPDIRECT3DTEXTURE9 pTextures[TEX_COUNT];
+ 
+ 	LPDIRECT3DSURFACE9 pEnvDS, pIrradDS, pDepthNormalDS;
++	LPDIRECT3DTEXTURE9 ptWetRefl;		// ORO patch (s) part 6: wet-ground planar reflection, half res
++	LPDIRECT3DSURFACE9 psWetRefl;		// ORO patch (s) part 6: its level-0 surface (the RT binding)
++	LPDIRECT3DSURFACE9 psWetReflDS;		// ORO patch (s) part 6: its depth-stencil
++	bool bWetReflLive;					// ORO patch (s) part 6: the RT holds this frame's mirror
++public:
++	// ORO patch (s) part 6: the terrain shader samples the same mirror as the base tiles
++	LPDIRECT3DTEXTURE9 GetWetReflTex() const { return bWetReflLive ? ptWetRefl : NULL; }
++	bool IsWetReflLive() const { return bWetReflLive; }
++private:
+ 	LPDIRECT3DSURFACE9 psShmDS[SHM_LOD_COUNT];
+ 	LPDIRECT3DSURFACE9 psShmRT[SHM_LOD_COUNT];
+ 	LPDIRECT3DTEXTURE9 ptShmRT[SHM_LOD_COUNT];
 diff --git a/OVP/D3D9Client/Surfmgr2.cpp b/OVP/D3D9Client/Surfmgr2.cpp
-index 85278c8..5c6c78f 100644
+index 85278c8..1bfdad8 100644
 --- a/OVP/D3D9Client/Surfmgr2.cpp
 +++ b/OVP/D3D9Client/Surfmgr2.cpp
 @@ -800,7 +800,12 @@ void SurfTile::Render ()
@@ -839,6 +1207,51 @@ index 85278c8..5c6c78f 100644
  	}
  	
  	has_specular &= pShader->bWater;
+@@ -1097,6 +1102,44 @@ void SurfTile::Render ()
+ 	pShader->SetVSConstants(pShader->PrmVS, sp, sizeof(ShaderParams));
+ 	pShader->SetPSConstants(pShader->Prm, sp, sizeof(ShaderParams));
+ 
++	// ORO patch (s): ground wetness. Set BY NAME rather than as a new member of
++	// ShaderParams - that struct is mirrored between C++ and HLSL by layout, and adding a
++	// field to it for one float is a padding bug waiting to happen. 0 is stock.
++	{
++		extern float g_gcSurfaceWet;
++		extern float g_gcStormLight;
++		extern float g_gcWetDark;
++		extern float g_gcWetRefl;
++		float fWet = g_gcSurfaceWet;
++		float fStm = g_gcStormLight;
++		float fWd  = g_gcWetDark;
++		pShader->SetPSConstants("gWet", &fWet, sizeof(float));
++		pShader->SetPSConstants("gStorm", &fStm, sizeof(float));
++		pShader->SetPSConstants("gWetDark", &fWd, sizeof(float));
++
++		// ORO patch (s) part 6: the planar mirror, for the TERRAIN this time. Round 1 put
++		// the reflection in the base-tile shader alone - and the ground a vessel parks on
++		// at KSC is mostly TERRAIN, so the readback said "stored perfectly" while the
++		// pixels never saw it: right value, wrong shader. The seventh path sweep.
++		{
++			extern float g_gcWetSwimAmp;
++			extern float g_gcWetSwimRate;
++			extern float g_gcWetPoolSize;
++			extern float g_gcWetPoolReach;
++			extern float g_gcWetGrainOp;
++			extern float g_gcWetGrainSize;
++			LPDIRECT3DTEXTURE9 pWR = ((Scene*)scene)->GetWetReflTex();
++			float wrp[4] = { 1.0f / (float)scene->ViewW(), 1.0f / (float)scene->ViewH(),
++			                 g_gcWetRefl, pWR ? 1.0f : 0.0f };
++			float wsp[4] = { g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach };
++			float wgp[4] = { g_gcWetGrainOp, g_gcWetGrainSize, 0.0f, 0.0f };
++			pShader->SetPSConstants("gWetReflPrm", wrp, sizeof(wrp));
++			pShader->SetPSConstants("gWetSwimPrm", wsp, sizeof(wsp));
++			pShader->SetPSConstants("gWetGrainPrm", wgp, sizeof(wgp));
++			if (pWR) pShader->SetTexture("tWetRefl", pWR, IPF_CLAMP | IPF_LINEAR);
++		}
++	}
++
+ 
+ 	pShader->SetVSConstants(pShader->FlowVS, fcv, sizeof(FlowControlVS));
+ 	pShader->SetPSConstants(pShader->Flow, fc, sizeof(FlowControlPS));
 diff --git a/OVP/D3D9Client/VVessel.cpp b/OVP/D3D9Client/VVessel.cpp
 index bb0ab52..6028604 100644
 --- a/OVP/D3D9Client/VVessel.cpp
@@ -884,10 +1297,10 @@ index bb0ab52..6028604 100644
  	double p = vessel->GetAtmDensity();
  	double v = vessel->GetAirspeed();
 diff --git a/OVP/D3D9Client/gcCore.cpp b/OVP/D3D9Client/gcCore.cpp
-index 76c0d04..8417f66 100644
+index 76c0d04..c158756 100644
 --- a/OVP/D3D9Client/gcCore.cpp
 +++ b/OVP/D3D9Client/gcCore.cpp
-@@ -42,6 +42,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
+@@ -42,6 +42,18 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
  	if (strcmp(name,"RegisterSwap")==0) *ppFnc = &gcCore2::RegisterSwap;
  	if (strcmp(name,"FlipSwap")==0) *ppFnc = &gcCore2::FlipSwap;
  	if (strcmp(name,"GetRenderTarget")==0) *ppFnc = &gcCore2::GetRenderTarget;
@@ -897,10 +1310,16 @@ index 76c0d04..8417f66 100644
 +	if (strcmp(name,"SuppressExhaust")==0) *ppFnc = &gcCore2::SuppressExhaust;
 +	if (strcmp(name,"ExemptNewStreams")==0) *ppFnc = &gcCore2::ExemptNewStreams;
 +	if (strcmp(name,"SetVCShadows")==0) *ppFnc = &gcCore2::SetVCShadows;
++	if (strcmp(name,"SetSurfaceWetness")==0) *ppFnc = &gcCore2::SetSurfaceWetness;
++	if (strcmp(name,"SetStormLight")==0) *ppFnc = &gcCore2::SetStormLight;
++	if (strcmp(name,"SetWetDarkness")==0) *ppFnc = &gcCore2::SetWetDarkness;
++	if (strcmp(name,"SetWetGlint")==0) *ppFnc = &gcCore2::SetWetGlint;
++	if (strcmp(name,"SetWetReflection")==0) *ppFnc = &gcCore2::SetWetReflection;
++	if (strcmp(name,"SetWetGrain")==0) *ppFnc = &gcCore2::SetWetGrain;
  	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
  	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
  	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
-@@ -50,6 +56,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
+@@ -50,6 +62,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
  	if (strcmp(name,"SketchpadVersion")==0) *ppFnc = &gcCore2::SketchpadVersion;
  	if (strcmp(name,"CreatePoly")==0) *ppFnc = &gcCore2::CreatePoly;
  	if (strcmp(name,"CreateTriangles")==0) *ppFnc = &gcCore2::CreateTriangles;
@@ -913,7 +1332,7 @@ index 76c0d04..8417f66 100644
  	if (strcmp(name,"DeletePoly")==0) *ppFnc = &gcCore2::DeletePoly;
  	if (strcmp(name,"GetTextLength")==0) *ppFnc = &gcCore2::GetTextLength;
  	if (strcmp(name,"GetCharIndexByPosition")==0) *ppFnc = &gcCore2::GetCharIndexByPosition;
-@@ -159,11 +171,159 @@ void gcCore::FlipSwap(HSWAP hSwap)
+@@ -159,11 +177,214 @@ void gcCore::FlipSwap(HSWAP hSwap)
  
  // ===============================================================================================
  //
@@ -986,6 +1405,15 @@ index 76c0d04..8417f66 100644
 +// shader comment. Cockpit pass only (Scene.cpp raises and clears it per frame), so
 +// exterior shading is untouched at any setting.
 +float g_gcVCShadowDep  = 0.0f;
++float g_gcSurfaceWet   = 0.0f;   // ORO patch (s): 0 = dry (stock), 1 = soaked
++float g_gcStormLight   = 0.0f;   // ORO patch (s) part 2: 0 = clear (stock), 1 = full overcast
++float g_gcWetDark      = 1.0f;   // ORO patch (s) part 3: albedo darkening gain, 1 = shipped look
++float g_gcWetGlint     = 1.0f;   // ORO patch (s) part 5: hull drop-glint gain, 1 = designed
++float g_gcWetRefl      = 1.0f;   // ORO patch (s) part 6: puddle reflection gain, 1 = designed
++float g_gcWetSwimAmp   = 1.0f;   // ORO patch (s) part 6: ripple-warp amplitude scale, 1 = designed
++float g_gcWetSwimRate  = 1.0f;   // ORO patch (s) part 6: ripple cadence scale, 1 = designed
++float g_gcWetPoolSize  = 1.0f;   // ORO patch (s) part 7: standing-pool lattice scale, 1 = designed
++float g_gcWetPoolReach = 1.0f;   // ORO patch (s) part 7: pool visibility-distance scale, 1 = designed
 +
 +void gcCore::SetVCShadows(bool bEnable, float radius, float depth)
 +{
@@ -997,6 +1425,52 @@ index 76c0d04..8417f66 100644
 +	// a sum that also holds emissive, so a value outside 0..1 would either brighten the
 +	// shadow or drive the term negative.
 +	g_gcVCShadowDep = (depth < 0.0f) ? 0.0f : (depth > 1.0f ? 1.0f : depth);
++}
++
++// ORO patch (s). Clamped rather than trusted: the value scales an albedo and drives a
++// Fresnel term, and outside 0..1 it would either brighten the ground or go negative.
++void gcCore::SetSurfaceWetness(float wet)
++{
++	g_gcSurfaceWet = (wet < 0.0f) ? 0.0f : (wet > 1.0f ? 1.0f : wet);
++}
++
++// ORO patch (s) part 2. Clamped: the shaders lerp lighting terms by it, and outside 0..1
++// it would invert the sun or overdrive the ambient.
++void gcCore::SetStormLight(float k)
++{
++	g_gcStormLight = (k < 0.0f) ? 0.0f : (k > 1.0f ? 1.0f : k);
++}
++
++// ORO patch (s) part 3. Defaults to 1 so the shaders behave identically when no addon
++// ever calls this.
++void gcCore::SetWetDarkness(float k)
++{
++	g_gcWetDark = (k < 0.0f) ? 0.0f : (k > 2.0f ? 2.0f : k);
++}
++
++// ORO patch (s) part 5.
++void gcCore::SetWetGlint(float k)
++{
++	g_gcWetGlint = (k < 0.0f) ? 0.0f : (k > 2.0f ? 2.0f : k);
++}
++
++// ORO patch (s) part 6.
++void gcCore::SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach)
++{
++	g_gcWetRefl      = (k < 0.0f) ? 0.0f : (k > 2.0f ? 2.0f : k);
++	g_gcWetSwimAmp   = (fSwimAmp   < 0.0f) ? 0.0f : (fSwimAmp   > 2.0f ? 2.0f : fSwimAmp);
++	g_gcWetSwimRate  = (fSwimRate  < 0.0f) ? 0.0f : (fSwimRate  > 2.0f ? 2.0f : fSwimRate);
++	g_gcWetPoolSize  = (fPoolSize  < 0.0f) ? 0.0f : (fPoolSize  > 2.0f ? 2.0f : fPoolSize);
++	g_gcWetPoolReach = (fPoolReach < 0.0f) ? 0.0f : (fPoolReach > 2.0f ? 2.0f : fPoolReach);
++}
++
++// ORO patch (s) part 7: the pool grain.
++float g_gcWetGrainOp   = 1.0f;
++float g_gcWetGrainSize = 1.0f;
++void gcCore::SetWetGrain(float fOpacity, float fSize)
++{
++	g_gcWetGrainOp   = (fOpacity < 0.0f) ? 0.0f : (fOpacity > 2.0f ? 2.0f : fOpacity);
++	g_gcWetGrainSize = (fSize    < 0.0f) ? 0.0f : (fSize    > 2.0f ? 2.0f : fSize);
 +}
 +
 +// Queried by vVessel::RenderReentry (declared extern there - no header churn for one bool).
@@ -1075,7 +1549,7 @@ index 76c0d04..8417f66 100644
  // ===============================================================================================
  //
  void gcCore::ReleaseSwap(HSWAP hSwap) 
-@@ -269,6 +429,109 @@ HPOLY gcCore::CreateTriangles(HPOLY hPoly, const gcCore::clrVtx *pt, int npt, DW
+@@ -269,6 +490,109 @@ HPOLY gcCore::CreateTriangles(HPOLY hPoly, const gcCore::clrVtx *pt, int npt, DW
  }
  
  
@@ -1186,7 +1660,7 @@ index 76c0d04..8417f66 100644
  //
  void gcCore::DeletePoly(HPOLY hPoly)
 diff --git a/OVP/D3D9Client/gcCore.h b/OVP/D3D9Client/gcCore.h
-index f8634ac..070e04a 100644
+index f8634ac..57b850b 100644
 --- a/OVP/D3D9Client/gcCore.h
 +++ b/OVP/D3D9Client/gcCore.h
 @@ -16,6 +16,11 @@
@@ -1225,7 +1699,7 @@ index f8634ac..070e04a 100644
  
  	// ===========================================================================
  	/// \name Custom swap-chain management functions
-@@ -387,6 +402,94 @@ public:
+@@ -387,6 +402,156 @@ public:
  	*/
  	gc_interface SURFHANDLE GetRenderTarget(HSWAP hSwap);
  
@@ -1317,10 +1791,72 @@ index f8634ac..070e04a 100644
 +	*/
 +	gc_interface void SetVCShadows(bool bEnable, float radius, float depth);
 +
++	/**
++	* rief ORO patch (s): how WET the ground looks, 0 = dry, 1 = soaked.
++	* \param wet wetness, clamped to 0..1.
++	* 
++ote Orbiter has no weather, so an addon cannot put water on the ground itself -
++	*   the surface is drawn by the client, in two different places (base tiles through
++	*   Mesh.fx's BaseTile technique, terrain through NewPlanet.hlsl). This hands both of
++	*   them one number. Same shape as SetVCShadows: the addon does not draw anything, it
++	*   sets client state, and 0 is exactly stock behaviour.
++	*/
++	gc_interface void SetSurfaceWetness(float wet);
++
++	/**
++	* rief ORO patch (s), part 2: STORM LIGHT. 0 = clear sky (stock), 1 = full overcast.
++	* \param k overcast factor, clamped to 0..1.
++	* 
++ote This is what actually makes a rainstorm look like one. A post-process can only
++	*   darken the finished frame; the sharp sun shadows, the speculars and the warm
++	*   directional light are already baked into every pixel by then. This factor collapses
++	*   the DIRECTIONAL sun into a lifted ambient at the source (consumed in the deployed
++	*   shaders), fades the projected ground shadows, and kills the sun glare - so the
++	*   world goes flat and grey the way it does under a real deck, instead of dim.
++	*/
++	gc_interface void SetStormLight(float k);
++
++	/**
++	* rief ORO patch (s), part 3: how far the wet ground DARKENS. 1 = the shipped look,
++	*   0 = wetness without darkening, 2 = near-black pools. Clamped to 0..2.
++	* 
++ote A taste knob on the albedo term only - the mirror and the puddle mask ride
++	*   SetSurfaceWetness as before.
++	*/
++	gc_interface void SetWetDarkness(float k);
++
++	/**
++	* rief ORO patch (s), part 5: gain on the rain-drop GLINT on hulls. 1 = designed,
++	*   0 = off, 2 = double. Clamped to 0..2.
++	*/
++	gc_interface void SetWetGlint(float k);
++
++	/**
++	* \brief ORO patch (s), part 6: gain on the wet-ground planar REFLECTION (the
++	*   vessel image in the puddles). 1 = designed, 0 = off. Clamped to 0..2.
++	* \param fSwimAmp Ripple-warp amplitude scale on the reflected image, 1 = designed,
++	*   0 = a still mirror. Clamped to 0..2.
++	* \param fSwimRate Ripple cadence scale, 1 = designed. Clamped to 0..2.
++	* \param fPoolSize Standing-pool lattice scale, 1 = designed, bigger = larger pools.
++	*   Clamped to 0..2.
++	* \param fPoolReach Pool visibility distance scale, 1 = designed (~900 m e-fold),
++	*   0 = camera vicinity only. Clamped to 0..2.
++	*/
++	gc_interface void SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach);
++
++	/**
++	* \brief ORO patch (s) part 7: the pool-grain controls - the broken-water texture
++	*   inside the standing pools' reflections.
++	* \param fOpacity How deeply the grain digs into the reflection. 1 = designed,
++	*   0 = uniform pools. Clamped to 0..2.
++	* \param fSize Grain feature size scale. 1 = designed, bigger = coarser. Clamped 0..2.
++	*/
++	gc_interface void SetWetGrain(float fOpacity, float fSize);
++
  	/**
  	* \brief Release a swap object after it's no longer needed.
  	* \param hSwap Handle to a swap object.
-@@ -487,6 +590,86 @@ public:
+@@ -487,6 +652,86 @@ public:
  	gc_interface HPOLY CreateTriangles(HPOLY hPoly, const clrVtx* pt, int npt, DWORD flags);
  
  
@@ -1408,10 +1944,10 @@ index f8634ac..070e04a 100644
  	* \brief Deletes a polyline created with gcCreatePolyPolyline()
  	* \param hPoly Handle to a polyline to be deleted
 diff --git a/OVP/D3D9Client/shaders/D3D9Client.fx b/OVP/D3D9Client/shaders/D3D9Client.fx
-index 471df00..98d83cd 100644
+index 471df00..6e4274b 100644
 --- a/OVP/D3D9Client/shaders/D3D9Client.fx
 +++ b/OVP/D3D9Client/shaders/D3D9Client.fx
-@@ -144,6 +144,16 @@ uniform extern float     gDistScale;
+@@ -144,6 +144,41 @@ uniform extern float     gDistScale;
  uniform extern float     gFogDensity;
  uniform extern float     gTime;
  uniform extern float     gMix;				// General purpose parameter (multible uses)
@@ -1425,14 +1961,331 @@ index 471df00..98d83cd 100644
 +// the COCKPIT PASS ONLY and clears it after, so exterior shading is bit-for-bit stock;
 +// 0 is also exactly stock, so the whole patch is inert until an addon asks for it.
 +uniform extern float     gVCShdDepth;
++uniform extern float     gSurfWet;        // ORO patch (s): ground wetness, 0..1
++uniform extern float     gWetTime;        // ORO patch (s): real-time sparkle clock, wraps hourly
++uniform extern float     gWetGlint;       // ORO patch (s) part 5: hull glint gain, 0..2
++uniform extern texture   gWetReflTex;     // ORO patch (s) part 6: the wet-ground planar mirror
++uniform extern float4    gWetReflPrm;     // ORO patch (s) part 6: 1/W, 1/H, gain, live
++uniform extern float4    gWetSwimPrm = {1, 1, 1, 1};  // ORO patch (s): swim amp, swim rate, pool size, pool reach (user sliders)
++uniform extern float4    gWetGrainPrm = {1, 1, 0, 0};  // ORO patch (s) part 7: grain opacity, grain size (user sliders)
++sampler WetReflS = sampler_state
++{
++	Texture = <gWetReflTex>;
++	MinFilter = LINEAR;
++	MagFilter = LINEAR;
++	MipFilter = NONE;
++	AddressU = CLAMP;
++	AddressV = CLAMP;
++};
++uniform extern float     gWetDark;        // ORO patch (s) part 3: wet albedo darkening
++                                          // gain, 1 = the designed look (pushed with a 1
++                                          // default from C++, so an absent addon changes
++                                          // nothing).
++uniform extern float     gStorm;          // ORO patch (s) part 2: overcast factor, 0..1.
++                                          // Collapses the directional sun into a lifted
++                                          // ambient in every consumer below - under a
++                                          // storm deck there is no sun disc, so there are
++                                          // no sharp shadows, no warm light, no speculars.
  uniform extern float 	 gMtrlAlpha;
  uniform extern float	 gGlowConst;
  uniform extern float	 gNightTime;		// 1 for nighttime, 0 for daytime
+@@ -637,6 +672,36 @@ float4 SpotTechPS(SimpleVS frg) : COLOR
+ 	return (tex2D(SimpleS, frg.tex0) * gColor) * gMix;
+ }
+ 
++// ----------------------------------------------------------------------------
++// ORO patch (s): the rain-drop GLINT, as ONE shared function - because the first build
++// put it inline in PBR_PS alone and a mesh with no advanced textures renders through
++// RenderFast (Mesh.cpp:1453), a third shader path entirely: one vessel sparkled and its
++// neighbour stayed bone dry. The fifth time in this project a rule was written and not
++// swept ((r)'s own rule, "behaviour must not depend on which path a mesh takes"). A
++// shared helper cannot drift between paths.
++// Distance-aware: a drop cell is fixed in mesh UV, so up close one blob covers many
++// pixels and reads as a headlight. Near the camera the blob TIGHTENS and DIMS toward
++// fine speckle; the far look is unchanged.
++float WetSparkle(float2 tex0, float3 nrmW, float dist)
++{
++	if (gSurfWet < 0.001f) return 0.0f;
++	float2 uvS  = tex0 * 34.0f;
++	float2 cell = floor(uvS);
++	float  hc   = frac(sin(dot(cell, float2(127.1f, 311.7f))) * 43758.5453f);
++	float  uu   = gWetTime * (1.0f / 0.55f) + hc;      // the splash-ring cadence
++	float  ep   = floor(uu);
++	float  tt   = frac(uu);
++	float  h2   = frac(sin(dot(cell + ep * 7.13f, float2(269.5f, 183.3f))) * 43758.5453f);
++	float  on   = step(h2, 0.34f);
++	float  env  = on * saturate(tt * 9.0f) * exp(-tt * 5.5f);
++	float2 fp   = frac(uvS) - float2(0.25f + 0.5f * frac(h2 * 13.7f),
++	                                 0.25f + 0.5f * frac(h2 * 41.3f));
++	float  distF = saturate(dist * (1.0f / 45.0f));
++	float  blob  = saturate(1.0f - dot(fp, fp) * lerp(34.0f, 11.0f, distF));
++	float  upF   = saturate(dot(nrmW, normalize(gCameraPos)) * 0.6f + 0.4f);
++	return env * blob * upF * gSurfWet * lerp(0.30f, 1.0f, distF) * gWetGlint;
++}
++
+ #include "Particle.fx"
+ #include "Mesh.fx"
+ #include "Vessel.fx"
+diff --git a/OVP/D3D9Client/shaders/Mesh.fx b/OVP/D3D9Client/shaders/Mesh.fx
+index 970908d..3732cf6 100644
+--- a/OVP/D3D9Client/shaders/Mesh.fx
++++ b/OVP/D3D9Client/shaders/Mesh.fx
+@@ -171,7 +171,24 @@ TileMeshVS BaseTileVS(NTVERTEX vrt)
+ }
+ 
+ 
+-float4 BaseTilePS(TileMeshVS frg) : COLOR
++// ORO patch (s), round 12: the pool grain's value noise. Periodic (the wrap) so the
++// tile seam law holds; STATIC in the world - no clock, his call after the migrating
++// flecks read as state-jumping dots.
++float OroGrainHash(float2 c, float wrap)
++{
++	c = fmod(c, wrap);
++	return frac(sin(dot(c, float2(127.1f, 311.7f))) * 43758.5453f);
++}
++float OroGrainNoise(float2 p, float wrap)
++{
++	float2 i = floor(p), f = frac(p);
++	f = f * f * (3.0f - 2.0f * f);
++	float a = OroGrainHash(i, wrap),                b = OroGrainHash(i + float2(1, 0), wrap);
++	float c = OroGrainHash(i + float2(0, 1), wrap), d = OroGrainHash(i + float2(1, 1), wrap);
++	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
++}
++
++float4 BaseTilePS(float4 sc : VPOS, TileMeshVS frg) : COLOR
+ {
+ 	// Normalize input
+ 	float3 nrmW = normalize(frg.nrmW);
+@@ -185,10 +202,188 @@ float4 BaseTilePS(TileMeshVS frg) : COLOR
+ 
+ 	if (d<=0) s = 0;
+ 
+-	float3 clr = cTex.rgb * saturate(d * gSun.Color + s * gSun.Color + gSun.Ambient);
++	// ORO patch (s) part 2: overcast. The lifted ambient (ambE) is shared with the wet
++	// block below, so the puddles reflect the same sky the tile is lit by.
++	float  dstB = length(frg.CamW);           // frg.CamW is the raw camera-relative vector
++	                                          // (the normalized copy is the local CamW), so
++	                                          // its length is the pixel-camera distance
++	float3 ambE = gSun.Ambient * (1.0f + gStorm * 1.8f);
++	float3 clr = cTex.rgb * saturate((d + s) * gSun.Color * (1.0f - gStorm) + ambE);
+ 
+ 	if (gNight) clr += tex2D(Tex1S, frg.tex0).rgb;
+ 
++	// ------------------------------------------------------------------------
++	// ORO patch (s): WET GROUND. Everything below is exactly zero at gSurfWet 0, so
++	// stock content cannot move.
++	//
++	// Three things make a surface read as wet, and only one of them is "shiny":
++	//  1. IT GOES DARK. Water fills the pores and light that would have scattered
++	//     straight back out gets trapped, so wet concrete loses about half its albedo.
++	//     This is the single biggest cue and it costs one multiply.
++	//  2. IT REFLECTS THE SKY AT GRAZING ANGLES. Fresnel: a wet road is nearly black
++	//     underfoot and a mirror toward the horizon. `frg.insca` is the atmospheric
++	//     in-scatter the client already computed for this pixel - which IS the colour
++	//     of the sky in that direction - so the reflection is free and correctly
++	//     coloured, without a reflection pass or a probe.
++	//  3. PUDDLES. Water pools where the surface dips, and a puddle is not "more wet",
++	//     it is a different material: darker still, and glassy rather than damp.
++	//     The mask is procedural in tile UV - no texture, and low frequency enough that
++	//     a base tile does not turn into a chequerboard.
++	// ------------------------------------------------------------------------
++	if (gSurfWet > 0.001f)
++	{
++		// THREE SCALES OF POOLING (part 7 round 2: "more variation in size"). The fine
++		// lattice gives blobs, the mid one gathers them into areas, and the COARSE one
++		// shifts the fine threshold regionally - whole stretches of merged sheets next
++		// to stretches of bare speckle, which is where real aprons get their size
++		// variety. All three ride the Pool size slider (gWetSwimPrm.z, 1 = designed).
++		// SEAMLESS LATTICE (round 3: he screenshotted the seams). Adjacent tiles'
++		// UVs are only guaranteed to agree MODULO 1 - that is all a wrapping texture
++		// needs - so the old fractional-cycle sinusoids jumped phase at every tile
++		// boundary. Every sinusoid now completes an INTEGER number of cycles per UV
++		// unit (TAU x QK), which makes the whole lattice 1-periodic: a mod-1 jump
++		// lands on the same value and the seam cannot exist. Consequences accepted:
++		// the Pool size slider moves in integer-cycle steps (invisible on the fine
++		// lattice, coarse on p3), and frac() bounds the sin arguments for precision -
++		// legal only BECAUSE the lattice is 1-periodic. p3 carries phase offsets to
++		// decorrelate it from p2 where the slider drives both to 1 cycle.
++		// ROUND 3 ("too squarish"): interference SUM of angled plane waves instead of
++		// the axis-aligned product - rounded quasi-random blobs. Seam law intact:
++		// integer wave-vector components (signed quantizer QS), free phases.
++		float  poolK = 1.0f / max(0.35f, gWetSwimPrm.z);
++	#define QS(k) (((k) < 0.0f) ? -max(1.0f, floor(-(k) * poolK + 0.5f)) : max(1.0f, floor((k) * poolK + 0.5f)))
++		float2 uvT = frac(frg.tex0) * 6.2831853f;
++		float  p1 = (sin(uvT.x * QS(8.0f)  + uvT.y * QS(3.0f)  + 1.3f)
++		           + sin(uvT.x * QS(4.0f)  + uvT.y * QS(7.0f)  + 4.1f)
++		           + sin(uvT.x * QS(-6.0f) + uvT.y * QS(6.0f)  + 2.6f)
++		           + sin(uvT.x * QS(7.0f)  + uvT.y * QS(-4.0f) + 5.5f)) * 0.42f;
++		float  p2 = (sin(uvT.x * QS(2.0f)  + uvT.y * QS(1.0f)  + 0.7f)
++		           + sin(uvT.x * QS(-1.0f) + uvT.y * QS(2.0f)  + 3.9f)
++		           + sin(uvT.x * QS(2.0f)  + uvT.y * QS(-2.0f) + 2.2f)) * 0.55f;
++		float  p3 = (sin(uvT.x * QS(1.0f)  + uvT.y * QS(1.0f)  + 1.9f)
++		           + sin(uvT.x * QS(-1.0f) + uvT.y * QS(1.0f)  + 5.0f)
++		           + sin(uvT.x * QS(1.0f)  + uvT.y * QS(-1.0f) + 0.4f)) * 0.55f;
++		// GRAIN IN THE REFLECTION (round 12 - the cell flecks were CIRCULAR DOTS that
++		// jumped from state to state; his circled reference areas are fine IRREGULAR
++		// broken-water texture). Two octaves of continuous value noise, THRESHOLDED
++		// so only its upper patches dig into the reflection: irregular connected
++		// blotches at two scales, sparse because the threshold is high, STATIC in
++		// the world (no migration, his call), periodic with the tile (seam law).
++		// the two user knobs: opacity scales the knockout depth; size rescales the
++		// lattice - QUANTIZED to whole cells per period so the seam law survives it
++		float  GNq = max(8.0f, floor(96.0f / max(0.35f, gWetGrainPrm.y) + 0.5f));
++		float2 guv = frac(frg.tex0) * GNq;
++		float  gn  = 0.62f * OroGrainNoise(guv, GNq)
++		           + 0.38f * OroGrainNoise(guv * 2.0f, GNq * 2.0f);
++		float  gran = 1.0f - saturate(0.85f * gWetGrainPrm.x) * smoothstep(0.52f, 0.78f, gn);
++	#undef QS
++		// POOLS MERGE AS THE GROUND SOAKS: thresholds slide with gSurfWet so puddles
++		// widen and join into sheets. HIS SPEC (round 2): pools only START at 70% rain -
++		// the ground soaks first, water stands later - so the trailing wet factor is a
++		// 0.70..1.00 ramp, not gSurfWet itself. And the FAR FIELD FADES (Pool reach,
++		// gWetSwimPrm.w): pools to the horizon read as a pattern, so an exponential
++		// e-fold (~900 m at slider 1) blends them out with distance while the damp
++		// sheen carries on - cut and blend, exactly as asked.
++		float  pud = saturate(p1 * 1.30f - 0.16f + 0.30f * gSurfWet + p3 * 0.35f)
++		           * saturate(p2 * 1.10f + 0.35f + 0.25f * gSurfWet);
++		pud = saturate(pud * 1.6f) * saturate((gSurfWet - 0.70f) / 0.30f);
++		pud *= exp(-dstB / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
++
++		float wet = gSurfWet;
++		// gWetDark is the user's darkening gain: 0 = wet with no darkening at all, 2 =
++		// fully black ground. RECALIBRATED TWICE 2026-08-22 and this is the settled map:
++		// the doubled coefficients saturated by ~1.3 on the slider, so the top 0.7 of the
++		// track did nothing. Coefficients x0.65 stretch the whole USEFUL range (old
++		// 0..1.3) across the full track (0..2) - the maximum is the same black, and every
++		// position below it now moves something.
++		clr *= saturate(lerp(1.0f, 1.0f - 0.702f * gWetDark, wet));   // damp
++		clr *= saturate(lerp(1.0f, 1.0f - 0.988f * gWetDark, pud));   // standing water, darker still
++
++		// ⚠️ THE SKY IS NOT frg.insca. The first build reflected the in-scatter, on the
++		// reasoning that it is the colour of the air in that direction - which is true and
++		// useless CLOSE UP, because in-scatter accumulates with distance and is ~0 twenty
++		// metres away. So the "reflection" was a lerp toward black and the wet ground near
++		// the camera got darker instead of shinier, which is exactly what he reported.
++		// A wet surface reflects the SKY DOME, which is bright even under overcast, and
++		// the nearest thing to its luminance that this shader holds is the ambient term.
++		// insca is still added, so distant wet ground still picks up aerial perspective.
++		// Under storm light ambE is already lifted, so the puddles automatically reflect
++		// the same darker sky the scene is lit by - the two cannot disagree.
++		float3 cSky = ambE * 2.6f + gSun.Color * (1.0f - gStorm) * 0.30f + frg.insca.rgb * 1.2f;
++
++		// Fresnel: near-black underfoot, mirror toward the horizon. That gradient IS the
++		// look of a wet road, and it is why this cannot be a uniform gloss term.
++		float fres = pow(1.0f - saturate(dot(nrmW, CamW)), 3.0f);
++		// REPARTITIONED (look round 2): the damp film stays angle-dependent, but the
++		// POOLS reflect the sky strongly at ANY viewing angle - which is what standing
++		// water does, and why the reference's puddles read as light-grey sky patches
++		// against the dark ground instead of staying dark themselves.
++		float mirror = saturate((0.25f + 0.75f * fres) * 0.42f * wet
++		                      + (0.60f + 0.40f * fres) * pud * gran);
++		clr = lerp(clr, cSky, mirror);
++
++		// THE VESSEL IMAGE IN THE WATER (ORO patch (s) part 6). The half-res target
++		// holds this frame's vessels rendered through a ground-mirrored camera, so the
++		// lookup is simply this pixel's own screen position - the whole point of the
++		// planar trick. Alpha is coverage (the RT clears to 0).
++		// LOOK ROUND vs the reference (2026-08-22): THREE taps smeared VERTICALLY - the
++		// wet-road signature, micro-roughness stretching the image down-screen while it
++		// stays horizontally coherent - a stronger base presence (the old blend was
++		// throttled to near-nothing by Fresnel at ordinary camera heights), and a
++		// heavier ripple so the image breaks into patches over the pools.
++		if (gWetReflPrm.w > 0.5f) {
++			float2 ruv = (sc.xy + 0.5f) * gWetReflPrm.xy;
++			ruv.x = 1.0f - ruv.x;      // undo the clip-space X flip (see the mirror pass)
++			// ⚠️ THE RIPPLE SHIMMERS FAST NOW (look round 2) - "dances too slowly,
++			// like the aurora" is the third time that exact critique has hit this
++			// project, and the cure is always the clock, never the geometry: rain-
++			// pocked water flickers at a few Hz. gWetTime is the shared rain clock,
++			// so it pauses with the sim like everything else.
++			// LOOK ROUND 3: the STATIC pool-shape offset (p1/p2 - what breaks the
++			// image into patches) and the ANIMATED swim are now scaled separately.
++			// "The reflection swings too far": the swim is a rain-pocked surface
++			// jittering, not waves. The pool patchiness must not shrink with it, so
++			// p1/p2 keep the old scale. LOOK ROUND 4: amplitude and cadence are HIS
++			// now - gWetSwimPrm (x = amp scale, y = rate scale, both 0..2, 1 = this
++			// baseline) rides SetWetReflection, the Swim size / Swim rate sliders.
++			ruv += float2(p1, p2) * (0.0015f + 0.0055f * pud);
++			ruv += float2(sin(gWetTime * 12.0f * gWetSwimPrm.y + uvT.y * 4.0f),
++			              cos(gWetTime *  9.7f * gWetSwimPrm.y + uvT.x * 4.0f))
++			     * (0.0005f + 0.0016f * pud) * gWetSwimPrm.x;
++			float  smr = gWetReflPrm.y * 3.2f;                   // shorter smear
++			float4 cVes = tex2D(WetReflS, ruv) * 0.5f
++			            + tex2D(WetReflS, ruv + float2(0, smr)) * 0.3f
++			            + tex2D(WetReflS, ruv + float2(0, smr * 2.5f)) * 0.2f;
++			float  rStr = cVes.a * saturate(0.35f + 0.90f * mirror)
++			            * saturate(0.55f * wet + 1.10f * pud) * gWetReflPrm.z;
++			clr = lerp(clr, cVes.rgb, saturate(rStr));
++		}
++
++		// A tight sun glint on top - the specular the dry path already computes, but
++		// sharper and stronger, because water is smooth where concrete is not.
++		// Round 3: now storm-collapsed like every directional term (it previously rode
++		// the RAW diffuse dot and survived full overcast) - the broad glare below is
++		// what replaces it under the deck.
++		float gl = pow(saturate(dot(r, CamW)), 90.0f) * d * (1.0f - gStorm)
++		         * (0.7f * wet + 2.4f * pud);
++		clr += gSun.Color * gl;
++		// POOL SKY GLARE (part 7 round 3, his ask): a BROAD view-dependent lobe - the
++		// bright cloud deck around the hidden sun - growing as the storm does, so the
++		// pools flash as the camera moves even under full overcast. cSky already
++		// carries the daylight factor, so this goes dark at night on its own.
++		float glb = pow(saturate(dot(r, CamW)), 7.0f) * (0.30f + 0.70f * gStorm);
++		clr += cSky * glb * (0.30f * wet + 1.10f * pud);
++	}
++
++	// ORO patch (s) part 2: STORM FOG. Rain scatters light, so visibility collapses and
++	// the crisp bright horizon goes with it. Exponential in the pixel distance, toward the
++	// lifted-ambient grey, so the fog is the same colour as the light. Zero at gStorm 0.
++	if (gStorm > 0.001f) {
++		float  ff = (1.0f - exp(-dstB * 0.00045f)) * saturate(gStorm * 1.4f);
++		float3 cFog = saturate(ambE * 2.2f + gSun.Color * 0.06f);
++		clr = lerp(clr, cFog, ff);
++	}
++
+ 	return float4(clr.rgb*frg.atten.rgb+frg.insca.rgb, cTex.a);
+ 	//return float4(clr.rgb*frg.atten.rgb+frg.insca.rgb, cTex.a*(1-frg.insca.a));	// Make basetiles transparent during night
+ }
 diff --git a/OVP/D3D9Client/shaders/Metalness.fx b/OVP/D3D9Client/shaders/Metalness.fx
-index 618ba0b..4b3bd73 100644
+index 618ba0b..337212f 100644
 --- a/OVP/D3D9Client/shaders/Metalness.fx
 +++ b/OVP/D3D9Client/shaders/Metalness.fx
-@@ -283,8 +283,13 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -185,7 +185,15 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// ----------------------------------------------------------------------
+ 
+ 	float3 camW = normalize(frg.camW);
+-	float3 cSun = gSun.Color * lerp(float3(1.1, 1.1, 0.9), float3(1,1,1), saturate(gRadius[3]*2e-5));
++	// ORO patch (s) part 2: overcast collapses the direct sun. ⚠️ SWEPT IN LATE
++	// (2026-08-22), and the story is the diagnostic: a DG on the apron stayed bone dry
++	// and SUNLIT through the storm while its neighbour got the full weather. Two shader-
++	// path theories died (RenderFast, then "the DG has no advanced maps" - a bad grep:
++	// dgmk4_2_ns.dds was in the listing and the pattern missed the _ns suffix), so a
++	// path-tint instrument went in: Glint > 1.9 painted each path a colour, and one
++	// screenshot answered MAGENTA - this file, the only path with no weather code.
++	// Sixth sweep of the "every path or behaviour depends on the path" rule.
++	float3 cSun = gSun.Color * lerp(float3(1.1, 1.1, 0.9), float3(1,1,1), saturate(gRadius[3]*2e-5)) * (1.0f - gStorm);
+ 
+ 
+ 	// ======================================================================
+@@ -265,7 +273,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 
+ 	//cAmbient = saturate(cAmbient * (1.0f + 15.0f * gNightTime));	
+ 	// Apply base ambient light
+-	cAmbient = max(cAmbient, gSun.Ambient);
++	cAmbient = max(cAmbient, gSun.Ambient * (1.0f + gStorm * 1.8f));   // ORO patch (s) part 2
+ #endif
+ #endif
+ 
+@@ -273,7 +281,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// ======================================================================
+ 	// Compute Earth glow
+ 	float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
+-	float3 cAmbient = gAtmColor.rgb * max(0, angl * gGlowConst) + gSun.Ambient;
++	float3 cAmbient = gAtmColor.rgb * max(0, angl * gGlowConst) + gSun.Ambient * (1.0f + gStorm * 1.8f);   // ORO patch (s) part 2
+ #endif
+ 
+ 
+@@ -283,8 +291,13 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
  	// ======================================================================
  	// Add vessel self-shadows
  	// ======================================================================
@@ -1447,20 +2300,79 @@ index 618ba0b..4b3bd73 100644
  #endif
  	
  
-@@ -345,7 +350,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -345,13 +358,19 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
  	// Add a faint diffuse hue for rough metals. Rough metal doesn't look good if it's totally black
  	fA += fRgh * fMetal * 0.05f;
  
 -	float3 zD = cDiff.rgb * fA * LightFXSq(Sq(cSun * fR * dLN) + cDiffLocal + Sq(cAmbient) + Sq(gMtrl.emissive.rgb));
++	// ORO patch (s): wet albedo damp, same 0.66 as every other path
++	if (gSurfWet > 0.001f) cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
++
 +	float3 zD = cDiff.rgb * fA * LightFXSq(Sq(cSun * fR * dLN) + cDiffLocal + Sq(cAmbient * fAmbShd) + Sq(gMtrl.emissive.rgb));
  
  	// Combine specular terms
  	// float3 zS = cS * (cSun * dLN) + cSpec * LightFX(cSpecLocal) * 0.5f;
+ 	float3 zS = cS * (cSun * dLN) + cSpec * LightFX(cSpecLocal) * 0.5f  + cS2 * (cSun * dLN) + cSpec2 * LightFX(cSpecLocal) * 0.5f;		// Modified
+ 	
+ 	cDiff.rgb = zD + zS + cE;
++	// ORO patch (s): the drop glint - SKY light, shared helper (see D3D9Client.fx)
++	cDiff.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
++	           * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
+ 
+ 	// Override material alpha to make reflections visible
+ 	cDiff.a = saturate(cDiff.a + cmax(zS + cE));
 diff --git a/OVP/D3D9Client/shaders/NewPlanet.hlsl b/OVP/D3D9Client/shaders/NewPlanet.hlsl
-index 5b43b27..4515075 100644
+index 5b43b27..abd6b65 100644
 --- a/OVP/D3D9Client/shaders/NewPlanet.hlsl
 +++ b/OVP/D3D9Client/shaders/NewPlanet.hlsl
-@@ -633,6 +633,22 @@ float4 TerrainPS(TileVS frg) : COLOR
+@@ -111,6 +111,13 @@ struct PerObjectParams
+ 	float	 fTgtScale;
+ };
+ 
++uniform extern float gWet;            // ORO patch (s): ground wetness, 0..1
++uniform extern float gStorm;          // ORO patch (s) part 2: overcast factor, 0..1
++uniform extern float gWetDark;        // ORO patch (s) part 3: wet albedo darkening gain
++uniform extern float4 gWetReflPrm;    // ORO patch (s) part 6: 1/W, 1/H, gain, live
++uniform extern float4 gWetSwimPrm = {1, 1, 1, 1};  // ORO patch (s): swim amp, swim rate, pool size, pool reach
++uniform extern float4 gWetGrainPrm = {1, 1, 0, 0}; // ORO patch (s) part 7: grain opacity, grain size
++sampler tWetRefl;                     // ORO patch (s) part 6: the planar mirror
+ uniform extern PerObjectParams Prm;
+ uniform extern FlowControlPS Flow;
+ uniform extern FlowControlVS FlowVS;
+@@ -386,7 +393,23 @@ float GGX_NDF(float dHN, float rgh)
+ }
+ 
+ 
+-float4 TerrainPS(TileVS frg) : COLOR
++// ORO patch (s), round 12: the pool grain's value noise - periodic (the wrap) so the
++// seam law holds, static in the world (no clock).
++float OroGrainHash(float2 c, float wrap)
++{
++	c = fmod(c, wrap);
++	return frac(sin(dot(c, float2(127.1f, 311.7f))) * 43758.5453f);
++}
++float OroGrainNoise(float2 p, float wrap)
++{
++	float2 i = floor(p), f = frac(p);
++	f = f * f * (3.0f - 2.0f * f);
++	float a = OroGrainHash(i, wrap),                b = OroGrainHash(i + float2(1, 0), wrap);
++	float c = OroGrainHash(i + float2(0, 1), wrap), d = OroGrainHash(i + float2(1, 1), wrap);
++	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
++}
++
++float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
+ {
+ 
+ 	float2 vUVSrf = frg.texUV.xy * Prm.vTexOff.zw + Prm.vTexOff.xy;
+@@ -607,6 +630,7 @@ float4 TerrainPS(TileVS frg) : COLOR
+ 	fLvl *= fECL;	// Apply eclipse
+ 
+ 	float3 color = cTex.rgb * LightFX(max(fLvl, 0) * fShadow + cDiffLocal);
++
+ 	return float4(pow(saturate(color * Const.TrExpo), Const.TrGamma), 1.0f);		// Gamma corrention
+ #else
+ 
+@@ -633,6 +657,22 @@ float4 TerrainPS(TileVS frg) : COLOR
  
  	cNgt = cMsk.rgb * (1 - Const.CamSpace) * fNgt; // Nightlights surface texture illumination term
  	cNgt2 = cMsk.rgb * Const.CamSpace * 4.0f * fNgt; // Nightlights orbital visibility
@@ -1483,7 +2395,180 @@ index 5b43b27..4515075 100644
  #endif
  
  	float fNoise = (tex2Dlod(tNoise, float4(frg.texUV.xy * 4.0f * Prm.fTgtScale, 0, 0)).r - 0.5f) * ATMNOISE;
-@@ -712,6 +728,18 @@ float4 TerrainPS(TileVS frg) : COLOR
+@@ -678,6 +718,12 @@ float4 TerrainPS(TileVS frg) : COLOR
+ 	// Bake light and shadow terms
+ 	float3 cL = cSF * fD * fShadow * fShd;
+ 
++	// ORO patch (s) part 2: overcast. The DIRECTIONAL term collapses and the ambient
++	// lifts, which is what a storm deck actually does to the light - shadows and the
++	// warm cast go with it, instead of a post-process dimming the finished frame.
++	cL *= (1.0f - gStorm);
++	cA *= (1.0f + gStorm * 2.2f);
++
+ 	// Lit the texture with various things
+ 	cTex.rgb *= cL * 2.0f + (cA + cDiffLocal + Const.cAmbient * Const.Ambient) * saturate(1.0f + fG + fZ) + cNgt;
+ 
+@@ -687,15 +733,158 @@ float4 TerrainPS(TileVS frg) : COLOR
+ 	cTex.rgb += cRfl * 0.75f;
+ 
+ 	// Add Specular component
+-	cTex.rgb += cSun * fSpe * smoothstep(-0.001f, 0.03f, fDPS);
++	cTex.rgb += cSun * fSpe * smoothstep(-0.001f, 0.03f, fDPS) * (1.0f - gStorm);   // ORO patch (s) part 2
+ 
+ 	// Amplify cloud shadows for orbital views
+ 	float fOrbShd = 1.0f - (1.0f - fShd) * Const.CamSpace * 0.5f;
+ 
++	// ORO patch (s): WET TERRAIN. See Mesh.fx's BaseTilePS for the full reasoning.
++	// ⚠️ It goes in BEFORE the haze and the eclipse, so wet ground is still attenuated by
++	// the atmosphere exactly like dry ground - putting it after would have made distant
++	// wet terrain punch through the aerial perspective. Exactly zero at gWet 0, so stock
++	// content cannot move.
++	if (gWet > 0.001f) {
++		// ORO patch (s) part 7: STANDING POOLS ON THE TERRAIN - his brief, verbatim:
++		// patches all around the vessel, different sizes, that STAY IN PLACE as the
++		// vessel moves, new ones appearing ahead and old ones dropping behind. All of
++		// that is a COORDINATE CHOICE, not machinery: the lattice lives in the water-
++		// microtexture UV mapping (Prm.vMicroOff, WITHOUT line 401's ocean time drift),
++		// which the client already keeps continuous across tiles and LODs so the water
++		// microtexture is seamless - so the pools are pinned to the ground by
++		// construction and the vessel simply drives across them. Spawn/cull for free.
++		// Same two-scale sine lattice as the base tiles (BaseTilePS), so runway and
++		// apron pool by one law; the two K constants are the pool-size calibration
++		// and are a fly-and-report number, not a derivation.
++		// Part 7 round 2: THREE lattice scales (the coarse one shifts the fine
++		// threshold regionally - sheets here, speckle there: the size variety), the
++		// Pool size slider (gWetSwimPrm.z) scaling all three, pools STARTING at 70%
++		// rain (his spec - ground soaks first, water stands later), and a Pool reach
++		// distance e-fold (gWetSwimPrm.w, ~900 m at 1) so the far field blends out
++		// instead of patterning to the horizon.
++		// SEAMLESS LATTICE (round 3: he screenshotted the seams). The micro-UV
++		// mapping agrees across tiles and LODs only MODULO 1 - all a wrapping
++		// texture needs - so fractional-cycle sinusoids jumped phase at every tile
++		// boundary. Integer cycles per UV unit (TAU x QK) make the lattice
++		// 1-periodic, so a mod-1 jump lands on the same value: no seam, by
++		// construction. frac() bounds the sin arguments (precision), legal only
++		// because of that same periodicity. The slider quantizes to whole cycles.
++		// ROUND 3 ("too squarish, a bit geometric"): the old lattice was a PRODUCT of
++		// axis-aligned sinusoids, and x-waves times y-waves can only make rectilinear
++		// cells - the maze he screenshotted. It is now an INTERFERENCE SUM of plane
++		// waves at spread angles - how isotropic-looking noise is built from periodic
++		// parts - so the blobs come out ROUNDED and quasi-random.
++		// ⚠️ THE SEAM LAW HOLDS: every wave-vector COMPONENT is an integer number of
++		// cycles per UV unit (signed quantizer QS), so the field stays 1-periodic and
++		// a mod-1 tile jump lands on the same value. The phases are free randomizers.
++		float2 vUVPool = frg.texUV.xy * Prm.vMicroOff.zw + Prm.vMicroOff.xy;
++		float  poolK = 1.0f / max(0.35f, gWetSwimPrm.z);
++	#define QS(k) (((k) < 0.0f) ? -max(1.0f, floor(-(k) * poolK + 0.5f)) : max(1.0f, floor((k) * poolK + 0.5f)))
++		float2 uvT = frac(vUVPool) * 6.2831853f;
++		float  p1 = (sin(uvT.x * QS(50.0f)  + uvT.y * QS(17.0f)  + 1.3f)
++		           + sin(uvT.x * QS(21.0f)  + uvT.y * QS(47.0f)  + 4.1f)
++		           + sin(uvT.x * QS(-33.0f) + uvT.y * QS(40.0f)  + 2.6f)
++		           + sin(uvT.x * QS(45.0f)  + uvT.y * QS(-27.0f) + 5.5f)) * 0.42f;
++		float  p2 = (sin(uvT.x * QS(9.0f)   + uvT.y * QS(4.0f)   + 0.7f)
++		           + sin(uvT.x * QS(-5.0f)  + uvT.y * QS(10.0f)  + 3.9f)
++		           + sin(uvT.x * QS(11.0f)  + uvT.y * QS(-2.0f)  + 2.2f)) * 0.55f;
++		float  p3 = (sin(uvT.x * QS(3.0f)   + uvT.y * QS(1.0f)   + 1.9f)
++		           + sin(uvT.x * QS(-1.0f)  + uvT.y * QS(3.0f)   + 5.0f)
++		           + sin(uvT.x * QS(2.0f)   + uvT.y * QS(-2.0f)  + 0.4f)) * 0.55f;
++		// GRAIN IN THE REFLECTION (round 12 - the cell flecks were circular dots that
++		// jumped state; his circled reference areas are fine IRREGULAR broken-water
++		// texture). Two octaves of continuous value noise, thresholded so only the
++		// upper patches dig into the reflection - irregular connected blotches,
++		// STATIC in the world (no migration, his call), periodic (seam law).
++		// the two user knobs: opacity scales the knockout depth; size rescales the
++		// lattice - QUANTIZED to whole cells per period so the seam law survives it
++		float  GNq = max(16.0f, floor(512.0f / max(0.35f, gWetGrainPrm.y) + 0.5f));
++		float2 guv = frac(vUVPool) * GNq;
++		float  gn  = 0.62f * OroGrainNoise(guv, GNq)
++		           + 0.38f * OroGrainNoise(guv * 2.0f, GNq * 2.0f);
++		float  gran = 1.0f - saturate(0.85f * gWetGrainPrm.x) * smoothstep(0.52f, 0.78f, gn);
++	#undef QS
++		float  pud = saturate(p1 * 1.30f - 0.16f + 0.30f * gWet + p3 * 0.35f)
++		           * saturate(p2 * 1.10f + 0.35f + 0.25f * gWet);
++		pud = saturate(pud * 1.6f) * saturate((gWet - 0.70f) / 0.30f);
++		pud *= exp(-dst / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
++
++		cTex.rgb *= saturate(lerp(1.0f, 1.0f - 0.494f * gWetDark, gWet));   // recalibrated x2: full track = old 0..1.3
++		cTex.rgb *= saturate(lerp(1.0f, 1.0f - 0.85f  * gWetDark, pud));    // standing water, darker still
++		float fresW = pow(1.0f - saturate(dot(nvrW, -vRay)), 5.0f);
++		cTex.rgb = lerp(cTex.rgb, cTex.rgb * 1.7f + 0.02f, saturate(fresW * 0.5f * gWet));
++
++		// THE SKY IN THE WATER FILM (look round 2). The terrain had NO sky reflection -
++		// only the vessel image - which is why his pools showed ships but never the
++		// grey overcast the reference is full of. The film lerps toward the same
++		// storm-sky grey the fog uses, scaled by the daylight factor so night pools
++		// stay dark; the pools read as light patches against the darkened ground.
++		// Part 7: the POOLS mirror the sky strongly at ANY viewing angle - standing
++		// water, the base tiles' repartition law - which is what makes them read as
++		// light patches against the darkened apron from a standing camera.
++		{
++			float3 cSkyT = float3(0.42f, 0.45f, 0.49f) * saturate(cAmb.a * 1.3f)
++			             * (1.0f + gStorm * 0.35f);
++			float  skyF = saturate(saturate((0.30f + 0.70f * fresW) * gWet) * 0.60f
++			                     + (0.55f + 0.45f * fresW) * pud * 0.80f * gran);
++			cTex.rgb = lerp(cTex.rgb, cSkyT, skyF);
++
++			// POOL SPECULAR (part 7 round 3, his ask): standing water answers CAMERA
++			// MOVEMENT - two lobes on the shader's own Blinn half-vector (hlvW, the
++			// idiom the stock ground specular uses). The tight lobe is direct sun on
++			// water and collapses with the storm like every directional term; the
++			// BROAD lobe is the bright cloud around the hidden sun and GROWS with the
++			// storm, so pools keep flashing under full overcast. Night: the sun term
++			// gates on the stock horizon smoothstep, the sky term goes dark through
++			// cSkyT's daylight factor. Scaled by pud alone - damp ground has no free
++			// water surface to mirror a light source.
++			float pDHN  = saturate(dot(hlvW, nvrW));
++			float spSun = pow(pDHN, 90.0f) * (1.0f - gStorm)
++			            * smoothstep(-0.001f, 0.03f, fDPS);
++			float spSky = pow(pDHN, 8.0f) * (0.30f + 0.70f * gStorm);
++			cTex.rgb += (cSun * spSun * 2.2f + cSkyT * spSky * 0.9f)
++			          * pud * (0.35f + 0.65f * fresW);
++		}
++
++		// THE VESSEL IMAGE IN THE WET GROUND (ORO patch (s) part 6) - terrain edition.
++		// Same half-res mirror the base tiles sample; the film above supplies the sky,
++		// this supplies the ships. Fast shimmer on Const.Time directly - the previous
++		// wobble rode vUVWtr (time/180) at aurora pace, the third recurrence of that
++		// critique; rain-pocked water flickers at a few Hz. LOOK ROUND 3 ("the
++		// reflection swings too far"): a jitter, not a wave. LOOK ROUND 4: amplitude
++		// and cadence are HIS - gWetSwimPrm (x amp, y rate; 1 = this baseline), the
++		// Swim size / Swim rate sliders. Part 7: the image concentrates in the POOLS
++		// (mild 0.70 film + strong pud term), which is what the reference shows -
++		// ships mirrored in the puddles, not evenly across damp ground.
++		if (gWetReflPrm.w > 0.5f) {
++			float2 ruv = (sc.xy + 0.5f) * gWetReflPrm.xy;
++			ruv.x = 1.0f - ruv.x;              // undo the mirror pass's clip-space X flip
++			ruv += float2(sin(Const.Time * 10.8f * gWetSwimPrm.y + vUVSrf.x * 43.0f),
++			              cos(Const.Time *  8.5f * gWetSwimPrm.y + vUVSrf.y * 43.0f))
++			     * (0.0007f * gWetSwimPrm.x);
++			float  smr = gWetReflPrm.y * 3.2f;
++			float4 cVes = tex2D(tWetRefl, ruv) * 0.5f
++			            + tex2D(tWetRefl, ruv + float2(0, smr)) * 0.3f
++			            + tex2D(tWetRefl, ruv + float2(0, smr * 2.5f)) * 0.2f;
++			float  rStr = cVes.a * saturate(0.30f + 2.2f * fresW)
++			            * saturate(0.70f * gWet + 1.25f * pud) * 0.85f * gWetReflPrm.z * gran;
++			cTex.rgb = lerp(cTex.rgb, cVes.rgb, saturate(rStr));
++		}
++	}
++
+ 	// Add Haze and night lights
+ 	cTex.rgb *= sct.atn.rgb;
+ 	cTex.rgb += (sct.ray.rgb * RayPhase(-fDRS) + sct.mie.rgb * MiePhase(-fDRS)) * fOrbShd * (1.0f + fNoise);
+ 
++	// ORO patch (s) part 2: STORM FOG. Visibility collapses under heavy rain; exponential
++	// in the pixel distance (dst), toward a grey scaled by the ambient daylight factor so
++	// it stays dark at night. Sits after the atmospheric haze - storm fog dominates it -
++	// and before the eclipse, which still darkens everything. Zero at gStorm 0.
++	if (gStorm > 0.001f) {
++		float  ffog = (1.0f - exp(-dst * 0.00045f)) * saturate(gStorm * 1.4f);
++		float3 cFog = float3(0.40f, 0.43f, 0.47f) * saturate(cAmb.a * 1.2f);
++		cTex.rgb = lerp(cTex.rgb, cFog, ffog);
++	}
++
+ 	cTex.rgb *= fECL;	// Apply eclipse
+ 	cTex.rgb += cNgt2;
+ 
+@@ -712,6 +901,18 @@ float4 TerrainPS(TileVS frg) : COLOR
  // Planet Cloud Renderer
  // ============================================================================
  
@@ -1497,12 +2582,12 @@ index 5b43b27..4515075 100644
 +// terminator. The cloud RGB stays sun-lit (near black at night), so what appears is a
 +// dark veil that dims what is behind it - the real look. Tune by editing the constant
 +// and restarting the session (this file compiles at session start; no rebuild).
-+#define ORO_NIGHT_CLOUD 0.45f
++#define ORO_NIGHT_CLOUD 0.5f
 +
  CldVS CloudVS(TILEVERTEX vrt)
  {
  	// Zero output.
-@@ -878,8 +906,11 @@ float4 CloudPS(CldVS frg) : COLOR
+@@ -878,8 +1079,11 @@ float4 CloudPS(CldVS frg) : COLOR
  		cTex.rgb += sct.ray.rgb;
  		cTex.rgb *= fECL;
  
@@ -1517,10 +2602,22 @@ index 5b43b27..4515075 100644
  
  
 diff --git a/OVP/D3D9Client/shaders/PBR.fx b/OVP/D3D9Client/shaders/PBR.fx
-index e09b23c..f59eba5 100644
+index e09b23c..f0f51db 100644
 --- a/OVP/D3D9Client/shaders/PBR.fx
 +++ b/OVP/D3D9Client/shaders/PBR.fx
-@@ -194,8 +194,13 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -108,7 +108,10 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// ----------------------------------------------------------------------
+ 
+ 	float3 CamD = normalize(frg.camW);
+-	float3 cSun = saturate(gSun.Color);
++	// ORO patch (s) part 2: overcast - the directional sun collapses, the ambient lifts
++	// (below, at the diffuse bake). Shadow-map shadows fade automatically with this, since
++	// they only modulate the sun term (the patch-(p) finding, working in our favour here).
++	float3 cSun = saturate(gSun.Color) * (1.0f - gStorm);
+ 
+ 
+ 	// ----------------------------------------------------------------------
+@@ -194,8 +197,13 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
  	// Add vessel self-shadows
  	// ----------------------------------------------------------------------
  
@@ -1535,16 +2632,55 @@ index e09b23c..f59eba5 100644
  #endif
  
  
-@@ -254,7 +259,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -235,6 +243,38 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// Compute a specular and diffuse lighting
+ 	// ----------------------------------------------------------------------
+ 
++	float wetSprk = 0.0f;   // ORO patch (s): the drop glint, applied AFTER the light bake
++	// ------------------------------------------------------------------------
++	// ORO patch (s): A WET HULL. Same one number that wets the ground - gSurfWet lives in
++	// the shared parameter table and is pushed once per frame, so a vessel standing in the
++	// rain gets wet along with the concrete under it, with no per-vessel plumbing.
++	//
++	// Water on paint does exactly what water on concrete does: the albedo drops as light
++	// stops scattering back out of the surface, and the surface becomes SMOOTH, so the
++	// specular lobe tightens and strengthens. Tightening the lobe is the half that reads
++	// as wet rather than merely dark - a broad dull highlight is a matte finish however
++	// bright you make it.
++	//
++	// ⚠️ NOT dripping or running water. That needs per-mesh UV-space trails with no
++	// authoring support behind them, and it was assessed and dropped long before this.
++	// This is the sheen; the runnels are not coming.
++	//
++	// Exactly zero at gSurfWet 0, so stock content cannot move.
++	if (gSurfWet > 0.001f) {
++		cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
++		cSpec.a   = lerp(cSpec.a, max(cSpec.a, 1.0f) * 7.0f, gSurfWet * 0.75f);
++		cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
++
++		// THE SPARKLE: the shared drop-glint helper (see WetSparkle in D3D9Client.fx -
++		// one implementation for every shader path, distance-aware, splash cadence).
++		// ⚠️ STASHED, NOT WRITTEN INTO cSpec (round 2, and the bug is worth the
++		// comment): the first build added the glint to cSpec.rgb, which the tail routes
++		// through the SUN's specular lobe - the very term the storm light deliberately
++		// collapses. A sparkle hung on the sun cannot exist in the weather that makes
++		// things wet; it is applied after the light bake, scaled by the SKY ambient.
++		wetSprk = WetSparkle(frg.tex0.xy, nrmW, length(frg.camW));
++	}
++
+ 	// Compute a specular lobe for base material
+ 	float fLobe = pow(dRS, cSpec.a) * dLNx;
+ 
+@@ -254,7 +294,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
  	cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
  
  	// Bake material props and lights together
 -	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient);
-+	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*fAmbShd);
++	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*fAmbShd);
  
  #if LMODE > 0
  	cSun = Light_fx(cSun + cSpecLocal);	// Add local light sources
-@@ -265,7 +270,19 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -265,7 +305,23 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
  	if (gNoColor) cDiff.rgb = 1;
  
  	// ------------------------------------------------------------------------
@@ -1561,19 +2697,59 @@ index e09b23c..f59eba5 100644
 +	// STOCK CONTENT CANNOT MOVE: max() is exactly zero for any emissive at or below 1.0,
 +	// which is everything an authored mesh carries.
 +	cDiff.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
++	// ORO patch (s): the drop glint - a pop of SKY light, so it lives in sunshine and
++	// under a storm deck alike, and dies at night with the ambient. Additive on the
++	// final colour: a glint is light arriving at the eye, not a property of the paint.
++	cDiff.rgb += wetSprk * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
  	cDiff.a *= gMtrlAlpha;				// Modulate material alpha
  
  
-@@ -472,7 +489,8 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+@@ -442,9 +498,18 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+ 
+ 		float3 nrmW  = normalize(frg.nrmW);
+ 		float4 cSpec = gMtrl.specular.rgba;
+-		float3 cSun  = saturate(gSun.Color);
++		float3 cSun  = saturate(gSun.Color) * (1.0f - gStorm);   // ORO patch (s) part 2
+ 		float  dLN   = saturate(-dot(gSun.Dir, nrmW));
+ 
++		// ORO patch (s): A WET HULL, fast path. ⚠️ This is the path a mesh with no
++		// advanced textures takes (Mesh.cpp RenderFast) - the first build patched
++		// PBR_PS alone, and one vessel on the apron sparkled while its neighbour
++		// stayed bone dry. (r)'s rule, swept properly this time.
++		if (gSurfWet > 0.001f) {
++			cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
++			cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
++		}
++
+ 		//cSpec.rgb *= 0.33333f;
+ 
+ 		if (gNoColor) cDiff.rgb = 1;
+@@ -472,11 +537,13 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
  		float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
  		cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
  
 -		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient) + gMtrl.emissive.rgb );
 +		// ORO patch (p): fShadow is already in hand here (it scaled dLN above).
-+		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient*lerp(1.0f, fShadow, gVCShdDepth)) + gMtrl.emissive.rgb );
++		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*lerp(1.0f, fShadow, gVCShdDepth)) + gMtrl.emissive.rgb );
  
  		float3 CamD = normalize(frg.camW);
  		float3 HlfW = normalize(CamD - gSun.Dir);
+-		float  fSun = pow(saturate(dot(HlfW, nrmW)), gMtrl.specular.a);
++		// wet water film = smoother surface = tighter lobe (ORO patch s)
++		float  fSun = pow(saturate(dot(HlfW, nrmW)), gMtrl.specular.a * (1.0f + 5.0f * gSurfWet));
+ 
+ #if SHDMAP > 0
+ 		fSun *= fShadow;
+@@ -491,6 +558,9 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+ 		float3 specLight = (fSun * cSun);
+ #endif
+ 		cDiff.rgb += (cSpec.rgb * specLight);
++		// ORO patch (s): the drop glint - SKY light, after the bake (see PBR_PS note)
++		cDiff.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
++		           * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
+ 
+ 		cDiff.rgb += cEmis;
+ 	}
 diff --git a/OVP/D3D9Client/shaders/Sketchpad.fx b/OVP/D3D9Client/shaders/Sketchpad.fx
 index 5cae620..af8fe33 100644
 --- a/OVP/D3D9Client/shaders/Sketchpad.fx
@@ -1653,10 +2829,36 @@ index 5cae620..af8fe33 100644
  
  		// Apply color matrix
 diff --git a/OVP/D3D9Client/shaders/Vessel.fx b/OVP/D3D9Client/shaders/Vessel.fx
-index ea4691f..519d1af 100644
+index ea4691f..f00ee6e 100644
 --- a/OVP/D3D9Client/shaders/Vessel.fx
 +++ b/OVP/D3D9Client/shaders/Vessel.fx
-@@ -123,7 +123,14 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -85,9 +85,9 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 
+ 	float3 nrmW = frg.nrmW;
+ 	float3 tanW = frg.tanW.xyz;
+-	float3 cSun = saturate(gSun.Color);
++	float3 cSun = saturate(gSun.Color) * (1.0f - gStorm);   // ORO patch (s) part 2: overcast
+ 	float3 CamD = normalize(frg.camW);
+-	float3 Base = (gMtrl.ambient.rgb*gSun.Ambient) + (gMtrl.emissive.rgb);
++	float3 Base = (gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)) + (gMtrl.emissive.rgb);
+ 
+ 
+ 	// Compute World space normal -------------------------------------------
+@@ -106,6 +106,13 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 
+ 	if (gCfg.Spec) cSpec.a *= 255.0f;
+ 
++	// ORO patch (s): A WET HULL, legacy path - same sweep as the fast path.
++	if (gSurfWet > 0.001f) {
++		cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
++		cSpec.a   = lerp(cSpec.a, max(cSpec.a, 1.0f) * 7.0f, gSurfWet * 0.75f);
++		cTex.rgb *= lerp(1.0f, 0.66f, gSurfWet);
++	}
++
+ 	// Approximate roughness
+ 	float fRghn = log2(cSpec.a) * 0.1f;
+ 
+@@ -123,7 +130,14 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
  	// ----------------------------------------------------------------------
  
  #if SHDMAP > 0
@@ -1672,7 +2874,7 @@ index ea4691f..519d1af 100644
  #endif
  
  
-@@ -136,7 +143,12 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -136,7 +150,15 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
  
  
  	// Lit the diffuse texture
@@ -1682,6 +2884,9 @@ index ea4691f..519d1af 100644
 +	float3 cAlbedo = cTex.rgb;			// texture colour before lighting
  	cTex.rgb *= saturate(Base + gMtrl.diffuse.rgb * Light_fx(cDiffLocal + cSun * dLN));
 +	cTex.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
++	// ORO patch (s): the drop glint - SKY light, after the bake (see PBR_PS note)
++	cTex.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
++	          * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
  
  	// Lit the specular surface
  	cSpec.rgb *= saturate(cSpecLocal + fSun * cSun);

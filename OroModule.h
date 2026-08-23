@@ -427,6 +427,9 @@ private:
 	bool     vcGate = false;                 // round 3.5: draw the plasma in the VIRTUAL
 	                                         // COCKPIT (reentryVC toggle && COCKPIT_VIRTUAL);
 	                                         // computed in clbkPreStep like the other gates
+	bool     rainVC = false;                 // 2026-08-23: the RAIN in the VIRTUAL cockpit
+	                                         // (no toggle - follows the view like the
+	                                         // aurora; embeds depthClipOK, see clbkPreStep)
 
 	// The poly update + draw, shared by the EXTERNAL branch and the VC path (3.5).
 	// Defined in OroModule.cpp - this header only forward-declares the gc types.
@@ -442,6 +445,7 @@ private:
 	// broken. Always filled, whether or not the clip is on - it costs one length() per
 	// projected point and keeps the buffer honest if a branch flips.
 	float    plasDepth[PLAS_MAX_TRI * 3];
+
 	int      plasVtxN = 0;                   // vertices filled this frame (multiple of 3)
 	HPOLY    hPlasmaPoly = NULL;             // device resource - released with the others
 	bool     padAdditive = false;            // client carries patch (d) (gcAPIVer >= 260801)
@@ -574,6 +578,12 @@ private:
 	void     DrawTrailPoly(oapi::Sketchpad* pSkp, bool depthClip);
 
 	void SampleHull(int i, VESSEL* v);       // read the vessel's mesh into the point field
+	int  SampleHullPoints(VESSEL* v, HullPt* out, int maxN);  // the walk itself, split
+	                                         // out for the (since-cut) rain hull water;
+	                                         // kept because it is the honest shape - a
+	                                         // sampler any future consumer calls into
+	                                         // its OWN buffer, instead of borrowing the
+	                                         // slot table (which only enlists HOT hulls)
 	void BuildShell(int i, VESSEL* v);       // round 4: weld+decimate the mesh's own
 	                                         // triangles into the shock shell (lazy, once)
 	// Shock-shell per-frame scratch - ONE set, shared by all slots (single sim
@@ -599,6 +609,16 @@ private:
 	BYTE  hullOk[SHELL_MAX_VTX];
 	float hullZ[HZ_N * HZ_N];                // nearest skin depth per cell (1e30 = no hull)
 	void SpawnWakeBlobs(int i, VESSEL* v, const VECTOR3& flowLocal, double simdt);
+	float PlasmaFlashNow();                 // the shared flare envelope: ONE event lighting
+	                                        //   the sheath outside the glass AND the cabin
+	                                        //   wash inside it, in the same frame. Pure
+	                                        //   function of real time, no state.
+	void BuildVCGlow();                     // RENDER PATH: the COCKPIT's plasma - a screen-
+	                                        //   space luminous sheath, NOT the external draw
+	                                        //   list. From inside the hull that list starves
+	                                        //   (measured: 49/417 hull points, 56 triangles),
+	                                        //   which is what made the VC look faceted. See
+	                                        //   the header comment in OroReentry.cpp.
 	void BuildPlasmaGeometry();             // RENDER PATH since 2026-08-15: the whole draw
 	                                        //   list off the render camera. Took a VESSEL*
 	                                        //   for exactly four values, which UpdateReentry
@@ -835,6 +855,159 @@ private:
 	                                        //   here inherits mesh tessellation).
 	static const int VAP_NR      = 9;       // rings apex -> rim, last one the feather band
 	static const int VAP_MAX_TRI = VAP_NA * VAP_NR * 2 + 64;   // 1216
+	// --- RAIN (OroRain.cpp, 2026-08-20) ----------------------------------
+	// The runway slice: gloom + falling rain + rings where drops land. EXTERNAL only,
+	// Earth only, triggered. Alpha-blended like the vapour cone (rain SCATTERS and
+	// occludes; it is not light), drawn beside it and before anything additive.
+	// Sized in METRES and projected per element, so camera zoom costs nothing - see the
+	// header comment in OroRain.cpp for why distance decided the whole architecture.
+	static const int RAIN_MAX_STREAK = 1800;// streaks in the sheet at full density
+	// SPLASH RINGS, PER STRATUM (round 4, his LOD design: "hexagons close, rhombuses
+	// mid range and triangles farther away"). The ground poly was ~59.5k of its 65,535
+	// vertices - MORE splashes were impossible at 36 tris/ring, so the per-ring cost
+	// falls with distance instead: near = hexagon x 3 bands (36 tris, the ring whose
+	// shape you can actually see), mid = rhombus x 2 bands (16), far = triangle x 1
+	// band (6 - at 1..4 px only the flicker reads). The band cut saves more than the
+	// corner cut. Same triangle budget now buys 680 rings per field instead of 260,
+	// with the growth in the mid/far strata - "around the vessel, spreading out".
+	static const int RAIN_RING_N0    = 120; // near stratum rings (26 m wrap field)
+	static const int RAIN_RING_N1    = 170; // mid stratum (82 m field)
+	static const int RAIN_RING_N2    = 390; // far stratum (240 m field)
+	// ⚠️ ROUND 5: geometry is chosen per ring by PROJECTED SIZE, not by stratum - the
+	// strata are WRAP FIELDS, not distance bands, so a "far"-stratum ring can spawn
+	// right beside the camera, and stratum-tied shapes put full-size triangles among
+	// the hexagons (his screenshot). Screen size is the only honest LOD key. The cost
+	// is that a ring's cost now depends on the camera, so the budget is a generous CAP
+	// (worst-realistic ~12k tris when the camera sits low in a dense field; the
+	// emitter guard is the hard stop), and each field's rings live in their OWN HPOLY
+	// - his more-groups trick: the 65,535-vertex ceiling is PER POLY.
+	static const int RAIN_RINGP_TRI  = 14000;   // per ring poly: 42,000 verts (< 65535)
+	static const int RAIN_MAX_DECK   = 2400;// the storm deck: (48 az x 12 bands + cap) x TWO
+	                                        //   LAYERS (round 9's anti-tiling pair; rings
+	                                        //   down to 1 deg since round 7's to-the-horizon)
+	// ⚠️ THE 65535-VERTEX CEILING (invariant 19d) IS PER HPOLY, NOT PER EFFECT - his
+	// observation (2026-08-22), and it is the Sketchpad analogue of a fact he knew from
+	// MESHES: an Orbiter mesh group indexes with 16-bit WORDs, so the cap is per GROUP
+	// and a mesh escapes it by having many groups. An HPOLY is one vertex stream drawn by
+	// one DrawPrimitive, so the cap is per POLY - and the escape is the same: more polys.
+	// 19(d) named that exit ("to go bigger, split across several HPOLYs"); this is the
+	// first time it is used.
+	// So rain draws as TWO polys, split by ROLE, which also fixes the painter's order:
+	//   GND poly - the storm deck + BOTH splash-ring fields (world-anchored, behind)
+	//   RAIN poly - the streak sheet (screen-space, in front, always drawn last)
+	// Four polys now (the more-groups trick):
+	//   GND  (the storm deck, behind):  1104 tris =  3312 verts
+	//   RINGC / RINGV (camera-field and vessel-field splash rings): 14000 tris =
+	//     42000 verts EACH, in their own polys
+	//   RAIN (the streak sheet, always in front): 3664 tris = 10992 verts
+	// (RAIN_HULL_TRI lived here for one day - hull rivulets/streamers/drips, cut whole
+	//  on 2026-08-22, his call. See the note at RainSnap in OroRain.cpp.)
+	static const int RAIN_GND_TRI    = RAIN_MAX_DECK;
+	static const int RAIN_MAX_TRI    = RAIN_MAX_STREAK * 2 + 64;
+	void    UpdateRain();                   // main thread: envelope, gates, snapshot
+	void    UpdateRainSound();              // main thread (invariant 12): the loop crossfade
+	void    BuildRainGeometry();            // RENDER PATH: the drops and the rings
+	void    DrawRainPoly(oapi::Sketchpad* pSkp);     // push + ALPHA-BLENDED draw
+	void    DrawGloomPass();                // the full-frame overcast resample
+	PlasVtx rainVtx[RAIN_MAX_TRI * 3];
+	PlasVtx gndVtx[RAIN_GND_TRI * 3];       // the storm deck - the world-anchored back poly
+	float   gndDepth[RAIN_GND_TRI * 3];
+	PlasVtx ringVtxC[RAIN_RINGP_TRI * 3];   // camera-field splash rings - own poly/ceiling
+	float   ringDepC[RAIN_RINGP_TRI * 3];
+	int     ringCN = 0;
+	HPOLY   hRainRingCPoly = NULL;          // device resource - released with the others
+	PlasVtx ringVtxV[RAIN_RINGP_TRI * 3];   // vessel-field splash rings - own poly/ceiling
+	float   ringDepV[RAIN_RINGP_TRI * 3];
+	int     ringVN = 0;
+	HPOLY   hRainRingVPoly = NULL;          // device resource - released with the others
+	// THE CLOUD DECK TEXTURE (round 6, his ask: "can the gloom also bring an alpha
+	// blended cloud layer with it?"). Patch (l)'s substrate: a synthesized TILEABLE
+	// billow-noise texture modulates the deck per PIXEL, so the ceiling reads as CLOUD
+	// instead of a Gouraud gradient - Orbiter's own cloud layer is usually absent over
+	// the storm or far above it, so the deck carries its own. UVs are PLANET-FIXED
+	// (lon/lat metres), so the cover holds still while the camera moves; the pad's
+	// sampler was CLAMP, so patch (l) grew a WRAP address state around textured-poly
+	// draws (D3D9Pad2.cpp). The Gouraud path (gndVtx) stays as the no-(l) fallback.
+	TexVtxP    deckVtx[RAIN_GND_TRI * 3];   // textured-deck staging (layout == texVtx)
+	float      deckDepth[RAIN_GND_TRI * 3];
+	int        deckN = 0;
+	HPOLY      hRainDeckPoly = NULL;        // device resource - released with the others
+	DWORD      rainCloudImg[1024 * 1024];   // CPU-side synth image (4 MB BSS; ~6 m texels
+	                                        //   at the 6 km repeat - round 8's "harder
+	                                        //   edges", where resolution stops the steep
+	                                        //   coverage slope smearing back into a blur)
+	SURFHANDLE hRainCloudTex = NULL;        // device resource - shutdown proc (23l)
+	int        rainCloudBuilt = -1;         // which notch is built (-1 = none yet);
+	                                        //   the Cloud detail slider (0..3) rebuilds
+	                                        //   the texture when it lands on a new notch
+	int        rainCloudN = 0;              // texel size of the built texture (0 = none) -
+	                                        //   the deck UV mapping scales by it
+	void       BuildRainCloudTex(int N);    // main thread: synthesize + upload at N texels
+	// RAIN LIGHTNING part 2: THE BOLTS - camera-facing textured quads off the baked
+	// bolt atlas (16 slots, derived from the Resource Boy pack - licence permits
+	// modified inclusion in applications; the raw pack itself never ships). Additive
+	// (a bolt is light; the premultiplied black background adds nothing), per-vertex
+	// depth so a bolt passes behind the vessel. The event seed picks the slot, so
+	// RE-STRIKES RE-LIGHT THE IDENTICAL BOLT - the real behaviour, stateless.
+	static const int RAIN_BOLT_TRI = 64;    // <=6 bolts x 5 passes (core + 4 blur taps) x 2 tris
+	TexVtxP    boltVtx[RAIN_BOLT_TRI * 3];
+	float      boltDepth[RAIN_BOLT_TRI * 3];
+	int        boltN = 0;
+	HPOLY      hRainBoltPoly = NULL;        // device resource - released with the others
+	SURFHANDLE hBoltTex = NULL;             // the loaded atlas - shutdown proc (23l)
+	bool       boltTexTried = false;        // one probe per session
+	double     boltTestT0 = -1e9;           // STRIKE test rig: fire time on the animT clock
+	// RAIN LIGHTNING (his item 3, part 1): the borrowed scene-flash light - the
+	// reentry hull light's exact pattern (refs into STABLE members, 23(k)-gated,
+	// returned on every exit path, VIS_EXTERNAL per G9).
+	LightEmitter* rainLtgLight  = NULL;
+	OBJHANDLE     rainLtgLightV = NULL;   // the vessel carrying the borrow
+	VECTOR3       rainLtgLPos = { 0, 0, 0 };  // vessel-local position (position ref)
+	double        rainLtgLI = 0.0;            // intensity (intensity ref)
+	void          UpdateRainFlashLight();     // main thread, called unconditionally
+	int     gndVtxN     = 0;
+	HPOLY   hRainGndPoly = NULL;            // device resource - released with the others
+	float   rainDepth[RAIN_MAX_TRI * 3];    // per-vertex camera distance (patch g), so a
+	                                        //   drop behind the hull is clipped per pixel.
+	                                        //   ⚠️ The client's depth buffer holds vessels
+	                                        //   and the cockpit ONLY, not terrain - the
+	                                        //   ground is clipped by hand in the build.
+	int     rainVtxN    = 0;
+	HPOLY   hRainPoly   = NULL;             // device resource - released with the others
+	bool    rainActive  = false;
+	float   stormPushed = -1.0f;            // last storm-light factor handed to the client
+	float   wetDarkPushed = -1.0f;          // last wet-darkness gain handed to the client
+	float   glintPushed = -1.0f;            // last hull-glint gain handed to the client
+	float   reflPushed = -1.0f;             // last puddle-reflection gain handed to the client
+	float   swimAmpPushed  = -1.0f;         // last swim-amplitude scale handed to the client
+	float   swimRatePushed = -1.0f;         // last swim-cadence scale handed to the client
+	float   poolSizePushed  = -1.0f;        // last pool-size scale handed to the client
+	float   poolReachPushed = -1.0f;        // last pool-reach scale handed to the client
+	float   grainOpPushed   = -1.0f;        // last grain opacity handed to the client
+	float   grainSizePushed = -1.0f;        // last grain size handed to the client
+
+	// --- THE WATER SHEET (his design, 2026-08-22; OroRain.cpp) -----------
+	// A reflective pool MESH attached under the camera-target vessel, reflecting
+	// through the client's own ENV-MAP system - entirely stock rendering, the
+	// bell-glow borrow pattern pointed at the ground. Untextured on purpose:
+	// created meshes cannot grow texture slots (D3D9Mesh::SetTexture hard-fails
+	// past nTex), and 23(f2) says untextured groups honour material alpha - so
+	// the edge fade is GEOMETRY, ring bands with per-ring materials.
+	MESHHANDLE hSheetTmpl = NULL;           // session template (23m: reset per session)
+	int        sheetIdx   = -1;             // AddMesh index while borrowed
+	OBJHANDLE  sheetV     = NULL;           // who carries it
+	int        sheetMat0  = 0;              // first of the four ring materials
+	void    UpdateSheet();                  // main thread, from UpdateRain
+	void    ReleaseSheet();                 // borrow-and-return
+	float   wetPushed   = -1.0f;            // last value handed to the client, so the push
+	                                        //   happens ON CHANGE and not every frame - it is
+	                                        //   client STATE, not a frame parameter
+	                                        //   (invariant 18). -1 forces the first push.
+	void    PushSurfaceWet();               // patch (s): borrow-and-return, like VC shadows
+	float   rainIntensityLive = 0.0f;       // 0..1 storm envelope x altitude gate, set on the
+	                                        //   main thread. The Gloom SLIDER is deliberately
+	                                        //   NOT folded in here - see UpdateRain.
+
 	void    UpdateVapour();                 // per frame, main thread - builds vapVtx
 	void    DrawVapourPoly(oapi::Sketchpad* pSkp);   // push + ALPHA-BLENDED draw
 	PlasVtx vapVtx[VAP_MAX_TRI * 3];
@@ -1033,6 +1206,40 @@ private:
 	// (every XRSound call no-ops), ORO's visuals unaffected.
 	XRSound* pXRSound = nullptr;
 
+	// RAIN SOUND (2026-08-23). Sound-id registry note: the module-wide ids live in the
+	// enum at the top of OroModule.cpp (heartbeat 1, scenarios 10+); the rain owns
+	// 30..33, declared here because UpdateRainSound lives in OroRain.cpp. The four
+	// loops are Rain_light/medium/heavy.wav (the storm, crossfaded by the envelope)
+	// plus Rain_hull.wav (drops drumming the skin - interior only), all generated by
+	// tools/raingen.py.
+	enum { SND_RAIN_BASE = 30, SND_RAIN_N = 4 };
+	bool  rainSndLoaded = false;            // all three LoadWav'd this session
+	float rainSndLvl[SND_RAIN_N] = {};      // slewed per-loop volume (anti-click)
+	bool  rainSndOn[SND_RAIN_N]  = {};      // which loops currently hold a mixer voice
+	                                        // (silent loops are STOPPED, not parked at
+	                                        //  volume 0 - no idle voices in the mixer)
+	float rainSndPushed[SND_RAIN_N] = {};   // volume each loop was last STARTED at -
+	                                        //   an XRSound module sound keeps its start
+	                                        //   volume forever (the 2026-08-23 finding,
+	                                        //   see UpdateRainSound), so a change means
+	                                        //   a stop/restart/seek splice, on change
+
+	// THUNDER (2026-08-23): nine sourced one-shots (Thunder_{close,mid,far}_{1..3};
+	// credit ledger in XRSound\ORO\README.txt, leveled by tools/thunderprep.py) fired
+	// by UpdateThunder with each flash event's own dist/340 delay. One-shots at final
+	// volume, so the module-volume freeze above cannot touch them.
+	enum { SND_THUNDER_BASE = 40, THUN_FILES = 9, THUN_Q = 12 };
+	void   UpdateThunder();                 // main thread, right after UpdateRainSound
+	void   ThunderEnqueue(float fireT, int file, float vol);
+	bool   thunLoaded[THUN_FILES] = {};     // per-file tolerant: a missing variant just
+	                                        //   narrows the pick at fire time
+	int    thunLastEp[6] = {};              // per-slot epoch cursor (edge = new event)
+	bool   thunPrimed = false;              // 21e's prime: entering the gates schedules
+	                                        //   nothing retroactively
+	double thunLastStrikeT0 = -1.0;         // the STRIKE button's last-seen stamp
+	struct ThunPend { float fireT; int file; float vol; };
+	ThunPend thunQ[THUN_Q] = {};            // vol <= 0 marks an empty entry
+
 	// --- PREMIUM (IPI / HLSL frame-resampling) pipeline --------------------
 	// Grey-out and (later) blur/tilt resample the LIVE frame through the client's
 	// image-processing interface, which requires the ORO client patch (backbuffer
@@ -1046,6 +1253,7 @@ private:
 	gcIPInterface* pIPIPlasma  = nullptr;// PSPlasma (reentry cockpit glow, INTERNAL view); per session
 	gcIPInterface* pIPIEclipse = nullptr;// PSEclipse (shadow dim + dark adaptation, BOTH views); per session
 	gcIPInterface* pIPIGodRay  = nullptr;// PSGodRay (crepuscular shafts, BOTH views); per session
+	gcIPInterface* pIPIGloom   = nullptr;// PSGloom  (the overcast, EXTERNAL only); per session
 	bool           ipiTried  = false;    // one-shot creation guard (don't retry failed compiles every frame)
 	bool           ipiReady  = false;    // the client exposes backbuffer capture (patch b present)
 	SURFHANDLE     hFrameTex = NULL;      // RT-texture: backbuffer copy - grey input / blur H-pass input

@@ -9,10 +9,10 @@ This is the first time the whole thing has been listed in one place. Everything 
 |---|---|
 | Started | 2026-07-25 |
 | Shipped to beta | 2026-08-10 (16 days) |
-| Distinct effects | **25** — 13 physiological, 12 environmental |
-| Live controls | **91** sliders/knobs, **12** colour pickers, 5 tabs + 2 sub-tabs, all thruster settings PER ENGINE GROUP |
-| Source | ~15,500 lines across 15 C++ files, plus 8 pixel shaders in one HLSL file |
-| Client patches | **18** (a–g, i–r) — every one of them load-bearing |
+| Distinct effects | **28** — 13 physiological, 15 environmental (rain sound + thunder joined the storm) |
+| Live controls | **117** sliders/knobs, **12** colour pickers, 5 tabs + 2 sub-tabs, all thruster settings PER ENGINE GROUP |
+| Source | ~16,500 lines across 16 C++ files, plus 9 pixel shaders in one HLSL file |
+| Client patches | **19** (a–g, i–s) — every one of them load-bearing |
 | Worlds with auroras | 12 |
 | Settings scopes | 3 — global / per vessel class / per body (+ a window-geometry file) |
 
@@ -85,8 +85,15 @@ A complete replacement for Orbiter's two camera-facing billboards. Heat is
   bloom rather than being painted on.
 - **Per-pixel depth clipping** in both views, so streaks cut exactly at the window frame
   instead of painting through the cockpit.
+- **A separate effect for the cockpit.** Everything above is built from a point field
+  sampled on the skin, which is right when you are looking *at* the ship and wrong when you
+  are sitting inside it — from the seat most of that geometry is behind your head, and the
+  view starves down to a handful of huge polygons. So the VC gets its own technique: a
+  luminous sheath anchored to the relative wind, with filaments streaming past and abrupt
+  flares. The flares light the cabin in the same frame they light the window, off one
+  shared envelope. Two viewpoints, two techniques, neither compromised for the other.
 
-19 live tuning sliders, saved per vessel class.
+21 live tuning sliders, saved per vessel class.
 
 ### The vapour cone
 
@@ -161,6 +168,54 @@ expands through Mach 1, and the one famous aerodynamic visual nothing in Orbiter
   cross the whole sky, so the falloff is linear and wide — and shafts need an *occluder*:
   with the sun in open sky the technique can only smear the disc into a halo. The eclipse
   takes the light with it, so a transit kills them for free.
+- **Rain** — a summonable surface storm, and the largest single effect in the addon
+  (client patch (s), seven parts). The **light collapses at the source**: the storm slider
+  kills the directional sun and lifts the ambient, so shadows and the warm cast go with it
+  instead of a post-process dimming the finished frame. Falling rain is a direction-aware
+  **sheet in three parallax layers** (the honest per-drop field is arithmetically
+  impossible — real rain runs to hundreds of drops per cubic metre); splash rings fizz in
+  two world-anchored fields, one around the camera and one around the ship. The ground
+  **soaks dark and then pools**: standing water pinned to the terrain itself (drive and
+  the pools stay put), starting only once the ground is properly soaked, mirroring the
+  grey sky at any angle, with a tight sun glint that the storm collapses and a broad
+  cloud-glare that grows with it. **The ships reflect in the wet ground** — a real
+  mirrored render of every vessel in range, concentrated in the pools, ripple-warped at a
+  user-tuned amplitude and cadence. Hulls get wet too, across every vessel shader path:
+  darkened, tightened specular, and a lifecycled **raindrop glint** riding the sky light.
+  The deck overhead is ORO's own **two-layer textured cloud ceiling** — a main deck and
+  a darker scud layer hanging beneath it, with real parallax, vertical relief and no
+  repetition — and the storm carries its own **lightning**: most events light a region
+  of the deck from within, a share become **bolts to the ground** drawn from a baked atlas
+  of sixteen real channels (re-strikes flicker down the *identical* channel; some hang
+  with continuing current; a rare positive giant strikes far out, single and brilliant),
+  and every flash blinks a real light across the ship and the wet ground — sky, bolt and
+  scene agree because they are one scheduled event. Visibility closes down, and
+  everything — including the wet ground and the glint — fades out above the weather, so
+  a reentry begun with the rain still on gets a clean dry hull in space. Earth only for
+  now; per-body later, beside the aurora's settings.
+- **Rain sound** (2026-08-23) — the storm is audible: three seamless generated rain
+  loops (`tools/raingen.py` — exactly periodic by construction, the integer-cycle law as
+  audio) crossfading with the envelope, patter carrying the build-up and the downpour
+  owning the full storm. Finding the play path exposed a real **XRSound engine bug**:
+  module sounds never receive per-timestep state updates, so a playing module sound
+  keeps its first volume forever — ORO works around it by splicing (stop, restart at
+  the new volume, seek back), pushed on change.
+- **Thunder** (2026-08-23) — every flash event is *heard*, delayed by its own distance
+  at the speed of sound: six to twenty-six seconds after the light. Nine real storm
+  recordings from freesound (CC0/CC-BY, credited in the shipped ledger), leveled into a
+  close-crack / mid-boom / far-rumble hierarchy by `tools/thunderprep.py`. Close bolts
+  crack, in-cloud flashes only rumble (their channel is buried in the deck), the rare
+  positive giant hits hardest — and the ear is the **camera**: the STRIKE test button's
+  crack follows at the view's own distance from the bolt.
+- **The storm from the cockpit** (2026-08-23) — in a virtual cockpit the rain, splashes,
+  deck and bolts draw through the windows, cut per pixel at the frame by the depth clip;
+  the cabin stays dry (the client keeps wet sheen and drop glint off the interior in the
+  cockpit pass), the storm sound arrives muffled through the hull, and a fourth generated
+  loop — raindrops **drumming on the skin** — takes its place. Vessels with real
+  interiors seal them with an authored **rain shield**: `Meshes\ORO\<class>_rainshield.msh`,
+  every triangle a roof panel — rain is removed wherever a panel sits within 3.5 m
+  directly overhead. The DeltaGlider and DG-S ship with theirs; authoring one is a
+  single quad.
 
 ---
 
@@ -216,7 +271,7 @@ rather than rendering anything.
 ## 6. The client work
 
 Stock D3D9Client crashes the instant any HUD render proc is registered. That was patch (a);
-fifteen more followed. Several are outright bug fixes to the client, demonstrable with no
+seventeen more followed. Several are outright bug fixes to the client, demonstrable with no
 addon involved:
 
 - `clbkCreateParticleStream` is unimplemented — so the documented core API
@@ -252,11 +307,10 @@ Honest list.
 
 - **Reentry is still hand-tuned.** The knobs are found values, not driven ones. Making them
   physics-driven — you set bounds, the sim sets values — is the next big step.
-- **The aurora doesn't light the hull yet** — a small, self-contained job.
 - **Gas-giant aurora scales are estimates**, derived from real physics but never checked
   against the limb in-sim. Earth is the only one tuned by eye.
-- **Reentry has no sound at all.**
 - **`gcAPIVer` reads 0** — a diagnostic-only bug now that every capability probes by binding,
-  but the root cause was never found.
+  and the root cause IS now known: `BuildDate()` does its only work inside an `assert()`,
+  so in a Release build the parse never runs and it returns 0. One line to fix in the client.
 - **One unexplained abort** when the bell-glow pill was pressed, never reproduced. It's now
   instrumented; if it recurs, the log names it.

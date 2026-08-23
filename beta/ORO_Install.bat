@@ -126,19 +126,43 @@ if not exist "%PAY%\Modules\Plugin\ORO.dll" (
   goto :fail
 )
 
-rem --- 3. already installed? ------------------------------------------------
-if exist "%ROOT%\Modules\Plugin\ORO.dll" (
-  color 0E
+rem --- 3. already installed? THEN THIS IS AN UPGRADE --------------------------
+rem  Until 2026-08-23 this block REFUSED and sent you through a full uninstall
+rem  first. For the public beta that changed: a previous ORO install upgrades
+rem  IN PLACE - run this file and everything ends up as it should be.
+rem  ** THE BACKUP RULE ON UPGRADE - do not weaken it: the graphics client on
+rem  disk right now is OUR patched one, so re-taking the backup here would
+rem  poison it, and a later uninstall would "restore" a patched client while
+rem  truthfully reporting success - the exact defect the PULSE recovery below
+rem  exists to prevent. The install-time backup of the ORIGINAL files is kept
+rem  untouched. If it is gone (the old ORO_beta folder was deleted), it is
+rem  reseeded from the pristine stock copies we ship, which for restore
+rem  purposes ARE that user's original client.
+set "UPGRADE="
+if exist "%ROOT%\Modules\Plugin\ORO.dll" set "UPGRADE=1"
+if exist "%ROOT%\Modules\ORO\orofx.hlsl" set "UPGRADE=1"
+if defined UPGRADE (
   echo.
-  echo   ** ORO IS ALREADY INSTALLED. **
+  echo   An existing ORO installation was found - it will be UPGRADED in
+  echo   place. Settings you have saved and files you have tuned are kept,
+  echo   except where this beta ships a newer copy of its own file.
   echo.
-  echo   Nothing has been changed. If you want to reinstall - for example to
-  echo   take a newer beta build - run ORO_Uninstall.bat first, then run
-  echo   this again. That way your original Orbiter files are restored from
-  echo   the backup made the first time, rather than being overwritten by an
-  echo   already-patched copy.
+  if exist "%BACKUP%\Modules\Plugin\D3D9Client.dll" (
+    echo   [ok] the backup of your original files from the first install is
+    echo        kept exactly as it is
+  ) else (
+    echo   No install-time backup was found - reseeding one from the pristine
+    echo   stock copies shipped with this beta, so a future uninstall can
+    echo   still restore a correct original client...
+    if not exist "%BACKUP%\Modules\Plugin"     mkdir "%BACKUP%\Modules\Plugin"     >nul 2>&1
+    if not exist "%BACKUP%\Modules\D3D9Client" mkdir "%BACKUP%\Modules\D3D9Client" >nul 2>&1
+    copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul 2>&1
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
+      if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul 2>&1
+    )
+    echo   [ok] backup reseeded from the shipped stock copies
+  )
   echo.
-  goto :done_nochange
 )
 
 rem --- 3b. the OLD PULSE beta - offer to remove it ----------------------------
@@ -245,7 +269,7 @@ if defined PULSEFOUND (
   if exist "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" (
     echo   Recovering your original graphics client from PULSE's backup...
     copy /y "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
       if exist "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" copy /y "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] restored from PULSE's own backup
@@ -253,7 +277,7 @@ if defined PULSEFOUND (
     echo   PULSE's backup is gone - using the pristine Orbiter 2024 originals
     echo   shipped with this beta instead...
     copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
       if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] restored from the shipped originals
@@ -265,12 +289,14 @@ if defined PULSEFOUND (
 rem --- 4. say plainly what is about to happen, and ask ------------------------
 echo.
 echo   This will:
-echo     - back up your D3D9 client and its six shaders into
-echo       ORO_beta\backup\  (uninstall puts them back)
+echo     - back up your D3D9 client and its seven shaders into
+echo       ORO_beta\backup\  (on an upgrade the first install's backup is
+echo       kept instead - that one holds your true originals)
 echo     - install a PATCHED D3D9 client. Stock Orbiter 2024 crashes when any
 echo       addon draws through the HUD, which is what ORO does - the first
 echo       patch is that crash fix. Details in ORO_README.txt.
-echo     - add ORO's own files under Modules, Meshes, Textures and Config.
+echo     - add ORO's own files under Modules, Meshes, Textures, Config
+echo       and XRSound.
 echo.
 echo   It will NOT touch your scenarios, your keyboard settings, your video
 echo   settings, or anything outside this Orbiter folder.
@@ -282,31 +308,65 @@ if /i not "%GO%"=="Y" (
   goto :done_nochange
 )
 
-rem --- 5. back up the SEVEN files we are about to replace ---------------------
+rem --- 5. back up the EIGHT files we are about to replace ---------------------
 rem  We back up what YOU actually have, not what we think you have. The stock
 rem  copies we ship are only a fallback if this backup is ever lost.
+rem  SKIPPED ON UPGRADE: what is on disk then is the PREVIOUS beta's patched
+rem  client, not an original - see the backup rule at step 3.
 echo.
-echo   Backing up your original files...
-if not exist "%BACKUP%\Modules\Plugin"      mkdir "%BACKUP%\Modules\Plugin"      >nul 2>&1
-if not exist "%BACKUP%\Modules\D3D9Client"  mkdir "%BACKUP%\Modules\D3D9Client"  >nul 2>&1
+if defined UPGRADE (
+  echo   Upgrade: the existing original-files backup is kept as is.
+) else (
+  echo   Backing up your original files...
+  if not exist "%BACKUP%\Modules\Plugin"      mkdir "%BACKUP%\Modules\Plugin"      >nul 2>&1
+  if not exist "%BACKUP%\Modules\D3D9Client"  mkdir "%BACKUP%\Modules\D3D9Client"  >nul 2>&1
 
-copy /y "%ROOT%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul || goto :copyfail
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl) do (
-  if exist "%ROOT%\Modules\D3D9Client\%%F" (
-    copy /y "%ROOT%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul || goto :copyfail
+  copy /y "%ROOT%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul || goto :copyfail
+  for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
+    if exist "%ROOT%\Modules\D3D9Client\%%F" (
+      copy /y "%ROOT%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul || goto :copyfail
+    )
   )
+  echo   [ok] originals saved to ORO_beta\backup
 )
-echo   [ok] originals saved to ORO_beta\backup
 
 rem --- 6. install ------------------------------------------------------------
 echo   Installing ORO...
 xcopy "%PAY%\*" "%ROOT%\" /E /I /Y /Q >nul || goto :copyfail
+
+rem --- 6b. the old sound layout (pre-260823) ----------------------------------
+rem  ORO's sounds moved from Modules\ORO\sounds\ to XRSound\ORO\ - the Orbiter
+rem  convention, where ChessMFD and CrewMFD keep theirs. Any wav a user ADDED
+rem  there (custom scenario clips were a documented drop-in) MOVES to the new
+rem  folder rather than being lost; the shipped ones are simply removed, since
+rem  the payload just installed the current copies at the new location.
+rem  Runs AFTER the xcopy on purpose: a user who extracted this zip over an
+rem  old ORO_beta folder has a MERGED payload whose stale entries re-create
+rem  the old folder, and this sweep catches that case too.
+if exist "%ROOT%\Modules\ORO\sounds" (
+  echo   Migrating the old sound folder to XRSound\ORO...
+  for %%F in ("%ROOT%\Modules\ORO\sounds\*.wav") do (
+    if not exist "%ROOT%\XRSound\ORO\%%~nxF" (
+      copy /y "%%F" "%ROOT%\XRSound\ORO\" >nul 2>&1
+      echo     moved your file to XRSound\ORO: %%~nxF
+    )
+  )
+  rd /s /q "%ROOT%\Modules\ORO\sounds" >nul 2>&1
+  if exist "%ROOT%\Modules\ORO\sounds" (
+    echo   NOTE: Modules\ORO\sounds could not be fully removed. It is harmless
+    echo   but obsolete - ORO no longer reads it - so delete it by hand.
+  ) else (
+    echo   [ok] old sound folder retired
+  )
+)
 
 rem --- 7. verify the install actually landed ---------------------------------
 set "MISSING="
 if not exist "%ROOT%\Modules\Plugin\ORO.dll"            set "MISSING=ORO.dll"
 if not exist "%ROOT%\Modules\ORO\orofx.hlsl"          set "MISSING=orofx.hlsl"
 if not exist "%ROOT%\Modules\D3D9Client\Vessel.fx"        set "MISSING=Vessel.fx"
+if not exist "%ROOT%\Modules\D3D9Client\Mesh.fx"          set "MISSING=Mesh.fx"
+if not exist "%ROOT%\XRSound\ORO\Rain_light.wav"          set "MISSING=Rain_light.wav (XRSound\ORO)"
 if not exist "%ROOT%\Config\ORO.cfg"                    set "MISSING=ORO.cfg"
 if defined MISSING (
   color 0C

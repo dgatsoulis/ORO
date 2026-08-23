@@ -1,10 +1,15 @@
 ================================================================================
-  O R O   -   Orbiter Realism Overhaul                      CLOSED BETA
+  O R O   -   Orbiter Realism Overhaul                      PUBLIC BETA
   Atmospheric, Physiological and Visual Immersion Suite
 ================================================================================
 
-  >>> IF YOU HAVE THE EARLIER BETA (PULSE) INSTALLED, JUST RUN THE ORO <<<
-  >>> INSTALLER. IT WILL OFFER TO REMOVE PULSE FOR YOU.                <<<
+  >>> IF YOU HAVE AN EARLIER ORO BETA INSTALLED, JUST RUN THE INSTALLER. <<<
+  >>> IT UPGRADES IN PLACE - your saved settings and your original-files <<<
+  >>> backup are kept, and anything the addon has since moved or renamed <<<
+  >>> is tidied up for you.                                              <<<
+
+  >>> IF YOU HAVE THE OLDEST BETA (PULSE) INSTALLED, SAME ANSWER: RUN    <<<
+  >>> THE ORO INSTALLER. IT WILL OFFER TO REMOVE PULSE FOR YOU.          <<<
 
   This addon used to be called PULSE. The ORO installer now detects PULSE -
   including a half-removed one - lists exactly what it would delete, and asks
@@ -97,7 +102,27 @@ Thanks for testing. ORO is a global module that adds two families of effects:
 
 Everything is adjustable live, from one panel, while you fly.
 
-NEW SINCE THE BUILD YOU HAVE (the PULSE beta, 260810):
+NEW IN THIS BUILD (260823) - THE STORM:
+  * RAIN. Summon a storm at the surface: the light collapses to overcast under
+    a real two-layer cloud ceiling, streaks fall, drops splash, the ground
+    soaks dark, standing water pools and mirrors the ships. ATMOS tab, fifteen
+    controls, Earth for now.
+  * RAIN LIGHTNING - flashes inside the deck and real textured BOLTS to the
+    ground, each one blinking a real light over the scene and the wet ground.
+  * THUNDER. Every flash sends its thunder delayed by its own distance at the
+    speed of sound - up to half a minute after the light, exactly like the
+    real thing. Nine real storm recordings; a STRIKE test button plants a bolt
+    on your ship so you can hear the whole bolt-then-crack beat.
+  * RAIN SOUND - generated rain loops that build with the storm.
+  * THE STORM FROM THE COCKPIT. In a virtual cockpit the rain is outside the
+    glass, cut per pixel at the window frame; the cabin stays dry, the sound
+    comes through muffled, and drops drum on the hull. Vessel authors can seal
+    large interiors with a tiny "rain shield" mesh - see the RAIN section.
+  * The cockpit REENTRY got its own technique - a luminous sheath through the
+    windows with a cabin light wash, replacing the starved geometry the VC
+    used to show.
+
+NEW SINCE THE FIRST PUBLIC FILES (if you tested the PULSE beta, 260810):
   * A CRASH FIX, and this is the one that matters. The build you are running
     can crash when you exit to the Launchpad and start a scenario again. It is
     fixed here - three separate causes, all of them the addon handing Orbiter
@@ -177,7 +202,7 @@ install at any time, in one click, and it will not touch anything you tuned.
 To confirm the install took, open Orbiter.log in the Orbiter root and look near
 the top for:
 
-    Module D3D9Client.dll ........ [Build 260812, ...]   <- patched, good
+    Module D3D9Client.dll ........ [Build 260820, ...]   <- patched, good
     Module D3D9Client.dll ........ [Build 241231, ...]   <- still stock
 
 It is the BUILD number that tells them apart. Ignore the "API" number printed
@@ -617,6 +642,119 @@ sets in code, and lets you move them live. Units are the API's own.
                     "night", "behind" (sun is behind you) or "off-view".
     Best seen low, near sunrise or sunset, with terrain or cloud between you and
     the sun. An eclipse kills them, which is correct - less beam to scatter.
+
+  RAIN - a storm you summon at the surface. The build-up ramps over about ten
+  seconds: the light collapses to overcast, streaks fall, the ground soaks
+  dark, water stands in pools and the ships reflect in them - and the storm
+  SOUNDS: rain loops that build with it, and thunder answering every flash.
+  Switching the pill OFF is instant on purpose, so you can compare the wet
+  world against the dry one; the ground then dries out over a couple of
+  minutes. External view AND the virtual cockpit (see below), Earth only for
+  now, and only below the weather - everything fades out by about nine
+  kilometres up, so a reentry begun with the pill still on gets a clean dry
+  hull in space.
+
+  THE STORM FROM THE COCKPIT: in a VIRTUAL cockpit the rain, splashes, cloud
+  deck and bolts are all visible through the windows, cut per pixel at the
+  frame and canopy - the inside of the cabin stays dry, with no wet sheen or
+  drop sparkle on the panels. The sound follows you in: the storm drops to a
+  muffled level through the hull, and raindrops DRUM on the skin instead.
+  2D panel and glass-cockpit views stay dry by design. This needs Sun glare
+  enabled (section 3) - without it the panel readout says "VC: SunGlare off"
+  and the VC simply shows no rain rather than rain painted over the cabin.
+    TEST            The same storm as the pill, without enabling the effect.
+    Gloom           How dark and grey the world goes. This is not a screen
+                    filter: it collapses the SUN at the source and lifts the
+                    ambient, so shadows and the warm cast go with it.
+    Cloud detail    The storm deck's texture notch: 0 = plain darkened sky,
+                    1/2/3 = ever finer billow detail. Snaps to whole notches.
+                    The deck is two real cloud layers at two altitudes, with
+                    parallax and hanging masses.
+    Lightning       How often the storm discharges (0 = never, 2 = very
+                    often). Most events light the deck from within; a share
+                    become BOLTS to the ground; a rare giant strikes far out.
+                    Every flash also blinks a real light over the scene.
+    Bolt bloom      The radiance around a bolt's channel. 0 = crisp filament,
+                    2 = storm-photo blaze.
+    Density         How many streaks are in the falling sheet.
+    Fall speed      How fast they fall.
+    Streak len      How long each streak draws.
+    Streak glow     How brightly they catch the light.
+    Slant (deg)     Wind - tilts the sheet up to 15 degrees either way.
+    Splashes        Rings where drops land, on ground and on water. Two
+                    fields: one around the camera, one around the ship.
+    Wet dark        How far the wet ground darkens. 1 is the designed look,
+                    2 near-black; standing water goes darker still.
+    Pool size       How large the standing pools grow. Pools only appear once
+                    the ground is properly soaked (about 70% wet), and they
+                    are PINNED TO THE GROUND - drive and they stay put.
+    Pool reach      How far out pools stay visible (roughly 900 m at 1). The
+                    damp sheen carries on past them.
+    Grain/size      Broken-water texture inside the pool reflections -
+                    irregular matte patches, static in the world. Grain digs
+                    them in (0 = uniform pools); Grain size coarsens them.
+    Glint           Raindrop sparkle on hulls - every vessel in the scene.
+    Reflection      The vessel image in the wet ground: a real mirrored
+                    render, upside down at the contact points, concentrated
+                    in the pools. The grey sky in the pools is always there;
+                    this adds the SHIPS.
+    Swim size/rate  The rain-pocked ripple on that reflection - how far the
+                    image warps and how fast it flickers. Size 0 is a still
+                    mirror.
+    Water sheet     An experiment kept for the curious: a reflective pool
+                    MESH under the vessel on the client's own environment
+                    mapping. It can reflect sky and OTHER ships but never its
+                    own carrier, which is why Reflection superseded it.
+                    Leave at 0.
+    Rain sound      The storm's sound: three rain loops (patter / steady /
+                    downpour) crossfading as it builds. 1 is the designed mix
+                    against Orbiter's other ambient sounds, 0 is silent. In
+                    the cockpit the storm is muffled and a fourth loop takes
+                    over - drops drumming on the hull. Needs XRSound.dll
+                    (ships with Orbiter 2024).
+    Thunder         Every flash sends its thunder, delayed by ITS OWN distance
+                    at the speed of sound - six to twenty-six seconds after
+                    the light. That wait is the realism, not a bug. Close
+                    bolts crack, in-cloud and distant flashes rumble, the rare
+                    positive giant hits hardest, and inside the cockpit it all
+                    arrives muffled through the hull. Nine real storm
+                    recordings from freesound.org - the authors are credited
+                    in XRSound\ORO\README.txt.
+    Test bolt       STRIKE plants the next of the sixteen lightning bolts
+                    right on your vessel with a repeatable flicker, cycling
+                    1..16. The crack follows the flash by the CAMERA's
+                    distance from the strike: press it beside the ship for
+                    the whole bolt-then-thunder beat, or from kilometres out
+                    for the late, soft boom.
+    Rain            Readout: the storm's build-up and ground wetness, or the
+                    honest reason nothing draws - "external only", "Earth
+                    only", "above the weather", "VC: SunGlare off".
+
+    FOR VESSEL AUTHORS - THE RAIN SHIELD. From inside a virtual cockpit the
+    rain is kept out of the cabin by a depth test that covers cockpit-sized
+    interiors on its own. A vessel with a LARGER interior (a passenger cabin,
+    a multi-deck flight deck) can seal it completely with a tiny authored
+    mesh:  Meshes\ORO\<class>_rainshield.msh  (same class-name rule as the
+    ORO per-class .cfg files; the DeltaGlider and DG-S ship with theirs).
+    Every triangle in the file is a ROOF PANEL in vessel coordinates:
+    rain is removed wherever a panel sits within 3.5 m directly above it, so
+    a flat quad at ceiling height over the cabin footprint is usually the
+    whole file. Panels may overlap freely and sit at different heights (one
+    ceiling per deck); a GAP between panels is a real hole the rain falls
+    through - which is exactly right for an open cargo bay. Keep the roof's
+    edges at the window line: extend it past the glass and the rain just
+    outside that glass is culled too. Materials, textures and normals in the
+    mesh are ignored; ORO re-reads the file at every session start, so you
+    can iterate on it between runs.
+
+    Needs the ORO patched client for the wet ground, storm light, glint and
+    reflections (all probe by binding and quietly stand down without it);
+    the falling rain and splashes draw on any client. The lightning bolt
+    imagery is derived from the free Resource Boy lightning texture pack
+    (resourceboy.com) - thanks to them; the pack permits modified use in
+    applications. The thunder recordings are CC0 / CC-BY 4.0 from
+    freesound.org, credited in XRSound\ORO\README.txt - that credit file
+    travels with any redistribution.
 
 
 === TAB: VC ===  the cockpit

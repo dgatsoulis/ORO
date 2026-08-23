@@ -30,7 +30,7 @@ function Reset-Mock([string]$exeDate, [bool]$withPulse, [bool]$withPulseBackup) 
   Set-Content "$MOCK\Orbiter_ng.exe" "mock orbiter ng binary"    -NoNewline
   Set-Content "$MOCK\Config\Vessels\DeltaGlider.cfg" "mock dg cfg"
   Set-Content "$MOCK\Modules\Plugin\D3D9Client.dll"  "STOCK CLIENT DLL"
-  foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl') {
+  foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx') {
     Set-Content "$MOCK\Modules\D3D9Client\$s" "STOCK SHADER $s"
   }
   if ($exeDate) {
@@ -61,7 +61,7 @@ function Reset-Mock([string]$exeDate, [bool]$withPulse, [bool]$withPulseBackup) 
     New-Item -ItemType Directory -Force -Path `
       "$MOCK\PULSE_beta\backup\Modules\Plugin","$MOCK\PULSE_beta\backup\Modules\D3D9Client" | Out-Null
     Set-Content "$MOCK\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "STOCK CLIENT DLL"
-    foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl') {
+    foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx') {
       Set-Content "$MOCK\PULSE_beta\backup\Modules\D3D9Client\$s" "STOCK SHADER $s"
     }
   }
@@ -219,15 +219,42 @@ Check "E9 texture installed"           (Test-Path "$MOCK\Textures\ORO\bell_glow.
 Check "E10 scenarios installed"        ((Get-ChildItem "$MOCK\Scenarios\ORO_beta\*.scn" -EA SilentlyContinue).Count -eq 4) "count wrong"
 Check "E11 client REPLACED by patched" ((Get-Content "$MOCK\Modules\Plugin\D3D9Client.dll" -Raw) -notmatch 'STOCK CLIENT') "still stock"
 Check "E12 backup of THEIR client made" ((Get-Content "$MOCK\ORO_beta\backup\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK CLIENT') "backup wrong"
-Check "E13 backup of their 6 shaders"  ((Get-ChildItem "$MOCK\ORO_beta\backup\Modules\D3D9Client\*" -EA SilentlyContinue).Count -eq 6) "count wrong"
+Check "E13 backup of their 7 shaders"  ((Get-ChildItem "$MOCK\ORO_beta\backup\Modules\D3D9Client\*" -EA SilentlyContinue).Count -eq 7) "count wrong"
 Check "E14 no PULSE-named file landed" ((Get-ChildItem $MOCK -Recurse -File | Where-Object { $_.Name -match 'PULSE' }).Count -eq 0) "PULSE file present"
+Check "E15 15 sounds at XRSound\ORO"   ((Get-ChildItem "$MOCK\XRSound\ORO\*.wav" -EA SilentlyContinue).Count -eq 15) "wav count wrong"
+Check "E16 credit ledger shipped"      (Test-Path "$MOCK\XRSound\ORO\README.txt") "freesound credits missing!"
+Check "E17 rain shields shipped"       ((Test-Path "$MOCK\Meshes\ORO\DG-S_rainshield.msh") -and (Test-Path "$MOCK\Meshes\ORO\DeltaGlider_rainshield.msh")) "missing"
+Check "E18 bolt atlas shipped"         (Test-Path "$MOCK\Textures\ORO\bolt_atlas.dds") "missing"
+Check "E19 no raw bolt pack leaked"    (-not (Test-Path "$MOCK\Textures\ORO\Resource Boy - Lightning Bolt Textures")) "LICENCE: the raw pack must never ship!"
 
-# --- F: double install -------------------------------------------------------
-"[F] refuses a second install"
+# --- F: a second install is an UPGRADE (changed 2026-08-23 for the public beta) ---
+# The old refusal became an in-place upgrade: "they run the install bat and
+# everything ends up as it should be." THE assertion that matters is F3: the
+# backup must NOT be re-taken, because the client on disk at upgrade time is
+# OUR patched one - re-backing it up would poison the restore, which is L12's
+# hole reopened by another route.
+"[F] second install upgrades in place, backup untouched"
 $o = Run-Bat "ORO_Install.bat" "Y"
 Check "F1 installer actually ran"      ($o -match 'ORO') "output len $($o.Length)"
-Check "F2 said already installed"      ($o -match 'ALREADY INSTALLED') $o
+Check "F2 said UPGRADING"              ($o -match 'UPGRADED') $o
 Check "F3 backup NOT overwritten"      ((Get-Content "$MOCK\ORO_beta\backup\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK CLIENT') "backup clobbered!"
+Check "F4 still installed"             (Test-Path "$MOCK\Modules\Plugin\ORO.dll") "ORO.dll missing"
+Check "F5 reported success"            ($o -match 'ORO INSTALLED') $o
+
+# --- O: the pre-260823 sound layout migrates on upgrade -----------------------
+# Sounds moved from Modules\ORO\sounds\ to XRSound\ORO\. An upgrade must retire
+# the old folder, and a wav the USER put there (custom scenario clips were a
+# documented drop-in) must MOVE to the new home, not vanish.
+"[O] upgrade migrates the old sound folder"
+New-Item -ItemType Directory -Force -Path "$MOCK\Modules\ORO\sounds" | Out-Null
+Set-Content "$MOCK\Modules\ORO\sounds\heartbeat.wav"    "old shipped copy"
+Set-Content "$MOCK\Modules\ORO\sounds\MyCustomClip.wav" "the tester's own clip"
+$o = Run-Bat "ORO_Install.bat" "Y"
+Check "O1 upgrade ran"                 ($o -match 'UPGRADED') $o
+Check "O2 old sound folder retired"    (-not (Test-Path "$MOCK\Modules\ORO\sounds")) "old folder still there"
+Check "O3 the user's wav MOVED"        ((Get-Content "$MOCK\XRSound\ORO\MyCustomClip.wav" -Raw -EA SilentlyContinue) -match "tester's own clip") "custom clip lost!"
+Check "O4 shipped wav not clobbered"   ((Get-Content "$MOCK\XRSound\ORO\heartbeat.wav" -Raw) -notmatch 'old shipped copy') "old copy overwrote the new"
+Check "O5 backup still untouched"      ((Get-Content "$MOCK\ORO_beta\backup\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK CLIENT') "backup clobbered!"
 
 # --- G: tuned-file preservation + uninstall ----------------------------------
 "[G] uninstall restores the client and KEEPS tuned files"
@@ -242,6 +269,9 @@ Check "G5 TUNED cfg KEPT"              (Test-Path "$MOCK\Config\ORO\DeltaGlider.
 Check "G6 tuned content intact"        ((Get-Content "$MOCK\Config\ORO\DeltaGlider.cfg" -Raw) -match 'PlasSat = 1.7') "content changed"
 Check "G7 tester's own cfg KEPT"       (Test-Path "$MOCK\Config\ORO\MyOwnShip.cfg") "deleted!"
 Check "G8 untouched shipped cfg gone"  (-not (Test-Path "$MOCK\Config\ORO\Atlantis.cfg")) "left behind"
+Check "G9 shipped sound removed"       (-not (Test-Path "$MOCK\XRSound\ORO\Rain_light.wav")) "left behind"
+Check "G10 migrated USER wav KEPT"     (Test-Path "$MOCK\XRSound\ORO\MyCustomClip.wav") "the user's clip was deleted!"
+Check "G11 Mesh.fx restored"           ((Get-Content "$MOCK\Modules\D3D9Client\Mesh.fx" -Raw) -match 'STOCK SHADER') "not restored"
 
 # --- H: double uninstall -----------------------------------------------------
 # H2 is deliberately narrow. Since 2026-08-15 there are TWO "ORO is not here"

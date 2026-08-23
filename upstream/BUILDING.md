@@ -1,4 +1,4 @@
-# Rebuilding D3D9Client for ORO (EIGHTEEN local patches: a-g, i-r)
+# Rebuilding D3D9Client for ORO (NINETEEN local patches: a-g, i-s)
 
 ORO runs on a locally-patched D3D9Client carrying **seventeen** ORO patches:
 
@@ -88,7 +88,7 @@ This documents the local rebuild that produced all five patches.
 
 ## Build recipe (mirrors .github/workflows/reusable-build.yml)
 
-> **THE EASY PATH (since 2026-08-13): skip step 3 entirely.** All eighteen patches are
+> **THE EASY PATH (since 2026-08-13): skip step 3 entirely.** All nineteen patches are
 > published, already applied, on the `oro-patches` branch of
 > <https://github.com/dgatsoulis/orbiter-oro> (branched from tag `2024`). Clone that
 > instead of upstream and there is nothing to apply:
@@ -308,6 +308,26 @@ passes as true.
    texture** - the canopy was a solid occluder, so no sunlight could reach the cabin at
    all. THIS PART IS VISIBLE WITHOUT ORO: the DG's canopy shadows its own fuselage in
    exterior views. Strongest single item in the whole upstream report.
+   ⚠️ **PART 2 SHIPPED WITH AN `opt != 1` GUARD FOR TWELVE DAYS AND THAT GUARD WAS A BUG
+   (fixed 2026-08-20).** `RenderShadowMap` serves TWO passes - the shadow map (`opt` 0)
+   and `RENDERPASS_NORMAL_DEPTH` (`opt` 1, which fills `psgBuffer[GBUF_DEPTH]` via
+   `SHADER_NORMAL_DEPTH`). The skip was written for the pass the evidence pointed at and
+   applied there only, so the same 0.5-alpha canopy that stopped casting a solid shadow
+   kept writing **fully opaque depth**. Everything that asks that buffer a visibility
+   question - SSAO, the sun/local-light checks, and **patch (g)'s per-pixel clip for addon
+   geometry** - was told the windscreen is a wall at ~1 m.
+   **How it surfaced:** ORO's reentry plasma disappeared whenever the pilot looked
+   straight ahead from the DG's VC while the exterior view showed the ship engulfed. The
+   plasma was drawing correctly and being clipped behind its own canopy; the aurora and
+   the lightning lost the same pixels through the same window. Verified in the mesh:
+   `cockpitglass` 0.500, `visor` 0.500, `HUD_glass` 0.400, all under the threshold.
+   **The fix is deleting `opt != 1 &&`** - the reasoning ("a material that is clearly not
+   opaque does not block") was always pass-independent, and is if anything more obviously
+   right for a depth buffer than for a shadow map.
+   ⚠️ **AND THE PATTERN IS THE POINT: a rule was written and applied only where the
+   evidence pointed.** Third time in this project - invariant 23(k) gated one lend site
+   out of four, and 25(e) was not swept onto the CoP shift until a tester flew into a PIO.
+   When a law like this lands, grep every site it governs in the same session.
 3. `Scene.cpp` - fit the internal-pass map to the CABIN, not the hull. The exterior box
    is the vessel bounding sphere (~20 m on a DG, ~1 cm/texel at 2048), which stair-steps
    on a panel 40 cm from the eye. Centre on the camera (the ORIGIN of that space -
@@ -910,3 +930,74 @@ NOT distinguish a client with (e) from one without it. If the puffs ever reappea
 supposedly-patched client, suspect a stale DLL and rebuild - there is no runtime probe for (e).
 `gcCore::GetSystemSpecs().gcAPIVer` returns the same number - ORO can version-gate on it
 once a fixed client ships officially (see the patch-(b) follow-up above).
+
+## Patch (s): SURFACE WEATHER - wet ground, storm light, wet hulls, the planar mirror (2026-08-22)
+
+The largest patch in the set, in SEVEN parts, built for ORO's rain. One gcCore surface:
+`SetSurfaceWetness(k)`, `SetStormLight(k)`, `SetWetDarkness(k)`, `SetWetGlint(k)` and
+`SetWetReflection(gain, swimAmp, swimRate, poolSize, poolReach)` - all clamped 0..2,
+all probed BY BINDING (`CanSetSurfaceWetness` etc. in the hand-maintained gcCoreAPI.h),
+all defaulting to stock behaviour so an unpatched or disarmed client cannot move.
+
+- **Part 1, wetness** (`gSurfWet`): the ground darkens and takes a Fresnel sheen in BOTH
+  ground shaders - `Mesh.fx` BaseTilePS (runways) AND `NewPlanet.hlsl` TerrainPS (the
+  apron a vessel actually parks on; the first build patched only the tiles and the
+  readback said "stored perfectly" while the pixels never saw it). Hulls wet in every
+  vessel path: PBR.fx, its FAST_PS, Vessel.fx, Metalness.fx, NewMesh.hlsl - the second
+  DeltaGlider stayed dry until a path-tint diagnostic named Metalness as the unpatched one.
+- **Part 2, storm light** (`gStorm`): the directional sun collapses AT THE SOURCE and the
+  ambient lifts, in the ground shaders, cloud shadows, the sun glint, vessel shadows and
+  the glare pass - an overcast, not a brightness knob. Plus exponential storm fog.
+- **Part 3, wet darkening gain** (`gWetDark`): how far wet albedo drops; user slider.
+- **Part 4, the rain clock** (`gWetTime`): a PAUSE-GATED accumulator fed per frame from
+  Scene.cpp - the drop glint danced on a paused sim when it rode raw system time.
+- **Part 5, the drop glint** (`gWetGlint` + `WetSparkle()` in D3D9Client.fx): a
+  lifecycled sparkle field on every wet hull, applied AFTER the light bake and scaled by
+  the SKY ambient - a sparkle hung on the sun cannot exist in the weather that wets things.
+- **Part 6, the planar mirror**: before the main scene, vessels within 1.5 km re-render
+  through a ground-mirrored camera into a half-res RT (`ptWetRefl`), which both ground
+  shaders sample at each wet pixel's own screen position. THREE landmines, each one round:
+  the mirror flips winding and `Mesh.cpp` re-sets cull per GROUP, so a cull-mode override
+  dies - the fix is a DOUBLE mirror (reflection matrix x clip-space X flip, undone by
+  `ruv.x = 1 - ruv.x` at sample time); meshes trust the STORED gVP (set once per camera
+  update), so the mirrored camera must go through `D3D9Effect::SetViewProjMatrix` and be
+  restored after; and the sampler must be NULL-unbound before the RT push or the device
+  refuses. `gWetReflPrm` = (1/W, 1/H, gain, live); `gWetSwimPrm` = (swim amp, swim rate,
+  pool size, pool reach) - the ripple warp and the standing-pool controls.
+- **Part 7, standing pools** (shader-only, in the two ground wet blocks): a three-scale
+  sine lattice in the water-microtexture UV mapping (LOD-continuous by construction, so
+  pools are pinned to the ground). WARNING: EVERY SINUSOID COMPLETES AN INTEGER NUMBER OF
+  CYCLES PER UV UNIT (TAU x quantized count): tile UVs agree with their neighbours only
+  MODULO 1, so any fractional-cycle lattice jumps phase at tile boundaries - the seam is
+  visible and was screenshotted. Integer cycles make a mod-1 jump land on the same value.
+
+**Added 2026-08-23**: `SetWetReflection` grew to five arguments (swim amplitude/rate +
+pool size/reach, packed as `gWetSwimPrm`), a sixth setter `SetWetGrain(opacity, size)`
+(`gWetGrainPrm` - the pool-grain value noise in both ground shaders), the planar
+mirror PLANE anchored to the ground under the FOCUS VESSEL rather than under the
+camera (terrain undulation made the reflection bob as the view orbited), and the
+stencil ground-shadow storm fade corrected: `RenderGroundShadow`'s parameter is an
+INVERSE alpha (drawn opacity = 1 - depth), so the original `depth *= (1-storm)` was
+driving non-focus vessels' shadows to FULL BLACK under storm - the fade must push
+depth toward one. Patch (l) also gained a WRAP sampler state around textured-poly
+draws (D3D9Pad2.cpp, D3D9Triangle::Draw) - the pad's CLAMP is right for blits and
+wrong for a world-tiling texture like the rain's cloud deck; restored after each draw.
+
+Files: gcCore.h/.cpp, D3D9Effect.h/.cpp, Scene.h/.cpp, Surfmgr2.cpp, VVessel.cpp, plus
+the DEPLOYED shaders D3D9Client.fx, Mesh.fx, PBR.fx, Vessel.fx, Metalness.fx,
+NewPlanet.hlsl. The shader halves are runtime-compiled - edit, copy, restart - but the
+C++ half needs the DLL rebuild. WARNING: NewPlanet.hlsl also carries patch (m)'s tuned
+`ORO_NIGHT_CLOUD 0.5f` - verify it on every deploy.
+⚠️ **THE DEPLOYED SET IS SEVEN FILES NOW** (with Sketchpad.fx from patches d/g/l), and
+`Mesh.fx` is the one every ship-list forgot: it joined with (s)'s base-tile ground work
+(a wet RUNWAY is a base tile), was live in the sim from 2026-08-22, and was absent from
+the staging list, the stock restore bundle and the installer's backup loops until the
+260823 release audit hash-compared clone against deployed. **Audit all seven on every
+release: the clone, the deployed copies and `upstream/stock` must agree.**
+
+**EXTENDED 2026-08-23 - THE COCKPIT INTERIOR IS DRY.** The VC is rendered with the same
+vessel shaders, so the wet-hull work put drop glint and wet sheen on the instrument
+panel. Scene.cpp's cockpit-pass bracket (the same one patch (p) uses for shadow depth)
+now zeroes `gWetGlint` AND `gSurfWet` around `vFocus->Render(pDevice, true)` and
+restores them after - the interior is dry while every hull seen THROUGH the window
+keeps its full wet look. DLL-only; no shader change.
