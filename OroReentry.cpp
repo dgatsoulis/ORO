@@ -208,17 +208,10 @@ namespace {
 	// frame looks along +z and oapiCameraAperture() is the VERTICAL SEMI-aperture, so the
 	// frustum half-height at depth z is z*tan(ap) and the half-width is that x aspect.
 	// (Same construction as the exhaust shimmer's projector.) Returns false behind camera.
-	bool ProjectUV(const VECTOR3& gpos, double aspect, float& u, float& vv)
-	{
-		VECTOR3 cpos; oapiCameraGlobalPos(&cpos);
-		MATRIX3 Rcam; oapiCameraRotationMatrix(&Rcam);
-		const VECTOR3 c = tmul(Rcam, gpos - cpos);
-		const double tanAp = tan(oapiCameraAperture());
-		if (c.z < 0.1) return false;
-		u  = (float)(0.5 + 0.5 * ((c.x / c.z) / (tanAp * aspect)));
-		vv = (float)(0.5 - 0.5 * ((c.y / c.z) /  tanAp));    // UV y grows downward
-		return true;
-	}
+	// (ProjectUV lived here. It was the cabin wash's projection, and it made four oapi
+	//  calls - which is why it had to run on the main thread, and why the wash froze under
+	//  pause. Replaced 2026-08-25 by OroModule::UpdatePlasmaWashUV, which does the same
+	//  arithmetic in the render path off FillProjCam and makes no oapi call at all.)
 
 	// ------------------------------------------------------------------------
 	// Plasma GEOMETRY helpers (round 2)
@@ -640,6 +633,7 @@ void OroModule::ReleaseReentry()
 		if (rentry[i].hV) ReentryFreeSlot(i, true);
 	g_fx.reentryHeat = 0.0f;
 	plasmaGlow       = 0.0f;
+	plasmaGlowValid  = false;  // the cabin wash's snapshot dies with the glow it drives
 	plasVtxN         = 0;      // nothing for the render proc to draw
 	s_plasValid      = false;  // and nothing for it to REBUILD - see below
 	// The trail pool DOES clear here, unlike on a slot death: this is the disarm /
@@ -775,6 +769,7 @@ void OroModule::UpdateReentry()
 	OBJHANDLE hCam   = oapiCameraTarget();
 	float camHeat = 0.0f;
 	plasmaGlow = 0.0f;
+	plasmaGlowValid = false;   // re-raised below only if the focus vessel is still hot
 	// The geometry is REBUILT IN THE RENDER PATH now; clearing the snapshot here is what
 	// makes a frame with no hot camera-target vessel draw nothing. BuildPlasmaGeometry
 	// resets plasVtxN itself, so it is not cleared here any more - if it were, a paused
@@ -891,16 +886,19 @@ void OroModule::UpdateReentry()
 		// callback makes no oapi calls (invariant 1). A point light was tried for this and
 		// rejected: with no occlusion it lights the cabin through the floor.
 		if (e.hV == hFocus && viewW > 0 && viewH > 0) {
-			VECTOR3 gpos; v->Local2Global(e.pos, gpos);
-			float u = 0.5f, vv = 0.5f;
-			const double aspect = (double)viewW / (double)viewH;
-			if (!ProjectUV(gpos, aspect, u, vv)) {
-				// Plasma is behind the camera - keep the ambient lift, park the blob well
-				// off-screen so only the wash remains.
-				u = 0.5f; vv = 2.5f;
-			}
-			plasmaUV[0] = u;
-			plasmaUV[1] = vv;
+			// SNAPSHOT HERE, PROJECT IN THE RENDER PATH (2026-08-25). The UV used to be
+			// computed on this line, and clbkPreStep does not run while PAUSED - so the
+			// wash's directional lobe froze at the screen position the plasma had when the
+			// sim stopped, and panning the view dragged the glare along with it. H1's
+			// class exactly, and the last member of that family: see UpdatePlasmaWashUV,
+			// which runs beside the shader push with the render camera and the
+			// render-epoch anchor. Only the three VESSEL reads belong here (invariant 1).
+			v->Local2Global(e.pos, plasmaGlowG);
+			v->GetGlobalPos(plasmaGlowCg);   // the BODY CENTRE. Never the point being
+			                                 // corrected - invariant 21(a)'s second trap,
+			                                 // which collapses every point onto the CoM.
+			plasmaGlowV     = e.hV;
+			plasmaGlowValid = true;
 			plasmaGlow  = e.heat * g_fx.reentry * REN_TRIM_GAIN;   // PSPlasma saturate()s this
 			const COLOUR4 c = BAND_COL[(e.band < 0 || e.band > 2) ? 1 : e.band];
 			plasmaCol[0] = c.r; plasmaCol[1] = c.g; plasmaCol[2] = c.b;
@@ -2446,6 +2444,14 @@ float OroModule::PlasmaFlashNow()
 // sank the round-1 vapour cone Mach band. Invariant 25(e), and his own rule from that
 // effect: the sim owns what happens, the user owns the look.
 //
+// ⚠️ AND A PARTIAL ANCHOR IS A PARTIAL DECAL - LEARNED 2026-08-24, THE HARD WAY. The
+// first build tracked the wind at 42% rate to keep the centre from dropping below the
+// windows at a high AoA. That is not a weaker version of the rule above, it is a
+// VIOLATION of it: tracking the world at 42% is tracking the CAMERA at 58%, and a beta
+// tester duly reported the sheath following his eyeline. The lesson generalises to any
+// world-anchored screen-space effect - if a compromise is needed, it belongs in what the
+// field LOOKS like (its reach, its profile), never in how faithfully it is anchored.
+//
 // THREE THINGS FALL OUT OF THE SUBSTRATE CHOICE (Sketchpad, not IPI):
 //  - IPI has no depth buffer, which is why the shimmer is external-only and why the
 //    cabin wash can only ever be a soft full-frame lift. Pad triangles carry per-vertex
@@ -2516,16 +2522,22 @@ void OroModule::BuildVCGlow()
 	// The field's screen centre: tan() of the off-axis angle in half-screen units, the
 	// same mapping ProjPx uses, clamped short of the asymptote so a wind direction at or
 	// past 90 deg parks the centre off-screen instead of at infinity.
-	// ⚠️ AND THEN DELIBERATELY COMPRESSED (VC_DRIFT). At a 55-70 deg AoA the wind comes
-	// from far below the nose, so the true off-axis angle drops the field's centre well
-	// under the windows and only its dim outer rim reaches the glass ("too low outside
-	// the window"). The physical justification is that the sheath is not a source AT the
-	// shock - it WRAPS the vehicle, so its apparent centre is only weakly displaced. The
-	// centre still tracks attitude, which is what stops it being a decal; it just tracks
-	// it at less than half rate.
-	const float VC_DRIFT = 0.42f;
+	// ⚠️ AT FULL RATE, NOT COMPRESSED (2026-08-24). This carried VC_DRIFT = 0.42, so the
+	// centre tracked attitude at less than half rate - which is the same thing as tracking
+	// the CAMERA at the other 58%, and that is what a beta tester reported: "the plasma
+	// centre moves with the pilot's eyesight instead of staying fixed to the airstream".
+	// Confirmed in the sim, unpaused, and the residual was described exactly as the maths
+	// predicts - "not completely, but for some of the range of motion". Any rate below 1.0
+	// is a decal to precisely that degree, so there is no honest value here but 1.0.
+	//
+	// THE COMPRESSION WAS BOUGHT FOR A REAL PROBLEM, and it is fixed properly below
+	// instead. At a high AoA the wind comes from far under the nose, the centre drops
+	// below the windows, and a FIXED-RADIUS field goes with it: at the 74.5 deg clamp the
+	// old numbers put the field's top edge 0.01 screen heights BELOW screen centre, which
+	// is exactly the reported "I can only see its edge". The answer is not to drag the
+	// centre back toward the window - it is to stop the field being a DISC. See R.
 	double aC = ang; if (aC > 1.30) aC = 1.30;      // ~74.5 deg
-	const float pxOff = (float)(tan(aC) / cc.tanAp * (viewH * 0.5)) * VC_DRIFT;
+	const float pxOff = (float)(tan(aC) / cc.tanAp * (viewH * 0.5));
 	const float ux = (horiz > 1e-9) ? (float)(d.x / horiz) : 1.0f;
 	const float uy = (horiz > 1e-9) ? (float)(d.y / horiz) : 0.0f;
 	const float cx = viewW * 0.5f + ux * pxOff;
@@ -2533,7 +2545,23 @@ void OroModule::BuildVCGlow()
 
 	// SIZE. Deliberately huge - a sheath filling a solid angle, not a fireball in the
 	// middle distance. It grows with heat, so the view closes in as the entry deepens.
-	const float R = (float)viewH * (0.95f + 0.50f * heatf) * (0.75f + 0.25f * gain);
+	//
+	// ⚠️ AND IT GROWS WITH THE CENTRE'S OFFSET (2026-08-24), which is what lets the centre
+	// be anchored honestly. A SHEATH WRAPS THE VEHICLE; it is not a disc hanging in front
+	// of it. So what should stay roughly constant as the view swings off the wind is the
+	// field's ANGULAR reach, not its radius in pixels - and adding pxOff does exactly that
+	// for the cost of one term. Looking forward at a high AoA you now get what a pilot
+	// actually sees: a gradient brightening downward toward the windward side, instead of
+	// the rim of a disc parked below the glass. It is also BRIGHTER there than the old
+	// compressed version, not dimmer - at the 74.5 deg clamp the profile across the
+	// windscreen runs ~0.50 at the bottom, ~0.30 at centre, ~0.15 at the top, where before
+	// it was ~0.44 in a band at the very bottom and identically zero everywhere above it.
+	//
+	// ⚠️ IDENTITY WHERE THE LOOK WAS APPROVED: with the view pointed into the wind pxOff is
+	// 0, so R is Rbase and the centre is screen centre - bit for bit the look that was
+	// signed off. The whole change is confined to the off-axis regime that was wrong.
+	const float Rbase = (float)viewH * (0.95f + 0.50f * heatf) * (0.75f + 0.25f * gain);
+	const float R = Rbase + pxOff;
 
 	const float flash = PlasmaFlashNow();
 

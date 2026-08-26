@@ -208,9 +208,12 @@ namespace {
 //
 // ⚠️ "USER" IS DEFINED BY EXCLUSION: a thruster in NO standard group. That is the
 // definition the bell glow has used since 2026-08-09, adopted rather than reinvented.
-// It is also what keeps RCS out of ORO entirely without a special case - every
-// THGROUP_ATT_* thruster IS in a standard group, so it classifies as "not ours" and
-// every caller skips it.
+// ⚠️ RCS USED TO RETURN -1 HERE ("never ours") AND THAT WAS THE BUG (2026-08-25). Excluding
+// it from the GROUPS did not exclude it from the SUPPRESSION: patch (n) gates per VESSEL -
+// vVessel::RenderExhaust early-returns before it ever loops over exhausts - so turning
+// stock exhaust off killed the RCS jets along with everything else, and nothing of ours
+// took their place. "RCS thrusters don't seem to work" was exactly that. Every attitude
+// group now maps to ONE ORO_THR_RCS, so what we suppress we also draw.
 // ----------------------------------------------------------------------------
 namespace {
 	// Every group Orbiter names. The first three are ours; the twelve attitude groups
@@ -235,7 +238,7 @@ int OroThrusterGroupOf(VESSEL* v, THRUSTER_HANDLE th)
 			if (THR_STD[g] == THGROUP_MAIN)  return ORO_THR_MAIN;
 			if (THR_STD[g] == THGROUP_HOVER) return ORO_THR_HOVER;
 			if (THR_STD[g] == THGROUP_RETRO) return ORO_THR_RETRO;
-			return -1;                       // an attitude group: RCS, never ours
+			return ORO_THR_RCS;              // any attitude group: all twelve are ONE group
 		}
 	}
 	return ORO_THR_USER;                     // in no standard group at all
@@ -247,6 +250,18 @@ bool OroThrusterHasUser(VESSEL* v)
 	const DWORD n = v->GetThrusterCount();
 	for (DWORD i = 0; i < n; i++)
 		if (OroThrusterGroupOf(v, v->GetThrusterHandleByIndex(i)) == ORO_THR_USER) return true;
+	return false;
+}
+
+// Does this vessel have attitude thrusters at all? Asked the same way as HasUser rather
+// than by counting the twelve attitude groups directly, so the ONE classifier stays the
+// only place that decides what "RCS" means (invariant 26a).
+bool OroThrusterHasRcs(VESSEL* v)
+{
+	if (!v) return false;
+	const DWORD n = v->GetThrusterCount();
+	for (DWORD i = 0; i < n; i++)
+		if (OroThrusterGroupOf(v, v->GetThrusterHandleByIndex(i)) == ORO_THR_RCS) return true;
 	return false;
 }
 
@@ -364,7 +379,7 @@ void OroModule::BuildPlumeModel()
 			sv->GetExhaustSpec(i, &es);
 			if (!es.lpos || !es.ldir) continue;
 			const int grp = OroThrusterGroupOf(sv, es.th);
-			if (grp < 0) continue;                          // RCS / not ours
+			if (grp < 0) continue;                          // unclassifiable, not RCS any more
 			if (!g_fx.thr[grp].plumeEnabled) continue;      // this group draws no jet
 			cand[nc].w   = (float)(es.lsize * lvl);
 			cand[nc].idx = i;
@@ -393,7 +408,7 @@ void OroModule::BuildPlumeModel()
 			const double lvl = sv->GetThrusterLevel(th);
 			if (lvl < 0.02) continue;
 			const int grp = OroThrusterGroupOf(sv, th);
-			if (grp < 0) continue;                          // RCS / not ours
+			if (grp < 0) continue;                          // unclassifiable, not RCS any more
 			if (!g_fx.thr[grp].plumeEnabled) continue;
 			// Already drawn by the exhaust pass? Then it is not our business.
 			bool hasEx = false;
@@ -581,11 +596,35 @@ void OroModule::BuildPlumeModel()
 // (Diamond bright, the bloom pair, colours, master strength); everything about
 // the jet's physical SHAPE arrived in the model.
 // ----------------------------------------------------------------------------
-void OroModule::UpdatePlumeFx()
+// ⚠️ RUN TWICE PER FRAME WHILE THE GROUND IS WET (2026-08-25, patch u). The wet-mirror
+// slot calls this with the reflection RT's own size, draws, and the ordinary pre-resolve
+// call overwrites the buffers later in the same frame - which is why there is ONE poly
+// and not two: the mirror pass runs before the main scene, so the mirrored contents have
+// already been consumed by the time the real build replaces them. Invariant 3 is
+// untouched either way; each pass is a FULL-buffer update.
+void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 {
 	plmVtxN   = 0;
 	plmDkVtxN = 0;                                               // the soot layer too
-	if (viewW == 0 || viewH == 0) return;
+	// THE TARGET. Everything below sizes and culls against these two, never against the
+	// members - the mirror target is half resolution, so a stray viewW would put the jet
+	// at twice the pixel offset it belongs at and size it for the wrong frame.
+	const DWORD vW = ovW ? ovW : viewW;
+	const DWORD vH = ovH ? ovH : viewH;
+	if (vW == 0 || vH == 0) return;
+	// ⚠️ WILL A PER-PIXEL DEPTH CLIP HIDE WHAT IS INSIDE THE BELL? (2026-08-25.)
+	// The THROAT FIRE is drawn UPSTREAM of the nozzle, deliberately - it is the fire seen
+	// through the bell mouth, and patch (g) carves it against the bell walls per pixel
+	// (invariant 23h). Take that clip away and the geometry does not merely lose its
+	// occlusion: the jet visibly STARTS AHEAD OF THE NOZZLE, which is exactly what he
+	// reported of the wet reflection ("the exhaust begins before the bell"). So when
+	// nothing will hide it, the upstream section is not drawn at all and the jet begins
+	// at the bell, where it belongs.
+	// ⚠️ AND THE MIRROR IS NOT THE ONLY PATH THIS GOVERNS. A user with SunGlare OFF has
+	// no depth buffer and has been getting the same protrusion in the ORDINARY view since
+	// the throat fire shipped; the rule is swept to both here rather than only where the
+	// evidence pointed. Nothing changes for anyone whose clip is live.
+	const bool clipHidesThroat = depthClipOK && !wetMirrorPass;
 	if (!extGate || !g_fx.masterArmed) return;                   // EXTERNAL view only
 	// ⚠️ NO GLOBAL PILL TEST HERE ANY MORE (2026-08-16). The pill and the master
 	// strength are PER GROUP, and BuildPlumeModel has already dropped every candidate
@@ -603,7 +642,7 @@ void OroModule::UpdatePlumeFx()
 	// Pixels of a world length w at camera depth z (the round-3.5 law: per element,
 	// at per-vertex depth - never a vessel-wide anchor).
 	auto pxAt = [&](double z, double w) -> float {
-		return (float)(w / (z * cc.tanAp) * (viewH * 0.5));
+		return (float)(w / (z * cc.tanAp) * (vH * 0.5));
 	};
 	auto emitTri = [&](float x0, float y0, DWORD c0, float d0,
 	                   float x1, float y1, DWORD c1, float d1,
@@ -680,7 +719,7 @@ void OroModule::UpdatePlumeFx()
 		// by ~one nozzle width; the cup section draws bright, whitened, tapering
 		// with the bell's interior, and the patch-(g) depth clip does the real
 		// work - visible through the mouth, hidden by the bell walls per pixel.
-		const double throatL = (kThroat > 0.01f) ? e.wRef * 1.15 : 0.0;
+		const double throatL = (kThroat > 0.01f && clipHidesThroat) ? e.wRef * 1.15 : 0.0;
 		const double tMin = -throatL;
 
 		// NEAR-PLANE CLAMP (his report 2026-08-09: "clipping when the camera gets
@@ -703,13 +742,13 @@ void OroModule::UpdatePlumeFx()
 
 		float rpx, rpy, tpx, tpy;
 		double rz, tz;
-		if (!ProjPx(cc, rootG + dirG * tA, viewW, viewH, rpx, rpy, rz)) continue;
-		if (!ProjPx(cc, rootG + dirG * tB, viewW, viewH, tpx, tpy, tz)) continue;
+		if (!ProjPx(cc, rootG + dirG * tA, vW, vH, rpx, rpy, rz)) continue;
+		if (!ProjPx(cc, rootG + dirG * tB, vW, vH, tpx, tpy, tz)) continue;
 
 		// Off-screen cull, with margin for the sheath's width.
-		const float mx = 0.4f * viewW, my = 0.4f * viewH;
-		if ((rpx < -mx && tpx < -mx) || (rpx > viewW + mx && tpx > viewW + mx)) continue;
-		if ((rpy < -my && tpy < -my) || (rpy > viewH + my && tpy > viewH + my)) continue;
+		const float mx = 0.4f * vW, my = 0.4f * vH;
+		if ((rpx < -mx && tpx < -mx) || (rpx > vW + mx && tpx > vW + mx)) continue;
+		if ((rpy < -my && tpy < -my) || (rpy > vH + my && tpy > vH + my)) continue;
 
 		// End-on: the projected axis collapses and a ribbon has no direction to
 		// span (G7's degenerate case). Fade out - the stock billboard carries the
@@ -781,7 +820,7 @@ void OroModule::UpdatePlumeFx()
 			// On-segment points project iff the clamped endpoints did (z linear in
 			// t), so this cannot fail - but the guard costs nothing.
 			double z; float px, py;
-			if (!ProjPx(cc, pg, viewW, viewH, px, py, z)) { px = rpx; py = rpy; z = rz; }
+			if (!ProjPx(cc, pg, vW, vH, px, py, z)) { px = rpx; py = rpy; z = rz; }
 			sx[i] = px; sy[i] = py;
 			sed[i] = (float)length(pg - cc.pos);                 // patch-(g) depth:
 			                                                     //   EUCLIDEAN, like
@@ -914,7 +953,7 @@ void OroModule::UpdatePlumeFx()
 		// mouth, nothing from the side. Deliberately NOT endFade-gated - the
 		// end-on view is this element's whole job; nearF still owns the close-in
 		// dissolve, and the ribbon cup section stays for the profile views.
-		if (kThroat > 0.01f) {
+		if (kThroat > 0.01f && clipHidesThroat) {   // upstream: needs the clip - see above
 			const int NSEG = 20;
 			const int wr = jR + (int)((255 - jR) * 0.75f);
 			const int wg = jG + (int)((255 - jG) * 0.75f);
@@ -927,7 +966,7 @@ void OroModule::UpdatePlumeFx()
 				// bell - per hull, the visual nozzle and the exhaust spec disagree.
 				const VECTOR3 cg = rootG + dirG * ((double)kThrOfs - e.wRef * dIn);
 				float cx, cy; double cz;
-				if (!ProjPx(cc, cg, viewW, viewH, cx, cy, cz)) continue;
+				if (!ProjPx(cc, cg, vW, vH, cx, cy, cz)) continue;
 				const float ced = (float)length(cg - cc.pos);
 				const float nf  = sstepf((float)((cz - ZNEAR) / 4.0));
 				const float rp  = pxAt(cz, rad);

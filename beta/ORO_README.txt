@@ -333,6 +333,15 @@ was ours, and it is fixed. Orbiter keeps rendering during a window drag.)
 
 === TAB: G-FORCE ===  what high G does to you
 
+   SAVE TARGET     Where this tab's settings live. ALL VESSELS keeps them in the
+                   global file - one pilot flies every ship, which is how ORO has
+                   always worked. THIS VESSEL CLASS moves them into the hull's own
+                   file, because where the crew SITS is a fact about an airframe.
+                   A hull with no settings of its own falls back to your global
+                   ones, so visiting an untuned ship never loses your pilot.
+                   The master arm and the scenario sound always stay global.
+                   The line above the SAVE button always names the file it writes.
+
 VISION - each is a separate symptom; they layer.
   Blackout        Vision fades to black under sustained positive G.
   Red-out         The red veil of NEGATIVE G (blood forced toward the head).
@@ -612,6 +621,11 @@ sets in code, and lets you move them live. Units are the API's own.
                     so two colours cannot render it.
 
   LIGHTNING - storms in the cloud deck, seen from above.
+    NOTE: ORO HAS TWO LIGHTNING SYSTEMS AND THIS IS THE ORBITAL ONE. It draws
+    storms in a planet's cloud deck as you look down on them, night side only,
+    and it saves PER BODY. The RAIN section's Lightning slider is the other
+    one - the storm you are standing in, with bolts to the ground, day or
+    night, saved globally. They are independent: neither affects the other.
     TEST            One fast cell north of you with every gate bypassed, so you
                     can judge it from a runway in daylight.
     Activity        How many storms. 0 = none at this world.
@@ -674,20 +688,25 @@ sets in code, and lets you move them live. Units are the API's own.
                     often). Most events light the deck from within; a share
                     become BOLTS to the ground; a rare giant strikes far out.
                     Every flash also blinks a real light over the scene.
+                    This is the storm around YOU. The ATMOS tab's separate
+                    LIGHTNING section is for storms seen from ORBIT; the two
+                    are different systems and do not talk to each other.
     Bolt bloom      The radiance around a bolt's channel. 0 = crisp filament,
                     2 = storm-photo blaze.
     Density         How many streaks are in the falling sheet.
     Fall speed      How fast they fall.
-    Streak len      How long each streak draws.
+    Streak length   How long each streak draws.
     Streak glow     How brightly they catch the light.
     Slant (deg)     Wind - tilts the sheet up to 15 degrees either way.
     Splashes        Rings where drops land, on ground and on water. Two
                     fields: one around the camera, one around the ship.
     Wet dark        How far the wet ground darkens. 1 is the designed look,
                     2 near-black; standing water goes darker still.
-    Pool size       How large the standing pools grow. Pools only appear once
-                    the ground is properly soaked (about 70% wet), and they
-                    are PINNED TO THE GROUND - drive and they stay put.
+    Pool size       How large the standing pools grow - and at 0, whether
+                    there are any: turn it fully down for a soaked apron with
+                    no standing water at all. Pools only appear once the
+                    ground is properly soaked (about 70% wet), and they are
+                    PINNED TO THE GROUND - drive and they stay put.
     Pool reach      How far out pools stay visible (roughly 900 m at 1). The
                     damp sheen carries on past them.
     Grain/size      Broken-water texture inside the pool reflections -
@@ -697,15 +716,20 @@ sets in code, and lets you move them live. Units are the API's own.
     Reflection      The vessel image in the wet ground: a real mirrored
                     render, upside down at the contact points, concentrated
                     in the pools. The grey sky in the pools is always there;
-                    this adds the SHIPS.
+                    this adds the SHIPS - hulls, nav lights and strobes,
+                    contrails and particle streams, and ORO's own engine
+                    plume. It is a genuine second render of the scene rather
+                    than a copy of the picture, so at half resolution and
+                    through the ripple, fine structure like a shock-diamond
+                    train reads softer than it does in the air.
+    Reflection blur How diffuse the reflection in the wet ground is. 0 is a
+                    crisp mirror; raise it and the image spreads and softens
+                    the way it does on a real wet apron, which scatters light
+                    rather than mirroring it. A little goes a long way - it
+                    should still read as the ship, just not as glass.
     Swim size/rate  The rain-pocked ripple on that reflection - how far the
                     image warps and how fast it flickers. Size 0 is a still
                     mirror.
-    Water sheet     An experiment kept for the curious: a reflective pool
-                    MESH under the vessel on the client's own environment
-                    mapping. It can reflect sky and OTHER ships but never its
-                    own carrier, which is why Reflection superseded it.
-                    Leave at 0.
     Rain sound      The storm's sound: three rain loops (patter / steady /
                     downpour) crossfading as it builds. 1 is the designed mix
                     against Orbiter's other ambient sounds, 0 is silent. In
@@ -720,6 +744,14 @@ sets in code, and lets you move them live. Units are the API's own.
                     arrives muffled through the hull. Nine real storm
                     recordings from freesound.org - the authors are credited
                     in XRSound\ORO\README.txt.
+    Hull drum       Rain drumming on the SKIN of your ship - a fourth loop
+                    that plays only from inside a virtual cockpit. Its own
+                    volume, so you can have the storm without the drumming.
+    Rain view       Which internal views get the rain. VC ONLY (default),
+                    VC + PANEL, or ALL VIEWS. Outside views are always wet.
+                    In the VC the rain is cut at the window frame per pixel
+                    (needs Sun glare on); in the flat panel views Orbiter
+                    paints the panel over it, so nothing extra is needed.
     Test bolt       STRIKE plants the next of the sixteen lightning bolts
                     right on your vessel with a repeatable flicker, cycling
                     1..16. The crack follows the flash by the CAMERA's
@@ -758,6 +790,12 @@ sets in code, and lets you move them live. Units are the API's own.
 
 
 === TAB: VC ===  the cockpit
+
+   SAVE TARGET     The same switch, for this whole tab - the shadow on/off and all
+                   six cam-shake knobs. Cam-shake is the reason it is here: a big
+                   heavy ship should not rattle like a tiny one, and amplitude and
+                   frequency describe what a HULL passes to the seat. The cabin box
+                   and shadow depth were already per vessel class either way.
 
   VC SHADOWS      Sunlight through the canopy, sweeping across the cabin as you
                   rotate. Needs local shadows enabled (section 3).

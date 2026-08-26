@@ -67,6 +67,14 @@ static const COLORREF CLR_TRACK     = RGB(0x1C, 0x21, 0x2B);  // slider trough /
 static const COLORREF CLR_ACCENT    = RGB(0xE2, 0x4B, 0x4A);  // vision accent (red)
 static const COLORREF CLR_PILL_ON   = RGB(0x1D, 0x9E, 0x75);  // enable pill on
 static const COLORREF CLR_PILL_OFF  = RGB(0x3A, 0x41, 0x50);  // enable pill off / scrollbar thumb
+// SAVE / REVERT FEEDBACK (2026-08-25). The status line sits at the very bottom of a busy
+// panel and is easy to miss, so the two events are colour-coded AND the button that caused
+// them lights up in the SAME hue: one event, one colour, in two places at once, which is
+// what actually trains the eye to look down there. Green reads as "written to disk", amber
+// as "thrown away and re-read from disk". A write FAILURE keeps CLR_ACCENT - red outranks
+// both, and it is the one case where the user has to act.
+static const COLORREF CLR_MSG_SAVE  = RGB(0x2E, 0xC4, 0x8D);  // saved (CLR_PILL_ON, lifted for text)
+static const COLORREF CLR_MSG_REVRT = RGB(0xE0, 0xA0, 0x3C);  // reverted (amber)
 
 // ----------------------------------------------------------------------------
 // Dialog-local state
@@ -113,6 +121,22 @@ static DWORD    g_saveMsgUntil = 0;       // SAVE confirmation deadline (GetTick
 static bool     g_saveOk = true;          // ... and what it should say
 static int      g_saveMask = 0;           // ... and WHICH scopes it wrote (names the files)
 static bool     g_saveWasRevert = false;  // ... and whether it was a REVERT rather than a SAVE
+
+// PRESS FEEDBACK (2026-08-25). Clicking SAVE or REVERT writes or re-reads a file, and the
+// only acknowledgement was one line of small text at the bottom of the panel. A control
+// that does something irreversible-feeling and appears not to react is a control people
+// press twice, so the button itself now lights up for a moment.
+// ⚠️ NO TIMER OF ITS OWN: the panel already repaints on a ~10 Hz WM_TIMER (invariant 6),
+// so the flash expires on its own within ~100 ms of its deadline, and the click handler
+// already calls InvalidateRect, so it appears on the same frame as the press.
+static DWORD    g_btnFlashUntil = 0;      // press-flash deadline (GetTickCount ms)
+static int      g_btnFlashWhat  = 0;      // 1 = global SAVE, 2 = tab SAVE, 3 = tab REVERT
+static const DWORD BTN_FLASH_MS = 220;    // ~2 repaint frames: clearly seen, not a state
+
+static bool BtnFlash(int what)
+{
+	return g_btnFlashWhat == what && GetTickCount() < g_btnFlashUntil;
+}
                                           // (same status line, opposite verb)
 static int      g_lastSavedH = 0;         // client height last written to window.cfg, so a
                                           // window MOVE (which also ends in WM_EXITSIZEMOVE)
@@ -434,7 +458,7 @@ static PlasRow g_rainRows[] = {
 	                                               // 0 = crisp filament only
 	{ "Density",    &g_fx.rainDensity, 2.0f, 2 },  // streaks in the sheet
 	{ "Fall speed", &g_fx.rainSpeed,   2.0f, 2 },
-	{ "Streak len", &g_fx.rainStreak,  2.0f, 2 },
+	{ "Streak length",&g_fx.rainStreak, 2.0f, 2 },
 	{ "Streak glow",&g_fx.rainStreakA, 2.0f, 2 },  // how brightly they catch the light
 	{ "Slant (deg)",&g_fx.rainAngle,  15.0f, 0, -15.0f },  // BIPOLAR - the wind
 	{ "Splashes",   &g_fx.rainPuddle,  2.0f, 2 },  // rings where drops land; 0 = off
@@ -448,18 +472,23 @@ static PlasRow g_rainRows[] = {
 	{ "Grain size", &g_fx.rainGrainSize,2.0f, 2 }, // grain feature size; 1 = designed
 	{ "Glint",      &g_fx.rainGlint,   2.0f, 2 },  // drop sparkle on hulls; 0 = off
 	{ "Reflection", &g_fx.rainRefl,    2.0f, 2 },  // vessel image in the puddles; 0 = off
+	{ "Reflection blur",&g_fx.rainReflBlur, 2.0f, 2 }, // how DIFFUSE that image is; 0 = a
+	                                               // crisp mirror. Directly under
+	                                               // Reflection because the two shape the
+	                                               // SAME image - his call, 2026-08-24.
 	{ "Swim size",  &g_fx.rainSwimAmp, 2.0f, 2 },  // ripple-warp amplitude on the image;
 	                                               // 1 = designed, 0 = still mirror
 	{ "Swim rate",  &g_fx.rainSwimRate,2.0f, 2 },  // ripple cadence; 1 = designed.
 	                                               // FINDING sliders (the origin-tilt
 	                                               // pattern): bake + delete when settled
-	{ "Water sheet",&g_fx.rainSheet,   2.0f, 2 },  // reflective pool mesh under the vessel
-	                                               // (env-map reflections); 0 = off
 	{ "Rain sound", &g_fx.rainSoundVol,2.0f, 2 },  // the three generated loops crossfading
 	                                               // with the envelope; 0 = silent (the
 	                                               // opt-out - no pill, 17b's law)
 	{ "Thunder",    &g_fx.rainThunder, 2.0f, 2 },  // the sourced one-shot set, delayed by
 	                                               // each flash's own distance; 0 = silent
+	{ "Hull drum",  &g_fx.rainHullVol, 2.0f, 2 },  // the fourth loop - drops on the skin,
+	                                               // INTERIOR ONLY; its own volume since
+	                                               // 2026-08-25 (a tester's ask)
 };
 static const int NRAIN = (int)(sizeof(g_rainRows) / sizeof(g_rainRows[0]));
 
@@ -515,7 +544,12 @@ static const int NREC = (int)(sizeof(g_recNames) / sizeof(g_recNames[0]));
 // lives in the scrolling pane and is addressed in DOCUMENT coordinates (which
 // equal client coordinates when g_scroll == 0).
 // ----------------------------------------------------------------------------
-static const int DLG_W      = 500;        // client width, LOCKED (px) - see DLG_H_MIN
+static const int DLG_W      = 525;        // client width, LOCKED (px) - see DLG_H_MIN
+                                          // ⚠️ 500 -> 525 on 2026-08-25 (+5%, his call).
+                                          // The extra 25 px goes ENTIRELY to the value
+                                          // column: TRACK_RPAD absorbs it so every slider
+                                          // keeps its exact position and length. If DLG_W
+                                          // ever moves again, move TRACK_RPAD with it.
 static const int DLG_H      = 800;        // DEFAULT client height (px; 600 -> 800 on
                                           // 2026-08-02 - the pane earns its keep now
                                           // that PLASMA TUNING is a section of its own).
@@ -530,20 +564,36 @@ static const int DLG_H_MIN  = 500;        // smallest useful client height. Belo
                                           // 219 px of fixed chrome (banner + arm strip +
                                           // tab bar + status line) leaves under 300 px of
                                           // pane and the panel stops being a panel.
-// WIDTH IS DELIBERATELY NOT RESIZABLE. Two things are pinned to 500: BANNER_H is
-// literally 500 * (130/558), so his artwork's aspect ratio decides the header height, and
-// the slider column was narrowed to 500 on his own call in 2026-07-30 ("no need to have
-// such wide sliders"). Height is the axis with the actual problem - the tallest tab is
-// over 1000 px of document against a 581 px pane - so height is the axis that opens.
-static const int BANNER_H   = 116;        // 500 * (130/558): keeps the current banner.bmp aspect
+// WIDTH IS DELIBERATELY NOT RESIZABLE (by the USER - it is a fixed number here, and it did
+// move once). The slider column was narrowed to 500 on his own call in 2026-07-30 ("no need
+// to have such wide sliders"), and that judgement still stands: the widening did not make
+// the sliders wider, it gave the readouts beside them room to be legible. Height remains the
+// axis with the actual problem - the tallest tab is over 1000 px of document against a
+// 581 px pane - so height is still the axis that opens.
+// ⚠️ BANNER_H NO LONGER FOLLOWS THE ASPECT RATIO, AND THAT IS DELIBERATE. It was literally
+// 500 * (130/558). Holding the ratio at 525 would mean 122 px, i.e. six more pixels of
+// artwork stealing six from every tab's pane. His call was to stretch the banner instead:
+// "Don't worry about the banner. We can stretch its length by 5%." So the height stays put
+// and StretchBlt widens the bitmap 5% - the artwork is a wordmark on a trace graphic, which
+// takes a 5% horizontal stretch without reading as distorted.
+static const int BANNER_H   = 116;        // FIXED - the banner.bmp is stretched to DLG_W
 static const int ARMED_H    = 40;         // master ARMED/ENABLED strip (below banner)
 static const int STATUS_H   = 34;         // fixed status line at the bottom
 static const int PANE_Y     = BANNER_H + ARMED_H + 1;   // top of the scrolling pane
 static const int ROW_DY     = 24;         // row pitch (was 28; tightened for the 500 px panel)
 static const int PILL_X     = 14, PILL_W = 26, PILL_H = 14;
-static const int LABEL_X    = 50;
-static const int TRACK_X    = 158;        // slider track left edge
-static const int TRACK_RPAD = 74;         // gap between track right edge and client right
+static const int LABEL_X    = 46;         // row label left edge (50 -> 46 on 2026-08-25:
+                                          // "you can move the start of the slider names a
+                                          // few pixels to the left too". The pill ends at
+                                          // PILL_X + PILL_W = 40, so 46 keeps a 6 px gap.)
+static const int TRACK_X    = 158;        // slider track left edge - UNCHANGED by the 2026-
+                                          // 08-25 widening, on purpose: "keep the sliders
+                                          // the same size and position".
+static const int TRACK_RPAD = 99;         // gap between track right edge and client right.
+                                          // ⚠️ THIS IS WHAT PINS THE TRACK. At DLG_W 500 it
+                                          // was 74 and the track ended at 426; at 525 it is
+                                          // 99 and the track still ends at 426. The two
+                                          // constants move together or the sliders resize.
 static const int TRACK_H    = 8;
 static const int SB_W       = 6;          // scrollbar thumb width
 static const int SB_RPAD    = 5;          // gap from the scrollbar to the client right edge
@@ -582,7 +632,8 @@ static int MotRowY(int i) { return MotHdrY() + 34 + i * ROW_DY; }
 // Readout rows: Gz, Gx, Gy, reserve - no controls, just numbers.
 static int PilHdrY()      { return MotRowY(NMOT - 1) + 30; }               // caption text top
 static int PilRowY(int i) { return PilHdrY() + 34 + i * ROW_DY; }
-static const int NPILROW  = 6;   // mode / tolerance / suit / posture / G reference / effects view
+static const int NPILROW  = 7;   // mode / save target / tolerance / suit / posture /
+                                 // G reference / effects view
 static int PilReadCapY()  { return PilRowY(NPILROW - 1) + 16; }            // "F E L T   G" text top
 static int PilReadY(int i){ return PilReadCapY() + 24 + i * ROW_DY; }
 static const int NPILREAD = 4;
@@ -636,10 +687,18 @@ static void PlmBandDrag(float f)
 static void PlmPressStr(float lp, char* out, size_t cap)
 {
 	const double P = pow(10.0, (double)lp);
-	if      (P >= 10000.0) sprintf_s(out, cap, "%.0fk", P * 1e-3);
-	else if (P >= 1000.0)  sprintf_s(out, cap, "%.1fk", P * 1e-3);
-	else if (P >= 10.0)    sprintf_s(out, cap, "%.0f",  P);
-	else                   sprintf_s(out, cap, "%.1f",  P);
+	// ⚠️ THE THRESHOLDS SIT AT THE ROUNDING BOUNDARY, NOT AT THE DECADE, and that is what
+	// BOUNDS the string rather than merely tidying it. Testing P against 1000 and then
+	// printing "%.1fk" makes 9999 Pa render as "10.0k" - five characters, because the
+	// rounding carries it into the next decade AFTER the branch has already been picked.
+	// Two of those either side of a dash is eleven characters in a ten-character column,
+	// which is the clipping this very row was reported for. Branching at the boundary
+	// keeps every result to FOUR characters ("316k", "9.9k", "995", "9.9"), so the pair
+	// can never exceed nine - and "10k" is the more honest reading of 9999 Pa anyway.
+	if      (P >= 9950.0) sprintf_s(out, cap, "%.0fk", P * 1e-3);
+	else if (P >= 995.0)  sprintf_s(out, cap, "%.1fk", P * 1e-3);
+	else if (P >= 9.95)   sprintf_s(out, cap, "%.0f",  P);
+	else                  sprintf_s(out, cap, "%.1f",  P);
 }
 
 // The thruster family's LAB | PHYSICS switch, on the PLUME EXPANSION header line
@@ -754,12 +813,18 @@ static int GryWhyY()      { return GryRowY(NGRY - 1) + ROW_DY + 2; }       // "S
 static int RainHdrY()     { return GryWhyY() + 30; }                       // caption text top
 static int RainPillY()    { return RainHdrY() + 32; }                      // pill + Test centreline
 static int RainRowY(int i){ return RainPillY() + 24 + i * ROW_DY; }        // slider centreline
-static int RainBoltY()    { return RainRowY(NRAIN - 1) + ROW_DY + 2; }     // STRIKE test row
+static int RainViewY()    { return RainRowY(NRAIN - 1) + ROW_DY + 2; }     // view-mode cycler
+static int RainBoltY()    { return RainViewY() + ROW_DY; }                 // STRIKE test row
 static int RainWhyY()     { return RainBoltY() + ROW_DY; }                 // state readout
 static int AtmosBottom()  { return RainWhyY() + 24; }
 
 // ===== TAB 4 - VC : shadows + cam-shake =====
-static int VcsHdrY()      { return TabTopY(); }                            // caption text top
+// ⚠️ THE VC TAB'S SAVE TARGET SITS ABOVE THE FIRST SECTION, not inside one. It governs
+// BOTH sections - the shadow on/off AND the whole cam-shake block - so putting it where
+// the PILOT tab puts its own (inside a section) would have a control in VC SHADOWS quietly
+// deciding the fate of a section two rules further down.
+static int VcTgtY()       { return TabTopY() + 12; }                       // save target row
+static int VcsHdrY()      { return VcTgtY() + 26; }                        // caption text top
 static int VcsPillY()     { return VcsHdrY() + 32; }                       // pill centreline
 static int VcsRadY()      { return VcsPillY() + 24; }                      // radius slider centreline
 // ORO patch (p): how much of the material AMBIENT the shadow takes with it. Stock
@@ -818,9 +883,16 @@ static RECT ValueRectAt(const RECT& rc, int cy)
 	return r;
 }
 
-// ⚠️ THE VALUE COLUMN IS 46 px - SEVEN Consolas characters at -12 - and DrawTextA is
+// ⚠️ THE VALUE COLUMN IS 71 px - TEN Consolas characters at -12 - and DrawTextA is
 // right-aligned, so a longer string renders as its own TAIL and nothing else. That is
 // what turned the lightning readout into the bare word "cells)" in a beta screenshot.
+// ⚠️ IT WAS 46 px (SEVEN characters) UNTIL 2026-08-25, when the panel widened 5% and every
+// pixel of the gain came here. A scan of all thirty DrawValue sites found exactly three
+// rows over the old budget, all of them silently losing their LEADING characters: the
+// expansion band (he reported it - "13.0-93k" was rendering as "3.0-93k"), the bolt test
+// ("bolt 16/16", ten), and the vapour Mach band ("0.85-1.15", nine). All three are inside
+// ten now, and PlmPressStr was additionally bounded to four characters a side so the band
+// cannot climb back over it. TEN IS THE BUDGET: anything longer needs the rect below.
 // A NUMBER always fits; a readout that has to say a WORD ("vacuum", "sun behind", "M 1.15
 // 85%", "M 0.7 - gated") does not, and every one of them was written after the warning
 // comment was already in this file - which is the tell that a comment was the wrong fix.
@@ -935,8 +1007,13 @@ static RECT ShakeTestBtnRect(const RECT& rc)
 	return r;
 }
 
-// Scenario buttons: three across, sized to the 500 px panel.
-static const int SC_BTN_W = 138, SC_BTN_GAP = 8;
+// Scenario buttons: three across, sized to the panel. 138 -> 146 with the 2026-08-25
+// widening. These are laid out from the LEFT (PILL_X), so unlike everything anchored to
+// SEC_RPAD they do NOT follow the new right edge - leaving them alone would have left the
+// whole SCENARIOS block sitting 25 px short of every section rule beside it, which is
+// exactly the kind of drift that reads as "untidy" rather than as a bug. Three at 146 plus
+// two 8 px gaps runs 14..468 against rules ending at 499: a 31 px tail, against 30 before.
+static const int SC_BTN_W = 146, SC_BTN_GAP = 8;
 static RECT IndBtnRect(int i)
 {
 	const int x = PILL_X + i * (SC_BTN_W + SC_BTN_GAP);
@@ -1566,7 +1643,21 @@ static int TabSaveMask(int tab)
 	case 2:  return ORO_SCOPE_CLASS;                        // reentry: the hull
 	case 3:  return ORO_SCOPE_GLOBAL | ORO_SCOPE_BODY;    // eclipse = eye, aurora = world
 	case 4:  return ORO_SCOPE_GLOBAL | ORO_SCOPE_CLASS;   // vc: preference + cabin size
-	default: return ORO_SCOPE_GLOBAL;                       // g-force: the pilot
+	// ⚠️ G-FORCE IS THE ONE DYNAMIC ENTRY (2026-08-25, the Save target button). On THIS
+	// VESSEL CLASS the pilot block goes to the hull's file - but MasterArmed and
+	// ScenarioSound stay GLOBAL whatever the button says, so this tab must write BOTH
+	// scopes rather than swap one for the other. Returning CLASS alone would silently
+	// strand those two keys, and a master-arm state that quietly stopped being saved is
+	// exactly the kind of thing nobody notices until it matters.
+	// ⚠️ AND THE CLASS SCOPE IS ALSO NEEDED ON THE WAY BACK OUT. Turning the button to ALL
+	// VESSELS and saving must CLEAR the hull's stored block, or PilotScope=TRUE and the old
+	// values sit in that file still overriding the global ones you just wrote - the "I
+	// saved globally and it came back wrong" failure, from the one direction nobody tests.
+	// Hence OroSettings_PilotFromClass(): include CLASS while a hull owns a block, so the
+	// file gets rewritten without one. A hull that never had one is never given a file.
+	default: return (g_fx.pilotPerClass || OroSettings_PilotFromClass())
+	                ? (ORO_SCOPE_GLOBAL | ORO_SCOPE_CLASS)
+	                : ORO_SCOPE_GLOBAL;                     // g-force: the pilot
 	}
 }
 
@@ -1584,11 +1675,20 @@ static void TabSaveCaption(int tab, char* out, int cap)
 		else         strcpy_s(out, cap, "eclipse: global   aurora + lightning: no world in range");
 		break;
 	case 4:
-		if (cls[0]) sprintf_s(out, cap, "shadows on/off + shake: global   cabin box: %s", cls);
-		else        strcpy_s(out, cap, "shadows on/off + shake: global   cabin box: per class");
+		// The cabin box and shadow depth are per class either way; what the Save target
+		// moves is the shadow on/off and the six cam-shake knobs.
+		if      (g_fx.vcPerClass && cls[0]) sprintf_s(out, cap, "all VC settings -> %s", cls);
+		else if (g_fx.vcPerClass)           strcpy_s(out, cap, "all VC settings: per class - none in focus yet");
+		else if (cls[0])                    sprintf_s(out, cap, "shadows on/off + shake: global   cabin box: %s", cls);
+		else                                strcpy_s(out, cap, "shadows on/off + shake: global   cabin box: per class");
 		break;
 	default:
-		strcpy_s(out, cap, "saves globally - the same pilot flies every ship");
+		// The caption is the promise the SAVE button has to keep, so it names the file the
+		// Save target has actually selected - and says "pilot" so it is clear that the
+		// master arm and the scenario sound are still going to the global file either way.
+		if      (!g_fx.pilotPerClass) strcpy_s(out, cap, "saves globally - the same pilot flies every ship");
+		else if (cls[0])              sprintf_s(out, cap, "global + this hull's pilot -> %s", cls);
+		else                          strcpy_s(out, cap, "pilot saves per vessel class - none in focus yet");
 		break;
 	}
 }
@@ -1607,8 +1707,12 @@ static void PaintTabSave(HDC dc, const RECT& rc)
 		RECT rcap = { 16, TabSaveY() - 6, TabRevBtnRect(rc).left - 8, TabSaveY() + 10 };
 		DrawTextA(dc, cap, -1, &rcap, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
 	}
-	DrawButton(dc, TabRevBtnRect(rc), "REVERT", false, CLR_PILL_OFF);
-	DrawButton(dc, TabSaveBtnRect(rc), "SAVE", false, CLR_ACCENT);
+	// DrawButton's `on` flag fills the button and brightens its label, which IS the press
+	// feedback - no new drawing code needed. Note the colour argument was dead at all three
+	// of these call sites until now, because `on` was hardcoded false, so nothing about the
+	// resting appearance changes; the buttons simply gain a lit state they never had.
+	DrawButton(dc, TabRevBtnRect(rc),  "REVERT", BtnFlash(3), CLR_MSG_REVRT);
+	DrawButton(dc, TabSaveBtnRect(rc), "SAVE",   BtnFlash(2), CLR_MSG_SAVE);
 	RECT rule = { 16, TabSaveY() + 14, rc.right - SEC_RPAD, TabSaveY() + 15 };
 	FillSolid(dc, rule, CLR_LINE);
 }
@@ -1796,8 +1900,12 @@ static void PaintParticles(HDC dc, const RECT& rc)
 	DrawSwatch(dc, SwatchRect(PrtColY(), 0), g_fx.prtColour, pen && tint);
 
 	DrawCaption(dc, LABEL_X, PrtCapY(),
+	            // ⚠️ "no exhaust particles at all" IS A CLAIM ABOUT THE VESSEL, and `pen` is
+	            // only about the group being edited. On a DG-S with HOVER and USER enabled
+	            // it was flatly false, which is most of why this row was unreadable.
 	            !pen ? (g_fx.stockParticles ? "off - the vessel author's streams are flying"
-	                                        : "off - no exhaust particles at all")
+	                   : (OroThr_AnyPrtOn() ? "off for THIS group - another group is still streaming"
+	                                        : "off - no exhaust particles at all"))
 	                 : (g_fx.prtVacuum ? "streams live, but AIR FADE is holding emission off up here"
 	                                   : (g_fx.prtInfo[0] ? g_fx.prtInfo : "resolving...")));
 	// STOCK PARTICLES: the vessel author's own exhaust streams. Independent of the
@@ -1809,9 +1917,10 @@ static void PaintParticles(HDC dc, const RECT& rc)
 	                   : "S T O C K   P A R T I C L E S   -   n e e d s   ( n )");
 	DrawCaption(dc, LABEL_X, PrtStkCapY(),
 	            !shave2 ? "the running client cannot suppress - stock always emits"
+	                    // vessel-wide claim again: ask every group, not the edited one
 	                    : (g_fx.stockParticles ? "flying the vessel author's own exhaust streams"
-	                                           : (g_fx.prtEnabled ? "suppressed - ORO's streams instead"
-	                                                              : "suppressed - no exhaust particles at all")));
+	                                           : (OroThr_AnyPrtOn() ? "suppressed - ORO's streams instead"
+	                                                                : "suppressed - no exhaust particles at all")));
 	// ⚠️ CROSS-REFERENCE THE PARTNER PILL, because the split is invisible from either
 	// side. Patch (n) was deliberately SPLIT into billboard and stream bits, on two
 	// sub-tabs (invariant 23n) - the right call, and a beta tester standing on this
@@ -2159,7 +2268,14 @@ static void PaintAurora(HDC dc, const RECT& rc)
 // sky under you, activity 0) and a count you can see tells them from "broken".
 static void PaintLightning(HDC dc, const RECT& rc)
 {
-	DrawSectionHdr(dc, rc, LtgHdrY(), "L I G H T N I N G");
+	// ⚠️ THE NOTE EXISTS BECAUSE THE PANEL HAD TWO LIGHTNINGS AND SAID SO NOWHERE
+	// (2026-08-25, a public-beta reader's confusion, and it was a design problem rather
+	// than wording). THIS section is the ORBITAL system: storms in a planet's cloud deck,
+	// read out of its own cloud map, night side only, seen from above, PER BODY. The RAIN
+	// section's Lightning slider is a different system entirely - the storm you are
+	// standing in, bolts that reach the ground, day or night, GLOBAL scope. Nothing about
+	// one drives the other; the header note on each now says which is which.
+	DrawSectionHdrNote(dc, rc, LtgHdrY(), "L I G H T N I N G", "from orbit - RAIN has its own");
 	const bool en = g_fx.ltgEnabled;
 	char val[48];
 
@@ -2258,7 +2374,7 @@ static RECT RainTestBtnRect(const RECT& rc)
 // those is stopping it, because "no rain" otherwise has four indistinguishable causes.
 static void PaintRain(HDC dc, const RECT& rc)
 {
-	DrawSectionHdr(dc, rc, RainHdrY(), "R A I N");
+	DrawSectionHdrNote(dc, rc, RainHdrY(), "R A I N", "the storm you are in - own lightning");
 	const bool en = g_fx.rainEnabled;
 	char val[48];
 
@@ -2273,14 +2389,35 @@ static void PaintRain(HDC dc, const RECT& rc)
 		const float frac = (span > 0.0f) ? ((*rr.value - rr.vmin) / span) : 0.0f;
 		DrawRowLabel(dc, cy, rr.label, en);
 		DrawSlider(dc, TrackRectAt(rc, cy), frac, en);
-		sprintf_s(val, "%.2f", *rr.value);
+		// ⚠️ HONOUR dec (2026-08-24). This hardcoded "%.2f" and ignored the row's own
+		// precision, so the two INTEGER rain rows read back as fractions - Cloud detail
+		// as "3.00" and Slant as "-0.67" - which is what made a tester think the notched
+		// slider was not notched. In THIS table dec 0 means "an integer-valued control"
+		// (the press and drag handlers both snap the store), so printing it with two
+		// decimals was the readout disagreeing with the control.
+		// NOTE the other row tables use dec 0 to mean display PRECISION only (Fin rake,
+		// Rate, Speed are genuinely continuous), which is why this is not swept there.
+		sprintf_s(val, rr.dec == 0 ? "%.0f" : "%.2f", *rr.value);
 		DrawValue(dc, rc, cy, val, en);
 	}
 
 	// the STRIKE test row: button + which bolt the last press showed
+	// WHICH INTERNAL VIEWS GET THE RAIN. A cycler rather than a pill because there are
+	// three states, and the same shape as the G-FORCE tab's "Effects view" so the two
+	// view-scope controls read alike.
+	static const char* RVIEW[3] = { "VC ONLY", "VC + PANEL", "ALL VIEWS" };
+	const int rvm = (g_fx.rainViewMode < 0 || g_fx.rainViewMode > 2) ? 0 : g_fx.rainViewMode;
+	DrawRowLabel(dc, RainViewY(), "Rain view", en);
+	DrawButton(dc, RowBtnRect(rc, RainViewY()), RVIEW[rvm], false, CLR_ACCENT);
 	DrawRowLabel(dc, RainBoltY(), "Test bolt", en);
 	DrawButton(dc, RowBtnRect(rc, RainBoltY()), "STRIKE", g_fx.boltTestFire, CLR_ACCENT);
-	if (g_fx.boltTestSlot >= 0) sprintf_s(val, "bolt %d/16", g_fx.boltTestSlot + 1);
+	// "bolt 16/16" was TEN characters against a seven-character column, so it was rendering
+	// as "lt 16/16". The row label already says "Test bolt" and the button beside it says
+	// STRIKE, so the word was pure repetition. Dropping it takes the longest value string on
+	// the entire panel down to NINE ("316k-316k", "0.85-1.15") and leaves the widened column
+	// real margin instead of a pixel of it - which is what makes the budget robust rather
+	// than merely arithmetically true on one machine's font metrics.
+	if (g_fx.boltTestSlot >= 0) sprintf_s(val, "%d/16", g_fx.boltTestSlot + 1);
 	else                        strcpy_s(val, "-");
 	DrawValue(dc, rc, RainBoltY(), val, en);
 
@@ -2319,6 +2456,11 @@ static BOOL ClickRain(HWND hDlg, const RECT& rc, int x, int y)
 		return TRUE;
 	}
 	if (g_fx.rainEnabled || g_fx.rainTest) {
+		if (PtIn(RowBtnRect(rc, RainViewY()), x, y, 2)) {
+			g_fx.rainViewMode = (g_fx.rainViewMode + 1) % 3;
+			InvalidateRect(hDlg, NULL, FALSE);
+			return TRUE;
+		}
 		if (PtIn(RowBtnRect(rc, RainBoltY()), x, y, 2)) {
 			g_fx.boltTestFire = true;          // consumed by UpdateRain next step
 			InvalidateRect(hDlg, NULL, FALSE);
@@ -2347,6 +2489,19 @@ static BOOL ClickRain(HWND hDlg, const RECT& rc, int x, int y)
 // worse than no switch. There is deliberately no ShadowMapFilter row: that value is a
 // D3DXMACRO compiled into D3D9Client.fx at render-window creation, so nothing can change
 // it mid-session - it belongs in the Launchpad D3D9 setup, and the caption says so.
+// The VC tab's SAVE TARGET - its own painter, above both sections, because it decides
+// where BOTH of them are stored. The twin of the PILOT tab's button, deliberately
+// identical in label and geometry: two tabs, one idea, so learning it once is enough.
+static void PaintVcTarget(HDC dc, const RECT& rc)
+{
+	DrawRowLabel(dc, VcTgtY(), "Save target", true);
+	DrawButton(dc, PilotBtnRect(VcTgtY(), 150),
+	           g_fx.vcPerClass ? "THIS VESSEL CLASS" : "ALL VESSELS",
+	           g_fx.vcPerClass, CLR_PILL_ON);
+	RECT rule = { 16, VcTgtY() + 14, rc.right - SEC_RPAD, VcTgtY() + 15 };
+	FillSolid(dc, rule, CLR_LINE);
+}
+
 static void PaintVCShadows(HDC dc, const RECT& rc)
 {
 	DrawSectionHdr(dc, rc, VcsHdrY(), "V C   S H A D O W S");
@@ -2415,34 +2570,47 @@ static void PaintPilot(HDC dc, const RECT& rc)
 	DrawRowLabel(dc, PilRowY(0), "Effect source", true);
 	DrawButton(dc, PilotBtnRect(PilRowY(0), 110), phys ? "PHYSICS" : "LAB", phys, CLR_PILL_ON);
 
-	// 1 - tolerance, shown as the +Gz threshold it PRODUCES. A 0..1 abstraction here
+	// 1 - SAVE TARGET (2026-08-25, his ask): where this tab's settings LIVE. Directly under
+	// the mode switch because the two are a pair of properties of the same block - what
+	// drives it, and where it is kept. Deliberately NOT gated on `phys`: it governs the LAB
+	// pills exactly as much as the model's gains.
+	// ⚠️ It reads the hull you are IN, not a preference you carry: the flag is stored per
+	// class, so arriving at a vessel with no pilot block of its own shows ALL VESSELS.
+	DrawRowLabel(dc, PilRowY(1), "Save target", true);
+	DrawButton(dc, PilotBtnRect(PilRowY(1), 150),
+	           g_fx.pilotPerClass ? "THIS VESSEL CLASS" : "ALL VESSELS",
+	           g_fx.pilotPerClass, CLR_PILL_ON);
+
+	// 2 - tolerance, shown as the +Gz threshold it PRODUCES. A 0..1 abstraction here
 	// would be unreadable; "4.0" is the number you can argue with.
-	DrawRowLabel(dc, PilRowY(1), "G tolerance", phys);
-	DrawSlider(dc, TrackRectAt(rc, PilRowY(1)), g_fx.gTolerance, phys);
+	DrawRowLabel(dc, PilRowY(2), "G tolerance", phys);
+	DrawSlider(dc, TrackRectAt(rc, PilRowY(2)), g_fx.gTolerance, phys);
 	sprintf_s(val, "%.1f", OroPhys_GzThreshold());
-	DrawValue(dc, rc, PilRowY(1), val, phys);
+	DrawValue(dc, rc, PilRowY(2), val, phys);
 
-	// 2 - anti-G suit: +1.5 G on the POSITIVE threshold only (it stops blood leaving the
+	// 3 - anti-G suit: +1.5 G on the POSITIVE threshold only (it stops blood leaving the
 	// head, so it does nothing for red-out).
-	DrawRowLabel(dc, PilRowY(2), "Anti-G suit", phys);
-	DrawButton(dc, PilotBtnRect(PilRowY(2), 78), g_fx.gsuitOn ? "ON" : "OFF", g_fx.gsuitOn, CLR_PILL_ON);
+	DrawRowLabel(dc, PilRowY(3), "Anti-G suit", phys);
+	DrawButton(dc, PilotBtnRect(PilRowY(3), 78), g_fx.gsuitOn ? "ON" : "OFF", g_fx.gsuitOn, CLR_PILL_ON);
 
-	// 3 - posture: decides which VESSEL axis is the pilot's spine, and so which axis
+	// 4 - posture: decides which VESSEL axis is the pilot's spine, and so which axis
 	// gets the vision suite. Cycling button rather than a dropdown - one more of a row
 	// kind we already have, instead of a whole new one.
-	DrawRowLabel(dc, PilRowY(3), "Position", phys);
-	DrawButton(dc, PilotBtnRect(PilRowY(3), 110), OroPhys_PoseName(g_fx.pilotPose), false, CLR_ACCENT);
+	// This row and the next are exactly what the Save target above exists for: where the
+	// crew SITS is a fact about the airframe, not about the person strapped into it.
+	DrawRowLabel(dc, PilRowY(4), "Position", phys);
+	DrawButton(dc, PilotBtnRect(PilRowY(4), 110), OroPhys_PoseName(g_fx.pilotPose), false, CLR_ACCENT);
 
-	// 4 - where G is measured. In orbit this is the whole ball game: free-falling, the
+	// 5 - where G is measured. In orbit this is the whole ball game: free-falling, the
 	// CoM reads exactly zero while a spinning pilot is pinned to the seat.
-	DrawRowLabel(dc, PilRowY(4), "G reference", phys);
-	DrawButton(dc, PilotBtnRect(PilRowY(4), 110), g_fx.gRefCamera ? "Camera" : "Vessel CoM", false, CLR_ACCENT);
+	DrawRowLabel(dc, PilRowY(5), "G reference", phys);
+	DrawButton(dc, PilotBtnRect(PilRowY(5), 110), g_fx.gRefCamera ? "Camera" : "Vessel CoM", false, CLR_ACCENT);
 
-	// 5 - which internal views the physiology is allowed into. Not gated on `phys`: it
+	// 6 - which internal views the physiology is allowed into. Not gated on `phys`: it
 	// governs the LAB sliders and the scenarios too, and a 2D-panel pilot running an
 	// INDUCE clip is exactly who would want it narrowed.
-	DrawRowLabel(dc, PilRowY(5), "Effects view", true);
-	DrawButton(dc, PilotBtnRect(PilRowY(5), 110), g_fx.fxVCOnly ? "VC only" : "Panel + VC",
+	DrawRowLabel(dc, PilRowY(6), "Effects view", true);
+	DrawButton(dc, PilotBtnRect(PilRowY(6), 110), g_fx.fxVCOnly ? "VC only" : "Panel + VC",
 	           g_fx.fxVCOnly, CLR_PILL_ON);
 
 	// --- live readout ---
@@ -2665,7 +2833,7 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 		// Lit green while the help window is up, so the button doubles as the answer to
 		// "is it already open, or did it open behind the sim window?"
 		DrawButton(dc, rhp, "HELP", g_hHelp != NULL, CLR_PILL_ON);
-		DrawButton(dc, rsv, "SAVE", false, CLR_ACCENT);
+		DrawButton(dc, rsv, "SAVE", BtnFlash(1), CLR_MSG_SAVE);
 	}
 	RECT rSep2 = { 0, PANE_Y - 1, W, PANE_Y };
 	FillSolid(dc, rSep2, CLR_LINE);
@@ -2698,6 +2866,7 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 		PaintRain(dc, rc);
 		break;
 	case 4:  // VC
+		PaintVcTarget(dc, rc);
 		PaintVCShadows(dc, rc);
 		PaintCamShake(dc, rc);
 		break;
@@ -2725,6 +2894,10 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 	char statusBuf[128];
 	const char* status;
 	bool alert = false;
+	// 0 means "not a save/revert message" - fall through to the alert/resting rule at the
+	// draw below. COLORREF 0 is pure black, which nothing on this panel ever draws text in,
+	// so it is safe as the sentinel and keeps the other three branches untouched.
+	COLORREF stClr = 0;
 	if (GetTickCount() < g_saveMsgUntil) {
 		// Highest priority: it is a direct answer to a click the user just made. Naming
 		// the SCOPES matters - it is the difference between "saved" and "saved for this
@@ -2751,6 +2924,11 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 		}
 		status = statusBuf;
 		alert  = !g_saveOk;
+		// COLOUR-CODED TO MATCH THE BUTTON THAT WAS JUST PRESSED (see CLR_MSG_SAVE): green
+		// for a write, amber for a revert, red if the write failed. It returns to the
+		// resting colour on its own when this message expires a few seconds later, which is
+		// exactly the moment the user is meant to stop looking down here.
+		stClr  = !g_saveOk ? CLR_ACCENT : (g_saveWasRevert ? CLR_MSG_REVRT : CLR_MSG_SAVE);
 	} else if (g_fx.seqActive >= 0) {
 		if (g_fx.seqActive < NIND)
 			sprintf_s(statusBuf, "INDUCING %s - ramps up and HOLDS. Recover to return.", g_indNames[g_fx.seqActive]);
@@ -2768,7 +2946,7 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 		status = "LAB MODE - sliders drive effects directly. Ctrl+G = master kill.";
 	}
 	SelectObject(dc, g_fontSmall);
-	SetTextColor(dc, alert ? CLR_ACCENT : CLR_TEXT_DIM);
+	SetTextColor(dc, stClr ? stClr : (alert ? CLR_ACCENT : CLR_TEXT_DIM));
 	TextOutA(dc, 16, H - 22, status, (int)strlen(status));
 
 	// --- Colour picker overlay (fixed layer, painted LAST = topmost) --------
@@ -2871,7 +3049,11 @@ static BOOL ClickParticles(HWND hDlg, const RECT& rc, int x, int y)
 	// ORO's off too (no exhaust particles at all), so it is not gated on the pill.
 	if (OroStockExhaustSupported() && PtIn(PillRectAt(PrtStkY()), x, y, 4)) {
 		g_fx.stockParticles = !g_fx.stockParticles;
-		if (g_fx.stockParticles) g_fx.prtEnabled = false;
+		// ⚠️ EVERY GROUP, not just the one on the sliders. Clearing only the edit buffer
+		// left other groups streaming, and UpdateParticles' mutual-exclusion rule then
+		// turned stock back off on the next pre-step - the pill lit for a single frame
+		// and no stock particles ever appeared. See OroThr_SetPrtAll.
+		if (g_fx.stockParticles) OroThr_SetPrtAll(false);
 		return TRUE;
 	}
 	if (!g_fx.prtEnabled) return FALSE;
@@ -3221,24 +3403,31 @@ static BOOL ClickPilot(HWND hDlg, const RECT& rc, int x, int y)
 		}
 		return TRUE;
 	}
-	if (PtIn(PilotBtnRect(PilRowY(2), 78), x, y)) {
+	// SAVE TARGET. Flipping it changes nothing on disk by itself - it decides where the
+	// NEXT save goes, and the tab's caption above updates to name the file, so the button
+	// and the caption always agree before anything is written.
+	if (PtIn(PilotBtnRect(PilRowY(1), 150), x, y)) {
+		g_fx.pilotPerClass = !g_fx.pilotPerClass;
+		return TRUE;
+	}
+	if (PtIn(PilotBtnRect(PilRowY(3), 78), x, y)) {
 		g_fx.gsuitOn = !g_fx.gsuitOn;
 		return TRUE;
 	}
-	if (PtIn(PilotBtnRect(PilRowY(3), 110), x, y)) {
+	if (PtIn(PilotBtnRect(PilRowY(4), 110), x, y)) {
 		const int n = OroPhys_PoseCount();
 		g_fx.pilotPose = (g_fx.pilotPose + 1) % (n > 0 ? n : 1);
 		return TRUE;
 	}
-	if (PtIn(PilotBtnRect(PilRowY(4), 110), x, y)) {
+	if (PtIn(PilotBtnRect(PilRowY(5), 110), x, y)) {
 		g_fx.gRefCamera = !g_fx.gRefCamera;
 		return TRUE;
 	}
-	if (PtIn(PilotBtnRect(PilRowY(5), 110), x, y)) {
+	if (PtIn(PilotBtnRect(PilRowY(6), 110), x, y)) {
 		g_fx.fxVCOnly = !g_fx.fxVCOnly;
 		return TRUE;
 	}
-	if (PtIn(TrackRectAt(rc, PilRowY(1)), x, y, 8)) {
+	if (PtIn(TrackRectAt(rc, PilRowY(2)), x, y, 8)) {
 		g_dragTol = 1;
 		SetCapture(hDlg);
 		g_fx.gTolerance = TrackValueFromX(rc, x);
@@ -3490,6 +3679,14 @@ static const HelpItem HELP_GFORCE[] = {
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "PILOT - what the model assumes about the body in the seat", NULL },
+{ HK_ROW, "Save target",  "Where this tab's settings are KEPT. ALL VESSELS is the global "
+                          "file - the same pilot flies every ship, which is how ORO has "
+                          "always worked. THIS VESSEL CLASS moves them into the hull's own "
+                          "file, because where the crew SITS is a fact about an airframe. A "
+                          "hull with no settings of its own falls back to your global ones, "
+                          "so visiting an untuned ship never loses your pilot. The master "
+                          "arm and the scenario sound stay global whatever it says, and the "
+                          "line above SAVE always names the file that will be written." },
 { HK_ROW, "G tolerance",  "How much G you take before symptoms begin. The readout shows the "
                           "threshold it produces in G, because a 0-to-1 abstraction would be "
                           "unreadable - 4.0 is a number you can argue with." },
@@ -3563,10 +3760,15 @@ static const HelpItem HELP_THRUSTER[] = {
           "everything on this tab is currently editing, and it stays visible however far you "
           "scroll - because it changes what every control below it MEANS.", NULL },
 { HK_ROW, "Click it to cycle", "It steps through the groups THIS VESSEL ACTUALLY HAS - main, "
-          "hover, retro, and any engines the author put in no standard group at all (shown "
-          "as USER). A ship with only main engines has nothing to cycle to, so the button "
-          "sits inert and says so. RCS is never included: attitude thrusters are tiny, "
-          "numerous, and would swamp everything." },
+          "hover, retro, any engines the author put in no standard group at all (shown as "
+          "USER), and RCS. A ship with only main engines has nothing to cycle to, so the "
+          "button sits inert and says so." },
+{ HK_ROW, "RCS",              "All attitude thrusters count as ONE group, however many the "
+          "ship has - they are not split by direction. They were left out of ORO until now, "
+          "and that turned out to be a bug rather than a decision: switching STOCK EXHAUST "
+          "off silences every jet on the hull, RCS included, so leaving them out of the "
+          "groups meant nothing of ours replaced them and they simply stopped showing. They "
+          "have their own plume and particle settings now, like any other group." },
 { HK_ROW, "Why it exists", "One set of numbers for every engine is right only while they all "
           "burn the same propellant. The EXPANSION BAND's high handle is the pressure an "
           "engine is RATED for; the Jet and Bloom swatches are its exhaust's colour; soot is "
@@ -3626,6 +3828,10 @@ static const HelpItem HELP_THRUSTER[] = {
           "already being driven - spacing stretches as you climb and tightens as you throttle "
           "down - so these trim that, they do not set it." },
 { HK_ROW, "Bloom width / bright", "The wide faint vacuum halo, the other end of the regime." },
+{ HK_P,   "On wet ground the jet also appears in the REFLECTION, drawn from under the "
+          "water alongside the hull and its lights. It costs nothing while the ground is "
+          "dry or the ship is high up, and needs the ATMOS tab's Reflection slider above "
+          "zero to be visible at all.", NULL },
 { HK_ROW, "Throat glow", "The fire in the bell cup, drawn as camera-facing discs so it still "
           "reads when you look straight up the nozzle. 0 turns it off." },
 { HK_ROW, "Throat offset", "Where that cup sits, 0 to 1 m. Same problem as the shimmer's "
@@ -3905,6 +4111,12 @@ static const HelpItem HELP_ATMOS[] = {
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "LIGHTNING", NULL },
+{ HK_P,   "THERE ARE TWO LIGHTNING SYSTEMS IN ORO AND THIS IS THE ORBITAL ONE. It draws "
+          "storms in a planet's cloud deck as you look down on them, on the night side, "
+          "and it is saved PER BODY. The RAIN section's Lightning slider is the other one: "
+          "the storm you are standing in, with bolts that reach the ground, in daylight as "
+          "readily as at night. They are independent - neither slider affects the other, "
+          "and switching this section off does not quieten a rainstorm.", NULL },
 { HK_P,   "Storms in the cloud deck, seen from above. The storms form where the CLOUD "
           "actually is - ORO reads the planet's own cloud map rather than inventing weather, "
           "so a flash never lights up a clear ocean. Earth ships enabled; other worlds have "
@@ -3980,13 +4192,16 @@ static const HelpItem HELP_ATMOS[] = {
           "billow filigree (256, 512, 1024 texels). The slider snaps to whole notches." },
 { HK_ROW, "Lightning", "How often the storm discharges. 0 is none at all; 2 is very often. "
           "Flashes only start once the storm is properly built - lightning belongs to a "
-          "real storm, not to the first drops." },
+          "real storm, not to the first drops. NOTE this is the storm around YOU - flashes "
+          "in the deck overhead and bolts to the ground, day or night. The ATMOS tab's own "
+          "LIGHTNING section is a separate system for storms seen from ORBIT, and the two "
+          "do not talk to each other." },
 { HK_ROW, "Bolt bloom", "The radiance around a bolt's channel: glow taps stacking under "
           "the crisp core. 0 is the bare filament; 2 wraps the channel in a storm-photo "
           "blaze." },
 { HK_ROW, "Density", "How many streaks are in the falling sheet." },
 { HK_ROW, "Fall speed", "How fast they fall." },
-{ HK_ROW, "Streak len", "How long each streak draws." },
+{ HK_ROW, "Streak length", "How long each streak draws." },
 { HK_ROW, "Streak glow", "How brightly the streaks catch the light." },
 { HK_ROW, "Slant (deg)", "Wind. Tilts the whole sheet up to fifteen degrees either way." },
 { HK_ROW, "Splashes", "Rings where drops land, on ground and on water. Two fields - one "
@@ -3994,11 +4209,12 @@ static const HelpItem HELP_ATMOS[] = {
           "fizzing where the eye actually looks." },
 { HK_ROW, "Wet dark", "How far the wet ground darkens. 1 is the designed look; 2 is "
           "near-black; standing water darkens further still." },
-{ HK_ROW, "Pool size", "How large the standing pools grow. Pools only START once the ground "
-          "is properly soaked - about seventy percent wet - because soil soaks first and "
-          "water stands later. Three pattern scales give sheets in one stretch and speckle "
-          "in the next, and the pools are PINNED TO THE GROUND: drive and they stay put, "
-          "new ones ahead, old ones behind." },
+{ HK_ROW, "Pool size", "How large the standing pools grow, and at 0 whether there are any: "
+          "turn it fully down for a soaked apron with no standing water at all. Pools only "
+          "START once the ground is properly soaked - about seventy percent wet - because "
+          "soil soaks first and water stands later. Three pattern scales give sheets in one "
+          "stretch and speckle in the next, and the pools are PINNED TO THE GROUND: drive "
+          "and they stay put, new ones ahead, old ones behind." },
 { HK_ROW, "Pool reach", "How far out pools stay visible before blending away - roughly "
           "nine hundred metres at 1. The damp sheen carries on past them, so distant "
           "ground still reads wet without the pattern marching to the horizon." },
@@ -4012,14 +4228,19 @@ static const HelpItem HELP_ATMOS[] = {
 { HK_ROW, "Reflection", "The vessel image in the wet ground - a real mirrored render, so "
           "the reflection is upside down at the contact points and geometrically correct, "
           "concentrated in the pools. The grey sky in the pools is always there; this "
-          "slider adds the SHIPS." },
+          "slider adds the SHIPS - hulls, nav lights and strobes, contrails and particle "
+          "streams, and ORO's own engine plume. It is a genuine second render of the "
+          "scene, not a copy of the picture, so anything in it is seen from under the "
+          "water rather than flipped: at half resolution and through the ripple, fine "
+          "structure like a shock-diamond train reads softer than it does in the air, "
+          "which is what a reflection in moving water does." },
+{ HK_ROW, "Reflection blur", "How DIFFUSE the reflection in the wet ground is. 0 is a "
+          "crisp mirror; raise it and the image spreads and softens the way it does on a "
+          "real wet apron, which scatters light rather than mirroring it. A little goes a "
+          "long way - the reflection should still read as the ship, just not as glass. "
+          "Costs nothing at 0." },
 { HK_ROW, "Swim size / Swim rate", "The rain-pocked ripple on that reflection: how far the "
           "image warps, and how fast it flickers. Size 0 is a dead-still mirror." },
-{ HK_ROW, "Water sheet", "An experiment kept for the curious: a reflective pool MESH under "
-          "the vessel using the client's own environment mapping. It reflects sky, sun and "
-          "OTHER ships but never its own carrier - a vessel is excluded from its own "
-          "environment map - which is why the Reflection slider above superseded it. "
-          "Leave it at 0 unless experimenting." },
 { HK_ROW, "Rain sound", "The storm's sound: three rain loops (patter / steady / downpour) "
           "crossfading as the storm builds, played through XRSound. This is the volume - "
           "1 is the designed mix against Orbiter's other ambient sounds, 0 is silent. It "
@@ -4033,6 +4254,8 @@ static const HelpItem HELP_ATMOS[] = {
           "rumble, the rare positive giant hits hardest, and inside the cockpit it all "
           "arrives muffled through the hull. Nine real recordings (freesound.org, "
           "credited in XRSound\\ORO\\README.txt); this is their volume, 0 = silent." },
+{ HK_ROW, "Hull drum", "Rain drumming on the SKIN of your ship - a fourth loop that plays only from inside a virtual cockpit, and the sound you actually notice in there. It has its own volume because it is about the vessel rather than the weather: turn it down for the storm without the drumming, and the outside mix does not move. 0 is silent." },
+{ HK_ROW, "Rain view", "Which INTERNAL views the rain is drawn in. VC ONLY is the default and the strictest: in a virtual cockpit every streak is cut at the window frame per pixel, so the cabin stays dry - that needs Sun glare enabled for the depth buffer, and without it the VC stays dry rather than showing drops indoors. VC + PANEL and ALL VIEWS add the 2D panel and the glass cockpit, where no depth is needed: those panels are painted over the rain by Orbiter itself, so they hide it for free. Outside views are always wet and are not affected by this." },
 { HK_ROW, "Test bolt / STRIKE", "The lightning test rig: each press plants the NEXT of "
           "the sixteen atlas bolts directly on the focus vessel with a fixed, repeatable "
           "flicker, cycling 1 to 16 - the readout names the one you are looking at. It "
@@ -4098,10 +4321,16 @@ static const HelpItem HELP_VC[] = {
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "SAVING", NULL },
-{ HK_P,   "This tab writes to TWO scopes. The shadow on/off and the whole cam-shake section "
-          "are GLOBAL - they are preferences about you. The cabin box and the shadow depth "
-          "are PER VESSEL CLASS, because the right value depends on how big that cockpit is "
-          "and how its materials were authored, not on who is flying it.", NULL },
+{ HK_P,   "This tab writes to TWO scopes. The cabin box and the shadow depth are always PER "
+          "VESSEL CLASS, because the right value depends on how big that cockpit is and how "
+          "its materials were authored, not on who is flying it. The shadow on/off and the "
+          "whole cam-shake section are GLOBAL by default - but the SAVE TARGET button at "
+          "the top of the tab moves them into the hull's file when you want that.", NULL },
+{ HK_ROW, "Save target",  "Cam-shake is the reason this is here. A big heavy ship should "
+                          "not rattle and shake like a tiny one, and the amplitude and "
+                          "frequency knobs describe what a HULL passes through to the seat "
+                          "rather than anything about you. A hull with no settings of its "
+                          "own falls back to your global ones." },
 };
 
 static const HelpItem* HelpText(int tab, int& n)
@@ -4125,12 +4354,50 @@ static const char* HelpTitle(int tab)
 // One pass that MEASURES and (optionally) DRAWS. Returns the document height. Keeping
 // both in one function is what guarantees the scrollbar and the text agree - two walks
 // would be two chances to drift apart.
+// ⚠️ THE LAYOUT IS CACHED, AND THAT IS THE SIM-FREEZE FIX (2026-08-25).
+// A public-beta tester: "Orbiter stops during scrolling ORO help window." It was not the
+// 2026-08-16 timer bug - this window has no WM_TIMER case, so it never ate Orbiter's
+// frame pump. It was simply too expensive to repaint. Every paint called this walk TWICE
+// (once to measure the document, once to draw it) and each walk ran a word-wrapping
+// DT_CALCRECT over EVERY entry - about two hundred of them - then drew all of them, most
+// scrolled far off screen. Dragging the scrollbar repaints as fast as the message queue
+// drains, so Orbiter's own frame loop never got a turn.
+//
+// Text metrics only change when the WIDTH or the TAB changes, so they are measured once
+// and kept. A repaint now costs the entries actually on screen, which is a dozen or so.
+// The cache is keyed on both, so reflow-on-resize (the reason the measuring exists at
+// all) still works - it just stops happening sixty times a second.
+#define HELP_CACHE_MAX 256
+static int  s_hcTab = -1, s_hcW = -1;
+static int  s_hcA[HELP_CACHE_MAX];      // primary text height per entry
+static int  s_hcB[HELP_CACHE_MAX];      // HK_ROW description height
+
 static int HelpWalk(HDC dc, const RECT& rc, bool bDraw)
 {
 	int n = 0;
 	const HelpItem* it = HelpText(g_helpTab, n);
 	const int w = rc.right - HELP_PAD * 2 - SB_W - SB_RPAD;
 	int y = HELP_TOP;
+
+	const bool cacheOK = (s_hcTab == g_helpTab && s_hcW == w && n <= HELP_CACHE_MAX);
+	// Measure one block, or take the kept value. `wid` matters: the HK_ROW description is
+	// indented, so it wraps at a narrower width than everything else.
+	auto blockH = [&](int slot, bool second, const char* s, HFONT f, int wid) -> int {
+		int* cache = second ? s_hcB : s_hcA;
+		if (cacheOK && slot < HELP_CACHE_MAX) return cache[slot];
+		SelectObject(dc, f);
+		RECT m = { 0, 0, wid, 0 };
+		DrawTextA(dc, s, -1, &m, DT_WORDBREAK | DT_CALCRECT);
+		const int h = m.bottom - m.top;
+		if (slot < HELP_CACHE_MAX) cache[slot] = h;
+		return h;
+	};
+	// An entry wholly above or below the window is not drawn at all - the other half of
+	// the cost, and the reason a long tab is no more expensive than a short one.
+	auto onScreen = [&](int top, int h) -> bool {
+		const int sy = top - g_helpScroll;
+		return (sy + h > 0) && (sy < rc.bottom);
+	};
 
 	// The tab name this text belongs to, so a window left open on the far side of the
 	// screen still says what it is describing.
@@ -4153,11 +4420,9 @@ static int HelpWalk(HDC dc, const RECT& rc, bool bDraw)
 			break;
 		case HK_H: {
 			y += 16;
-			SelectObject(dc, g_hfHead);
-			RECT m = { HELP_PAD, 0, HELP_PAD + w, 0 };
-			DrawTextA(dc, it[i].a, -1, &m, DT_WORDBREAK | DT_CALCRECT);
-			const int h = m.bottom - m.top;
-			if (bDraw) {
+			const int h = blockH(i, false, it[i].a, g_hfHead, w);
+			if (bDraw && onScreen(y, h + 8)) {
+				SelectObject(dc, g_hfHead);
 				SetTextColor(dc, CLR_TEXT_HI);
 				RECT r = { HELP_PAD, y - g_helpScroll, HELP_PAD + w, y - g_helpScroll + h };
 				DrawTextA(dc, it[i].a, -1, &r, DT_WORDBREAK);
@@ -4172,23 +4437,19 @@ static int HelpWalk(HDC dc, const RECT& rc, bool bDraw)
 			// Control name on its own line, description indented under it. A two-column
 			// layout would look tidier and would fall apart the moment the window is
 			// narrowed, which is exactly what this window invites the user to do.
-			SelectObject(dc, g_hfName);
-			RECT mn = { HELP_PAD, 0, HELP_PAD + w, 0 };
-			DrawTextA(dc, it[i].a, -1, &mn, DT_WORDBREAK | DT_CALCRECT);
-			const int hn = mn.bottom - mn.top;
-			if (bDraw) {
+			const int hn = blockH(i, false, it[i].a, g_hfName, w);
+			if (bDraw && onScreen(y, hn)) {
+				SelectObject(dc, g_hfName);
 				SetTextColor(dc, CLR_PILL_ON);
 				RECT r = { HELP_PAD, y - g_helpScroll, HELP_PAD + w, y - g_helpScroll + hn };
 				DrawTextA(dc, it[i].a, -1, &r, DT_WORDBREAK);
 			}
 			y += hn + 3;
 			if (it[i].b) {
-				SelectObject(dc, g_hfBody);
 				const int ind = HELP_PAD + 14;
-				RECT md = { ind, 0, HELP_PAD + w, 0 };
-				DrawTextA(dc, it[i].b, -1, &md, DT_WORDBREAK | DT_CALCRECT);
-				const int hd = md.bottom - md.top;
-				if (bDraw) {
+				const int hd  = blockH(i, true, it[i].b, g_hfBody, HELP_PAD + w - ind);
+				if (bDraw && onScreen(y, hd)) {
+					SelectObject(dc, g_hfBody);
 					SetTextColor(dc, CLR_TEXT);
 					RECT r = { ind, y - g_helpScroll, HELP_PAD + w, y - g_helpScroll + hd };
 					DrawTextA(dc, it[i].b, -1, &r, DT_WORDBREAK);
@@ -4199,11 +4460,9 @@ static int HelpWalk(HDC dc, const RECT& rc, bool bDraw)
 			break;
 		}
 		default: {   // HK_P
-			SelectObject(dc, g_hfBody);
-			RECT m = { HELP_PAD, 0, HELP_PAD + w, 0 };
-			DrawTextA(dc, it[i].a, -1, &m, DT_WORDBREAK | DT_CALCRECT);
-			const int h = m.bottom - m.top;
-			if (bDraw) {
+			const int h = blockH(i, false, it[i].a, g_hfBody, w);
+			if (bDraw && onScreen(y, h)) {
+				SelectObject(dc, g_hfBody);
 				// CLR_TEXT, not CLR_TEXT_DIM: dim is right for a one-line hint under a
 				// slider you are already looking at, and wrong for a paragraph someone
 				// has to read. Running text gets the primary colour here.
@@ -4216,6 +4475,10 @@ static int HelpWalk(HDC dc, const RECT& rc, bool bDraw)
 		}
 		}
 	}
+	// Stamp the cache valid only once a full pass has actually filled it. Doing this at
+	// the END means an early return (there is none today) or a short tab can never leave
+	// a half-populated table looking authoritative.
+	if (n <= HELP_CACHE_MAX) { s_hcTab = g_helpTab; s_hcW = w; }
 	return y + HELP_TOP;
 }
 
@@ -4537,7 +4800,14 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		if (PtIn(SaveBtnRect(rc), x, y)) {
 			g_saveMask = ORO_SCOPE_GLOBAL | ORO_SCOPE_CLASS | ORO_SCOPE_BODY;
 			g_saveOk = OroSettings_Save();
+			// ⚠️ THIS FLAG WAS NEVER CLEARED HERE (found and fixed 2026-08-25, while adding
+			// the press feedback). The per-tab REVERT raises it and only the per-tab SAVE
+			// lowered it again, so REVERT on any tab followed by THIS button reported
+			// "Reverted: ..." for a write that had just succeeded - the status line saying
+			// the exact opposite of what had happened, and now in a colour to match.
+			g_saveWasRevert = false;
 			g_saveMsgUntil = GetTickCount() + 4000;
+			g_btnFlashWhat = 1; g_btnFlashUntil = GetTickCount() + BTN_FLASH_MS;
 			InvalidateRect(hDlg, NULL, FALSE);
 			return TRUE;
 		}
@@ -4578,6 +4848,7 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 			g_saveOk = OroSettings_SaveScope(g_saveMask);
 			g_saveWasRevert = false;
 			g_saveMsgUntil = GetTickCount() + 4000;
+			g_btnFlashWhat = 2; g_btnFlashUntil = GetTickCount() + BTN_FLASH_MS;
 			InvalidateRect(hDlg, NULL, FALSE);
 			return TRUE;
 		}
@@ -4596,6 +4867,7 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 			g_saveOk = true;             // a load has nothing to fail at: a missing file
 			g_saveWasRevert = true;      // simply means "the defaults", which is a revert too
 			g_saveMsgUntil = GetTickCount() + 4000;
+			g_btnFlashWhat = 3; g_btnFlashUntil = GetTickCount() + BTN_FLASH_MS;
 			ClearDrags();                // never leave a drag pointing at a value we replaced
 			InvalidateRect(hDlg, NULL, FALSE);
 			return TRUE;
@@ -4617,6 +4889,11 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		       || ClickRain(hDlg, rc, x, dy);
 			break;
 		case 4:  // VC
+			if (PtIn(PilotBtnRect(VcTgtY(), 150), x, dy)) {
+				g_fx.vcPerClass = !g_fx.vcPerClass;   // where the NEXT save goes
+				handled = TRUE;
+				break;
+			}
 			handled = ClickVCShadows(hDlg, rc, x, dy) || ClickCamShake(hDlg, rc, x, dy);
 			break;
 		default: // 0 = G-FORCE
@@ -4674,8 +4951,20 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		else if (g_dragAurK  >= 0) *g_aurKnobs[g_dragAurK].value   = EnvKnobValueFromX(rc, x, g_aurKnobs[g_dragAurK].vmax);
 		else if (g_dragLtg   >= 0) *g_ltgRows[g_dragLtg].value     = TrackValueFromX(rc, x) * g_ltgRows[g_dragLtg].vmax;
 		else if (g_dragGry   >= 0) *g_gryRows[g_dragGry].value     = TrackValueFromX(rc, x) * g_gryRows[g_dragGry].vmax;
-		else if (g_dragRain  >= 0) *g_rainRows[g_dragRain].value   = g_rainRows[g_dragRain].vmin
-		         + TrackValueFromX(rc, x) * (g_rainRows[g_dragRain].vmax - g_rainRows[g_dragRain].vmin);
+		else if (g_dragRain  >= 0) {
+			*g_rainRows[g_dragRain].value = g_rainRows[g_dragRain].vmin
+			         + TrackValueFromX(rc, x) * (g_rainRows[g_dragRain].vmax - g_rainRows[g_dragRain].vmin);
+			// ⚠️ SNAP HERE TOO (2026-08-24). The PRESS handler has snapped dec-0 rain rows
+			// to integers since the notches landed; this DRAG continuation never did, so
+			// the control was half-snapped - click it and Cloud detail went to 3, drag it
+			// and it stopped at 2.55. A public-beta tester reported it as "make Cloud
+			// detail move discretely", which is not a new request: it is the behaviour the
+			// press handler already implements, finished.
+			// The usual lesson, third time today: the rule was applied where the evidence
+			// pointed (the click) and not swept to the other path that does the same job.
+			if (g_rainRows[g_dragRain].dec == 0)
+				*g_rainRows[g_dragRain].value = floorf(*g_rainRows[g_dragRain].value + 0.5f);
+		}
 		else if (g_dragVap   >= 0) *g_vapRows[g_dragVap].value     = TrackValueFromX(rc, x) * g_vapRows[g_dragVap].vmax;
 		else if (g_dragVapP  >= 0) g_fx.vapPos = EnvKnobValueFromX(rc, x, VAP_POS_MAX);
 		else if (g_dragVapBand >= 0) VapBandDrag(TrackValueFromX(rc, x));

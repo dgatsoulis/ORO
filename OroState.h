@@ -53,7 +53,17 @@
 // flat thruster fields, and no consumer may read them - consumers take the group they
 // are drawing and read thr[that group]. Grep for OroThr_ before changing any of this.
 // ============================================================================
-enum { ORO_THR_MAIN = 0, ORO_THR_HOVER, ORO_THR_RETRO, ORO_THR_USER, ORO_THR_N };
+// ⚠️ RCS JOINED ON 2026-08-25, AND IT IS APPENDED - never inserted. The index is the cfg
+// key prefix ("RCS...") and the saved thrSel, so putting it anywhere but last would have
+// renamed every existing group's settings underneath the files already on disk.
+// It also closes a real hole rather than only adding a feature: patch (n)'s suppression is
+// PER VESSEL (vVessel::RenderExhaust early-returns before its loop), so switching stock
+// exhaust off silenced the RCS jets too - while OroThrusterGroupOf deliberately excluded
+// RCS, so nothing of ours replaced them. The suppression was vessel-wide and the
+// replacement was group-scoped; RCS fell in the gap and simply stopped showing.
+// ALL attitude thrusters are ONE group, his call: "we don't have to do individual RCS
+// groups". Per-thruster settings are a later question.
+enum { ORO_THR_MAIN = 0, ORO_THR_HOVER, ORO_THR_RETRO, ORO_THR_USER, ORO_THR_RCS, ORO_THR_N };
 
 struct OroThrusterFx {
 	// Shimmer
@@ -545,11 +555,26 @@ struct OroEffectState {
 	                               //   filament only.
 	// (rainHullRun lived here for one day - the hull water feature, cut whole on
 	//  2026-08-22, his call. A stale RainHullRun key in an old cfg is simply ignored.)
-	float rainSheet       = 1.0f;  // x THE WATER SHEET (0..2; 0 = off) - his design,
-	                               //   2026-08-22: a reflective pool MESH attached under
-	                               //   the vessel, reflecting through the client's own
-	                               //   ENV-MAP system (the stock Reflection settings).
-	                               //   Entirely stock rendering; no client patch.
+	float rainReflBlur    = 0.0f;  // x REFLECTION BLUR (0..2; 0 = a crisp mirror) - how
+	                               //   diffuse the wet-ground reflection is. Wet ground
+	                               //   SCATTERS rather than mirroring, so a little of
+	                               //   this is the honest look, not a softening filter.
+	                               //   Rides gWetGrainPrm.z (patch (s) part 6's setter
+	                               //   gained a 6th argument); 0 reproduces the shipped
+	                               //   three-tap smear exactly.
+	                               // ⚠️ REPLACES THE WATER SHEET, removed 2026-08-24.
+	                               //   That was a reflective pool MESH under the vessel
+	                               //   using the client's ENV-MAP system - superseded by
+	                               //   the planar mirror on the day it was built, and it
+	                               //   DREW OVER its own replacement: any nonzero value
+	                               //   put a mesh between the camera and the wet ground
+	                               //   and masked the real reflection. It shipped in the
+	                               //   260823 package at 0.0373134, which is why beacons
+	                               //   looked absent from the reflection until he zeroed
+	                               //   it by accident. What he actually valued about it
+	                               //   was the small BLUR it introduced - so that is what
+	                               //   survives, done properly. A stale RainSheet key in
+	                               //   an old cfg is simply ignored, as RainHullRun is.
 	float rainSoundVol    = 1.0f;  // x RAIN SOUND volume (0..2; 0 = silent). The three
 	                               //   generated loops (tools/raingen.py) crossfade with
 	                               //   the storm envelope in UpdateRainSound; 1 = the
@@ -558,6 +583,18 @@ struct OroEffectState {
 	float rainThunder     = 1.0f;  // x THUNDER volume (0..2; 0 = silent, same opt-out).
 	                               //   Nine sourced one-shots fired dist/340 s after
 	                               //   each flash event - see UpdateThunder.
+	int   rainViewMode    = 0;     // WHICH INTERNAL VIEWS GET THE RAIN (2026-08-25, his
+	                               //   design after a tester asked for it beyond the VC):
+	                               //   0 = VC only, 1 = VC + 2D panel, 2 = every view.
+	                               //   ⚠️ The VC and the flat modes are drawn on DIFFERENT
+	                               //   terms - see rainVC / rainPanel in OroModule.h.
+	float rainHullVol     = 1.0f;  // x HULL DRUM volume (0..2; 0 = silent), 2026-08-25.
+	                               //   The fourth generated loop - drops drumming on the
+	                               //   skin, INTERIOR ONLY. Split off Rain sound at a
+	                               //   tester's ask: it is the one storm layer that is
+	                               //   about the SHIP rather than the weather, some
+	                               //   people want the storm without the drumming, and
+	                               //   the outside mix should not have to move for it.
 	// live readouts, never saved (they are the storm's current STATE, like the eye's)
 	float rainI           = 0.0f;  // the event envelope, 0..1
 	float rainWet         = 0.0f;  // ground wetness, lags rainI - build B consumes it
@@ -768,6 +805,15 @@ struct OroEffectState {
 	// into D3D9Client.fx when clbkCreateRenderWindow compiles the effect, so nothing can
 	// change it mid-session. It lives in the Launchpad D3D9 setup and applies on the next
 	// scenario launch.
+	// SAVE TARGET for the VC tab (2026-08-25), the twin of pilotPerClass and stored the
+	// same way - per class, so the button describes the hull you are in. It moves the VC
+	// tab's GLOBAL keys (shadows on/off + all six cam-shake knobs) into the hull's file;
+	// the cabin box and shadow depth beside them were already per class and are unaffected.
+	// ⚠️ CAM-SHAKE IS THE REAL CASE, and it is his: "a slow turning behemoth like the XR5
+	// Vanguard cannot and should not produce the same shake/rattle like the tiny
+	// shuttle-PB". Amplitude and frequency describe what a HULL transmits to the seat, so
+	// they were always a per-airframe fact wearing a global key.
+	bool  vcPerClass      = false;
 	bool  vcShadows       = true;  // false = skip the internal-pass shadow map entirely
 	float vcShadowRadius  = 2.2f;  // [m] half-width of the ortho box fitted around the eye.
 	// ORO patch (p): how much of the material AMBIENT the shadow takes with it.
@@ -1070,6 +1116,19 @@ struct OroEffectState {
 	// which is what stops a heartbeat pounding away over a view that shows nothing.
 	bool  fxVCOnly     = false;
 
+	// SAVE TARGET (2026-08-25, his ask): where the G-FORCE tab's settings LIVE. False = the
+	// global file, the behaviour since the settings landed - one pilot flies every ship.
+	// True = this vessel class's own file, because a hull decides where the crew SITS, and
+	// posture plus the camera-vs-CoM reference are genuinely per-airframe facts.
+	// ⚠️ THIS FLAG IS ITSELF PER CLASS, on purpose. Kept globally it would claim a mode that
+	// was not in force: fly to a hull with no pilot block and the button would still read
+	// "THIS VESSEL CLASS" while the global values were what you were actually flying. Stored
+	// per class, the button always describes the hull you are in.
+	// ⚠️ IT DOES NOT MOVE MasterArmed OR ScenarioSound, which stay global whatever it says.
+	// A class file carrying MasterArmed=0 would DISARM the whole addon the instant you
+	// switched to that hull, and it would read as a crash rather than as a setting.
+	bool  pilotPerClass = false;
+
 	// Per-effect gains, used ONLY in physics mode (0 = effect suppressed, 1 = full model).
 	float gainBlackout   = 1.0f;
 	float gainRedout     = 1.0f;
@@ -1159,6 +1218,12 @@ bool        OroSettings_SaveScope(int mask);          // targeted save; returns 
 // It is not simply the loaders called back to back - they early-return on "already
 // current", which is exactly the case a revert means. See the definition.
 void        OroSettings_Revert(int mask);
+// Is the pilot block currently in force one that came out of the FOCUS HULL's own file?
+// The dialog needs this to decide whether a G-FORCE save must also rewrite the class file:
+// turning Save target back to ALL VESSELS has to CLEAR the hull's stored block, or the
+// stale one keeps overriding the global values it was just told to stop overriding.
+bool        OroSettings_PilotFromClass();
+bool        OroSettings_VcFromClass();
 
 // The panel's own height, in its own tiny file (Config\ORO\window.cfg). Separate from
 // every scope above ON PURPOSE - Orbiter's writer truncates, so persisting this through
@@ -1222,5 +1287,7 @@ bool        OroBloomKnown();
 void        OroThr_SyncOut();          // flat edit buffer -> thr[thrSel]
 void        OroThr_SyncIn();           // thr[thrSel] -> flat edit buffer
 void        OroThr_Cycle();            // advance to the next group the vessel has
+void        OroThr_SetPrtAll(bool on); // ORO's particle streams on/off for EVERY group
+bool        OroThr_AnyPrtOn();         // is ANY group streaming? (vessel-wide truth)
 const char* OroThr_Name(int grp);      // "MAIN" / "HOVER" / "RETRO" / "USER"
 int         OroThr_Count();            // how many groups this vessel has (1 = no cycling)

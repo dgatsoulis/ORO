@@ -413,7 +413,7 @@ void OroModule::DrawTrailPoly(oapi::Sketchpad* pSkp, bool depthClip)
 // patch-(g) per-vertex depth. The clip is what cuts a hover plume at the runway
 // surface (scene depth includes terrain); without it OroPlume falls back to the
 // shimmer's geometric facing fade at build time.
-void OroModule::DrawPlumePoly(oapi::Sketchpad* pSkp, bool depthClip)
+void OroModule::DrawPlumePoly(oapi::Sketchpad* pSkp, bool depthClip, bool writeAlpha)
 {
 	if (plmVtxN <= 0 || !pCore) return;
 	if (!hPlumePoly) {
@@ -423,6 +423,7 @@ void OroModule::DrawPlumePoly(oapi::Sketchpad* pSkp, bool depthClip)
 	if (!hPlumePoly) return;
 
 	DWORD blend = padAdditive ? 0x5 : (DWORD)oapi::Sketchpad::BlendState::ALPHABLEND;
+	if (writeAlpha) blend |= 0x200;                 // patch (u): lay down coverage alpha
 	if (depthClip && depthClipOK) {
 		pCore->CreateTrianglesDepth(hPlumePoly, (const gcCore::clrVtx*)plmVtx, plmDepth, PLM_MAX_TRI * 3, PF_TRIANGLES);
 		blend |= 0x100;
@@ -444,6 +445,7 @@ void OroModule::DrawPlumePoly(oapi::Sketchpad* pSkp, bool depthClip)
 		}
 		if (hPlumeDkPoly) {
 			DWORD dkBlend = (DWORD)oapi::Sketchpad::BlendState::ALPHABLEND;
+			if (writeAlpha) dkBlend |= 0x200;       // the soot is part of the same image
 			if (depthClip && depthClipOK) {
 				pCore->CreateTrianglesDepth(hPlumeDkPoly, (const gcCore::clrVtx*)plmDkVtx, plmDkDepth, PLM_DK_MAX_TRI * 3, PF_TRIANGLES);
 				dkBlend |= 0x100;
@@ -564,25 +566,14 @@ namespace {
 	// --- GLOBAL: the pilot and the session, not the ship ---------------------
 	const SetItem SETTINGS[] = {
 		{ "MasterArmed",      &g_fx.masterArmed,      ST_B },
-		// enables only - see the note above about the scripted channels
-		{ "BlackoutOn",       &g_fx.blackoutEnabled,  ST_B },
-		{ "RedoutOn",         &g_fx.redoutEnabled,    ST_B },
-		{ "TunnelOn",         &g_fx.tunnelEnabled,    ST_B },
-		{ "SpotsOn",          &g_fx.spotsEnabled,     ST_B },
-		{ "GreyoutOn",        &g_fx.greyoutEnabled,   ST_B },
-		{ "BlurOn",           &g_fx.blurEnabled,      ST_B },
-		{ "AberrationOn",     &g_fx.aberrationEnabled,ST_B },
-		{ "SparklesOn",       &g_fx.sparklesEnabled,  ST_B },
-		{ "SwimOn",           &g_fx.swimEnabled,      ST_B },
-		{ "TiltOn",           &g_fx.tiltEnabled,      ST_B },
-		{ "HeartbeatOn",      &g_fx.heartbeatEnabled, ST_B },
-		// cam-shake: the LOOK knobs (intensity is physics-driven, nothing to save)
-		{ "ShakeOn",          &g_fx.shakeEnabled,     ST_B },
-		{ "ShakeAmpX",        &g_fx.shakeAmpX,        ST_F },
-		{ "ShakeAmpY",        &g_fx.shakeAmpY,        ST_F },
-		{ "ShakeAmpZ",        &g_fx.shakeAmpZ,        ST_F },
-		{ "ShakeFreq",        &g_fx.shakeFreq,        ST_F },
-		{ "ShakePush",        &g_fx.shakePush,        ST_F },   // the lean, split from the buffet
+		// ⚠️ THE ELEVEN EFFECT PILLS AND THE WHOLE PILOT MODEL LEFT THIS TABLE ON
+		// 2026-08-25 - they are in PILOTSET below, because they can now be written to
+		// EITHER this file or a vessel class's, and a key can only have one home.
+		// MasterArmed above and ScenarioSound further down deliberately did NOT go with
+		// them: see the Save target note on PILOTSET for why those two must stay global.
+		// ⚠️ THE SIX CAM-SHAKE KNOBS MOVED TO VCSET on 2026-08-25, for the same reason the
+		// pilot block moved and a better one: what a hull transmits to the seat is a fact
+		// about its mass and size, not about the person in it.
 		// world - the ENABLES and the VC preference are the user's, not the ship's
 		{ "ShimmerOn",        &g_fx.shimmerEnabled,   ST_B },
 		{ "PlumeOn",          &g_fx.plumeEnabled,     ST_B },
@@ -598,8 +589,8 @@ namespace {
 		{ "ScenarioSound",    &g_fx.seqSoundEnabled,  ST_B },
 		// eclipse: an EYE, not a hull - the same pilot behind every canopy, so global
 		// (invariant 17). Test is transient, like shakeTest, and is never written.
-		{ "VCShadowsOn",      &g_fx.vcShadows,        ST_B },   // the pilot's preference;
-		                                                        // the RADIUS is per class
+		// ⚠️ VCShadowsOn MOVED TO VCSET TOO (2026-08-25). The cabin box and the shadow
+		// depth beside it were already per class; the on/off was the odd one out.
 		{ "EclipseOn",        &g_fx.eclipseEnabled,   ST_B },
 		{ "EclipseDim",       &g_fx.eclipseDim,       ST_F },
 		{ "EclipseAdapt",     &g_fx.eclipseAdapt,     ST_F },
@@ -650,11 +641,50 @@ namespace {
 		{ "RainGrainSize",    &g_fx.rainGrainSize,    ST_F },
 		{ "RainLtg",          &g_fx.rainLtg,          ST_F },
 		{ "RainBoltBloom",    &g_fx.rainBoltBloom,    ST_F },
-		{ "RainSheet",        &g_fx.rainSheet,        ST_F },
+		{ "RainReflBlur",     &g_fx.rainReflBlur,     ST_F },
 		{ "RainSound",        &g_fx.rainSoundVol,     ST_F },
 		{ "RainThunder",      &g_fx.rainThunder,      ST_F },
+		{ "RainHullVol",      &g_fx.rainHullVol,      ST_F },
+		{ "RainViewMode",     &g_fx.rainViewMode,     ST_I },
 		{ "VapourOn",         &g_fx.vapEnabled,       ST_B },
-		// pilot / felt-G model
+	};
+	const int NSETTINGS = (int)(sizeof(SETTINGS) / sizeof(SETTINGS[0]));
+
+	// --- THE PILOT BLOCK: the one table that can live in EITHER scope --------
+	// Everything the G-FORCE tab owns except the two housekeeping keys. It is a SEPARATE
+	// table rather than a marked subset of SETTINGS so that there is exactly ONE list of
+	// these keys in the project: the global writer appends this table, the class writer
+	// appends the same table, and neither can drift from the other.
+	//
+	// WHY IT MOVES AT ALL (his ask, 2026-08-25): "different vessels might have different
+	// seating positions for the crew". Posture and the camera-vs-CoM reference really are
+	// facts about an airframe, not about the person flying it, and there was no way to say
+	// so. `g_fx.pilotPerClass` - the panel's Save target button - decides which file this
+	// block is written to, and it is stored per class so the button always describes the
+	// hull you are in.
+	//
+	// ⚠️ THE READ RULE IS A THIRD ONE, DIFFERENT FROM BOTH THAT ALREADY EXIST (invariant
+	// 17a). A class with no LOOK settings KEEPS the current numbers, and a world with no
+	// aurora file gets the BUILT-IN DEFAULTS; a hull with no pilot block gets neither. It
+	// falls back to the GLOBAL values, held in g_pilotGlobal below. Anything else is wrong
+	// here: "keep current" would silently fly a stock DeltaGlider with the seating position
+	// you tuned for a DG-S, and "defaults" would throw your pilot away for visiting an
+	// untuned hull. Falling back to global is the only rule under which an unconfigured
+	// vessel flies as the pilot you actually configured.
+	const SetItem PILOTSET[] = {
+		// the eleven effect pills - enables only, never the scripted channels themselves
+		{ "BlackoutOn",       &g_fx.blackoutEnabled,  ST_B },
+		{ "RedoutOn",         &g_fx.redoutEnabled,    ST_B },
+		{ "TunnelOn",         &g_fx.tunnelEnabled,    ST_B },
+		{ "SpotsOn",          &g_fx.spotsEnabled,     ST_B },
+		{ "GreyoutOn",        &g_fx.greyoutEnabled,   ST_B },
+		{ "BlurOn",           &g_fx.blurEnabled,      ST_B },
+		{ "AberrationOn",     &g_fx.aberrationEnabled,ST_B },
+		{ "SparklesOn",       &g_fx.sparklesEnabled,  ST_B },
+		{ "SwimOn",           &g_fx.swimEnabled,      ST_B },
+		{ "TiltOn",           &g_fx.tiltEnabled,      ST_B },
+		{ "HeartbeatOn",      &g_fx.heartbeatEnabled, ST_B },
+		// pilot / felt-G model - the seating position is what started this
 		{ "PhysicsMode",      &g_fx.physicsMode,      ST_B },
 		{ "GTolerance",       &g_fx.gTolerance,       ST_F },
 		{ "GSuit",            &g_fx.gsuitOn,          ST_B },
@@ -673,12 +703,107 @@ namespace {
 		{ "GainSwim",         &g_fx.gainSwim,         ST_F },
 		{ "GainTilt",         &g_fx.gainTilt,         ST_F },
 	};
-	const int NSETTINGS = (int)(sizeof(SETTINGS) / sizeof(SETTINGS[0]));
+	const int NPILOTSET = (int)(sizeof(PILOTSET) / sizeof(PILOTSET[0]));
+
+	// The GLOBAL pilot values, kept in memory so an unconfigured hull has something to fall
+	// back TO. Refreshed whenever Config\ORO.cfg is read, and whenever it is written with
+	// the block in it - i.e. exactly when the global copy changes. Every SetType is a
+	// 4-byte scalar, so this is driven off the table itself and cannot drift from it the
+	// way a hand-written mirror struct would.
+	// ⚠️ ONE SetVal FOR THE WHOLE FILE. The per-BODY defaults further down needed exactly
+	// this and carried their own copy of the type plus their own pair of switch loops; the
+	// declaration lives here now, ahead of its first user, and both consumers share the
+	// generic pair below instead of open-coding the same three cases twice.
+	struct SetVal { float f; int i; bool b; };
+	SetVal g_pilotGlobal[NPILOTSET];
+	bool   g_pilotGlobalOk = false;          // false until the first read/write
+	// ⚠️ IS THE LIVE PILOT BLOCK A HULL'S, OR THE GLOBAL ONE? This exists to keep the
+	// feature from costing anything to people who never use it. Restoring the global values
+	// on EVERY class change would be simpler and would quietly throw away unsaved pilot
+	// tweaks whenever the focus vessel's class changed - a regression for everybody, in
+	// service of a case that only arises once some hull actually owns a block. So the undo
+	// is conditional: with this false, a class change does not touch the pilot at all, and
+	// the behaviour is bit-for-bit what it was before the Save target existed.
+	bool   g_pilotFromClass = false;
+
+	void SnapTable(const SetItem* t, int n, SetVal* out)
+	{
+		for (int i = 0; i < n; i++) {
+			switch (t[i].t) {
+			case ST_F: out[i].f = *(float*)t[i].p; break;
+			case ST_B: out[i].b = *(bool*) t[i].p; break;
+			case ST_I: out[i].i = *(int*)  t[i].p; break;
+			}
+		}
+	}
+	void RestoreTable(const SetItem* t, int n, const SetVal* in)
+	{
+		for (int i = 0; i < n; i++) {
+			switch (t[i].t) {
+			case ST_F: *(float*)t[i].p = in[i].f; break;
+			case ST_B: *(bool*) t[i].p = in[i].b; break;
+			case ST_I: *(int*)  t[i].p = in[i].i; break;
+			}
+		}
+	}
+
+	// --- THE SECOND MOVABLE BLOCK: the VC tab (2026-08-25) -------------------
+	// The VC tab's GLOBAL keys. The cabin box and the shadow depth are NOT here - they
+	// have been per class since patch (p) and stay that way unconditionally, because how
+	// a virtual cockpit was authored is never a global fact.
+	// ⚠️ CAM-SHAKE IS WHY THIS EXISTS, and it is a better case than the pilot's: amplitude
+	// and frequency describe what a HULL passes to the seat. His words - "a slow turning
+	// behemoth like the XR5 Vanguard cannot and should not produce the same shake/rattle
+	// like the tiny shuttle-PB". Invariant 9 already says the STRENGTH is physics-driven
+	// from thrust, dynamic pressure and ground contact; these six shape what that strength
+	// looks like, and that shape belongs to the airframe.
+	const SetItem VCSET[] = {
+		{ "VCShadowsOn",      &g_fx.vcShadows,        ST_B },
+		{ "ShakeOn",          &g_fx.shakeEnabled,     ST_B },
+		{ "ShakeAmpX",        &g_fx.shakeAmpX,        ST_F },
+		{ "ShakeAmpY",        &g_fx.shakeAmpY,        ST_F },
+		{ "ShakeAmpZ",        &g_fx.shakeAmpZ,        ST_F },
+		{ "ShakeFreq",        &g_fx.shakeFreq,        ST_F },
+		{ "ShakePush",        &g_fx.shakePush,        ST_F },   // the lean, split from the buffet
+	};
+	const int NVCSET = (int)(sizeof(VCSET) / sizeof(VCSET[0]));
+	SetVal g_vcGlobal[NVCSET];
+	bool   g_vcGlobalOk  = false;
+	bool   g_vcFromClass = false;
+
+	// --- THE MOVABLE-BLOCK REGISTER -----------------------------------------
+	// Two blocks now, and the four places that care (global read, global write, class read,
+	// class write) all just LOOP over this. Adding a third tab's block later is one table
+	// and one row here, with no fifth copy of the fallback rule to get subtly wrong -
+	// which is the whole reason this is a register rather than a second hand-written set
+	// of g_pilot* / g_vc* branches.
+	struct MovBlock {
+		const char*    name;        // for the log line, so a load says WHICH block moved
+		const SetItem* tbl;
+		int            n;
+		bool*          perClass;    // the Save target flag: a g_fx field, saved in CLASSSET
+		SetVal*        globalVal;   // the global copy - what an unconfigured hull falls back to
+		bool*          globalOk;
+		bool*          fromClass;   // is the LIVE block a hull's, rather than the global one?
+	};
+	const MovBlock MOVBLK[] = {
+		{ "pilot", PILOTSET, NPILOTSET, &g_fx.pilotPerClass, g_pilotGlobal, &g_pilotGlobalOk, &g_pilotFromClass },
+		{ "VC",    VCSET,    NVCSET,    &g_fx.vcPerClass,    g_vcGlobal,    &g_vcGlobalOk,    &g_vcFromClass    },
+	};
+	const int NMOVBLK = (int)(sizeof(MOVBLK) / sizeof(MOVBLK[0]));
 
 	// --- PER VESSEL CLASS: everything whose right value depends on the hull ---
 	// Size, shape and engine layout decide all of these, so they are remembered
 	// against the class name and swapped in when the focus vessel changes.
 	const SetItem CLASSSET[] = {
+		// Does this hull keep its OWN pilot settings? The Save target button. It is read
+		// with the rest of the class file, and it is what tells the loader whether to look
+		// for a PILOTSET block in here at all. ⚠️ It must be CLEARED before the file is
+		// read, not merely left to a missing key: the class loader's rule for an absent key
+		// is "keep the current value", which would let one hull's Save target leak into the
+		// next hull that has no file. LoadClass clears it explicitly.
+		{ "PilotScope",       &g_fx.pilotPerClass,    ST_B },
+		{ "VCScope",          &g_fx.vcPerClass,       ST_B },   // ... and the VC tab's
 		{ "Shimmer",          &g_fx.shimmer,          ST_F },   // engine haze: per engine
 		{ "ShimmerOfs",       &g_fx.shimmerOfs,       ST_F },   //   layout
 		{ "Plume",            &g_fx.plume,            ST_F },   // plume expansion overlay:
@@ -828,33 +953,22 @@ namespace {
 	// (This is the opposite of the per-CLASS rule, which deliberately CARRIES the current
 	// look over to an untuned vessel: there, one hull's look is a reasonable starting point
 	// for another; here, a world's aurora is not.)
-	struct SetVal { float f; int i; bool b; };
+	// SetVal, SnapTable and RestoreTable are declared up beside PILOTSET, which is their
+	// first user; this pair was the SECOND and used to carry its own copy of all three.
 	SetVal g_bodyDefault[NBODYSET];
 	bool   g_bodyDefaultsCaptured = false;
 
 	void CaptureBodyDefaults()
 	{
 		if (g_bodyDefaultsCaptured) return;
-		for (int i = 0; i < NBODYSET; i++) {
-			switch (BODYSET[i].t) {
-			case ST_F: g_bodyDefault[i].f = *(float*)BODYSET[i].p; break;
-			case ST_B: g_bodyDefault[i].b = *(bool*) BODYSET[i].p; break;
-			case ST_I: g_bodyDefault[i].i = *(int*)  BODYSET[i].p; break;
-			}
-		}
+		SnapTable(BODYSET, NBODYSET, g_bodyDefault);
 		g_bodyDefaultsCaptured = true;
 	}
 
 	void RestoreBodyDefaults()
 	{
 		CaptureBodyDefaults();
-		for (int i = 0; i < NBODYSET; i++) {
-			switch (BODYSET[i].t) {
-			case ST_F: *(float*)BODYSET[i].p = g_bodyDefault[i].f; break;
-			case ST_B: *(bool*) BODYSET[i].p = g_bodyDefault[i].b; break;
-			case ST_I: *(int*)  BODYSET[i].p = g_bodyDefault[i].i; break;
-			}
-		}
+		RestoreTable(BODYSET, NBODYSET, g_bodyDefault);
 	}
 
 	const char* SETTINGS_FILE = "ORO.cfg";
@@ -869,6 +983,23 @@ namespace {
 			case ST_F: oapiWriteItem_float(f, K(t[i].key), (double)(*(float*)t[i].p)); break;
 			case ST_B: oapiWriteItem_bool (f, K(t[i].key), *(bool*)t[i].p);            break;
 			case ST_I: oapiWriteItem_int  (f, K(t[i].key), *(int*)t[i].p);             break;
+			}
+		}
+	}
+
+	// The same, but from a SNAPSHOT rather than from the live fields. This is how the
+	// global file keeps its own copy of a movable block while a hull is flying different
+	// values: write what global HAD, not what is on the sliders. Doing it this way rather
+	// than swapping the snapshot in, writing, and swapping back means the live state is
+	// never disturbed even for an instant - no temporary, and nothing to restore if the
+	// write fails halfway.
+	void WriteTableFrom(FILEHANDLE f, const SetItem* t, int n, const SetVal* v)
+	{
+		for (int i = 0; i < n; i++) {
+			switch (t[i].t) {
+			case ST_F: oapiWriteItem_float(f, K(t[i].key), (double)v[i].f); break;
+			case ST_B: oapiWriteItem_bool (f, K(t[i].key), v[i].b);         break;
+			case ST_I: oapiWriteItem_int  (f, K(t[i].key), v[i].i);         break;
 			}
 		}
 	}
@@ -1000,6 +1131,23 @@ bool OroSettings_SaveScope(int mask)
 			oapiWriteLine(f, K("; Config\\ORO\\bodies\\<name>.cfg. Delete to restore the defaults."));
 			oapiWriteLine(f, K(""));
 			WriteTable(f, SETTINGS, NSETTINGS);
+			// ⚠️ THE GLOBAL FILE ALWAYS CARRIES A PILOT BLOCK - the question is WHOSE.
+			// The obvious implementation is "skip it when a hull owns the pilot", and that
+			// is wrong, because oapiOpenFile(FILE_OUT) TRUNCATES: skipping would DELETE the
+			// global copy and every unconfigured hull would silently fall back to factory
+			// defaults from then on. So when the Save target is THIS VESSEL CLASS the live
+			// values belong to the hull and the SNAPSHOT is written instead, preserving the
+			// global copy untouched. Only an ALL VESSELS save may overwrite it.
+			for (int b = 0; b < NMOVBLK; b++) {
+				const MovBlock& mb = MOVBLK[b];
+				if (*mb.perClass && *mb.globalOk) {
+					WriteTableFrom(f, mb.tbl, mb.n, mb.globalVal);
+				} else {
+					WriteTable(f, mb.tbl, mb.n);
+					SnapTable(mb.tbl, mb.n, mb.globalVal);       // the global copy just moved
+					*mb.globalOk = true;
+				}
+			}
 			oapiCloseFile(f, FILE_OUT);
 		}
 	}
@@ -1023,6 +1171,24 @@ bool OroSettings_SaveScope(int mask)
 			oapiWriteLine(fc, K(""));
 			WriteTable(fc, CLASSSET, NCLASSSET);
 			ThrWriteGroups(fc);      // ... and every thruster group's own set
+			// ... and this hull's own pilot, when the Save target says it has one. The
+			// PilotScope key written by CLASSSET above is what sends the loader looking.
+			for (int b = 0; b < NMOVBLK; b++) {
+				const MovBlock& mb = MOVBLK[b];
+				if (*mb.perClass) {
+					WriteTable(fc, mb.tbl, mb.n);
+					// The live values are now THIS hull's, so flying away from it has to
+					// put the global block back. Without this, saving a hull-specific block
+					// and then switching vessel would carry those numbers onto the next ship.
+					*mb.fromClass = true;
+				} else {
+					// Nothing written, and the file was rewritten whole - so any block this
+					// hull used to own is GONE, along with the scope flag that pointed at it
+					// (CLASSSET wrote that false a few lines up). This is what makes
+					// "switch back to ALL VESSELS and save" actually stick.
+					*mb.fromClass = false;
+				}
+			}
 			oapiCloseFile(fc, FILE_OUT);
 		}
 	}
@@ -1069,11 +1235,27 @@ void OroSettings_Load()
 	// module constructor, so the fields still hold their member initialisers - which is what
 	// an unconfigured world must snap back to.
 	CaptureBodyDefaults();
+	// The pilot fallback must exist even with NO global file, or the very first hull that
+	// declares its own block would leave nothing to fall back to when you fly away from it.
+	// Snapshot the built-in values now; the read below replaces them if the file has any.
+	for (int b = 0; b < NMOVBLK; b++) {
+		SnapTable(MOVBLK[b].tbl, MOVBLK[b].n, MOVBLK[b].globalVal);
+		*MOVBLK[b].globalOk = true;
+	}
 	FILEHANDLE f = oapiOpenFile(SETTINGS_FILE, FILE_IN, CONFIG);
 	if (!f) return;                         // no file yet - built-in defaults stand
 	const int n = ReadTable(f, SETTINGS, NSETTINGS);
+	// The movable blocks are read UNCONDITIONALLY, whatever any hull says. This file is the
+	// fallback every unconfigured vessel lands on, so its copy is always wanted in memory.
+	int nm = 0, nmTot = 0;
+	for (int b = 0; b < NMOVBLK; b++) {
+		nm    += ReadTable(f, MOVBLK[b].tbl, MOVBLK[b].n);
+		nmTot += MOVBLK[b].n;
+		SnapTable(MOVBLK[b].tbl, MOVBLK[b].n, MOVBLK[b].globalVal);
+	}
 	oapiCloseFile(f, FILE_IN);
-	oapiWriteLogV("ORO: global settings loaded (%d of %d items).", n, NSETTINGS);
+	oapiWriteLogV("ORO: global settings loaded (%d of %d items, movable %d of %d).",
+	              n, NSETTINGS, nm, nmTot);
 }
 
 // ----------------------------------------------------------------------------
@@ -1289,7 +1471,7 @@ void OroThr_SyncIn()
 
 const char* OroThr_Name(int grp)
 {
-	static const char* n[ORO_THR_N] = { "MAIN", "HOVER", "RETRO", "USER" };
+	static const char* n[ORO_THR_N] = { "MAIN", "HOVER", "RETRO", "USER", "RCS" };
 	return n[ThrClamp(grp)];
 }
 
@@ -1310,6 +1492,36 @@ void OroThr_Cycle()
 	OroThr_SyncIn();                        // and bring the new group's up
 }
 
+// ⚠️ THE STOCK-PARTICLES PILL IS A VESSEL-WIDE SWITCH, SO ITS COUNTERPART MUST BE TOO
+// (2026-08-25 - the bug where the pill lit for one frame and stock never appeared).
+// gcCore::SuppressExhaust takes an OBJHANDLE and a per-vessel flag map (invariant 26d), so
+// "stock particles" is ONE answer for the whole ship. The dialog was turning ORO's streams
+// off by writing the FLAT edit buffer, which SyncOut copies into thr[thrSel] and nowhere
+// else - so on a DG-S with HOVER and USER still enabled, UpdateParticles' mutual-exclusion
+// loop found a group still streaming and switched stock straight back off on the next
+// pre-step. The pill was doing exactly what it was told; it was told about one group.
+// ⚠️ THE FLAT FIELD MUST BE SET TOO, not just the array: SyncOut runs at the top of the
+// next clbkPreStep and would otherwise copy the stale edit buffer back over thr[thrSel].
+void OroThr_SetPrtAll(bool on)
+{
+	for (int i = 0; i < ORO_THR_N; i++) g_fx.thr[i].prtEnabled = on;
+	g_fx.prtEnabled = on;
+}
+
+// Is ANY group streaming? The panel needs this wherever it makes a claim about the VESSEL
+// rather than about the group being edited - "no exhaust particles at all" was being said
+// while two other groups were happily emitting.
+// ⚠️ THE SELECTED GROUP IS READ FROM THE EDIT BUFFER, NOT FROM thr[]. The two agree only
+// after the next SyncOut, and the panel repaints long before that, so reading the array
+// alone would leave the caption one frame behind the pill the user just clicked.
+bool OroThr_AnyPrtOn()
+{
+	const int sel = ThrClamp(g_fx.thrSel);
+	for (int i = 0; i < ORO_THR_N; i++)
+		if ((i == sel) ? g_fx.prtEnabled : g_fx.thr[i].prtEnabled) return true;
+	return false;
+}
+
 // REVERT - re-read the given scopes from disk, discarding everything moved since the last
 // save (2026-08-15, a beta ask: there was no way back from a bad tuning session but memory
 // or a restart, and the load path had existed all along without a control).
@@ -1324,6 +1536,9 @@ void OroThr_Cycle()
 // 17a): an unconfigured hull KEEPS the current numbers, an unconfigured world gets the
 // built-in defaults back. Either way the user lands on what they would have had if they had
 // never touched anything, which is what "revert" means.
+bool OroSettings_PilotFromClass() { return g_pilotFromClass; }
+bool OroSettings_VcFromClass()    { return g_vcFromClass; }
+
 void OroSettings_Revert(int mask)
 {
 	if (mask & ORO_SCOPE_GLOBAL) OroSettings_Load();
@@ -1350,16 +1565,42 @@ void OroSettings_LoadClass(const char* cls)
 	if (_stricmp(cls, g_setClass) == 0) return;        // already current
 	strcpy_s(g_setClass, cls);
 
+	// ⚠️ THE PILOT BLOCK RESETS FIRST - before the file is read AND before the no-file
+	// early return below. Both orderings matter. Clearing the flag first means a class file
+	// that never mentions PilotScope reads as "global", which is what its absence means;
+	// restoring before the early return means a hull with no file at all flies the GLOBAL
+	// pilot rather than inheriting the previous hull's seating position, which is the whole
+	// point of the third read rule (see PILOTSET). Note this is the one part of the class
+	// load that does NOT follow "an unconfigured hull keeps the current numbers".
+	// Undo the OUTGOING hull's blocks - but only those it actually owned, see fromClass.
+	for (int b = 0; b < NMOVBLK; b++) {
+		const MovBlock& mb = MOVBLK[b];
+		if (*mb.fromClass && *mb.globalOk) RestoreTable(mb.tbl, mb.n, mb.globalVal);
+		*mb.fromClass = false;
+		*mb.perClass  = false;
+	}
+
 	char fn[64], rel[128];
 	ClassFileName(cls, fn, sizeof(fn));
 	sprintf_s(rel, "ORO\\%s.cfg", fn);
 	FILEHANDLE f = oapiOpenFile(rel, FILE_IN, CONFIG);
 	if (!f) {
-		oapiWriteLogV("ORO: vessel class %s has no saved settings - keeping the current ones.", cls);
+		oapiWriteLogV("ORO: vessel class %s has no saved settings - keeping the current ones"
+		              " (pilot: global).", cls);
 		return;
 	}
 	const int n = ReadTable(f, CLASSSET, NCLASSSET);
 	ThrReadGroups(f);            // per group, with the unprefixed-key migration
+	// ... and this hull's own pilot settings, if it declared any. PilotScope came in with
+	// CLASSSET a line ago, so by here we already know whether to look.
+	for (int b = 0; b < NMOVBLK; b++) {
+		const MovBlock& mb = MOVBLK[b];
+		if (!*mb.perClass) continue;
+		const int nb = ReadTable(f, mb.tbl, mb.n);
+		*mb.fromClass = true;            // so leaving this hull puts the global block back
+		oapiWriteLogV("ORO: vessel class %s carries its OWN %s settings (%d of %d).",
+		              cls, mb.name, nb, mb.n);
+	}
 	oapiCloseFile(f, FILE_IN);
 	oapiWriteLogV("ORO: vessel class %s - loaded %d of %d settings.", cls, n, NCLASSSET);
 }
@@ -1445,6 +1686,13 @@ static void __cdecl OroPreResolveProc(oapi::Sketchpad* pSkp, void* pParam)
 	static_cast<OroModule*>(pParam)->DrawPreResolve(pSkp);
 }
 
+// Third thunk, for the patch-(u) wet-mirror slot. Same reason as the second: a render
+// proc receives no id, so one entry point per slot.
+static void __cdecl OroWetMirrorProc(oapi::Sketchpad* pSkp, void* pParam)
+{
+	static_cast<OroModule*>(pParam)->DrawWetMirror(pSkp);
+}
+
 // GENERICPROC_SHUTDOWN thunk. Signature differs from the render procs
 // (__gcGenericProc is int/void*/void*, no Sketchpad).
 // !! THE INSTANCE ARRIVES AS THE THIRD ARGUMENT !! The client dispatches
@@ -1506,6 +1754,8 @@ OroModule::~OroModule()
 		pCore->RegisterRenderProc(OroRenderProc, RENDERPROC_DELETE, nullptr);
 	if (pCore && preResolveRegistered)
 		pCore->RegisterRenderProc(OroPreResolveProc, RENDERPROC_DELETE, nullptr);
+	if (pCore && wetMirrorRegistered)
+		pCore->RegisterRenderProc(OroWetMirrorProc, RENDERPROC_DELETE, nullptr);
 	// Same rule, and MORE important here: this thunk captures `this`, so a leftover entry
 	// would hand a freed OroModule to the next session's close.
 	if (pCore && shutdownProcRegistered)
@@ -1579,15 +1829,13 @@ OroModule::~OroModule()
 	if (pCore && pCore->CanSetStormLight())     { pCore->SetStormLight(0.0f);     stormPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetDarkness())    { pCore->SetWetDarkness(1.0f);    wetDarkPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetGlint())       { pCore->SetWetGlint(1.0f);       glintPushed = -1.0f; }
-	if (pCore && pCore->CanSetWetReflection())  { pCore->SetWetReflection(1.0f, 1.0f, 1.0f, 1.0f, 1.0f);  reflPushed = -1.0f; swimAmpPushed = -1.0f; swimRatePushed = -1.0f; poolSizePushed = -1.0f; poolReachPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetReflection())  { pCore->SetWetReflection(1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f);  reflPushed = -1.0f; swimAmpPushed = -1.0f; swimRatePushed = -1.0f; poolSizePushed = -1.0f; poolReachPushed = -1.0f; reflBlurPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetGrain())       { pCore->SetWetGrain(1.0f, 1.0f);  grainOpPushed = -1.0f; grainSizePushed = -1.0f; }
 	if (rainLtgLight && rainLtgLightV && oapiIsVessel(rainLtgLightV)) {
 		VESSEL* lv = oapiGetVesselInterface(rainLtgLightV);
 		if (lv) lv->DelLightEmitter(rainLtgLight);      // invariant 14: hand it back
 	}
 	rainLtgLight = NULL; rainLtgLightV = NULL; rainLtgLI = 0.0;
-	ReleaseSheet();
-	if (hSheetTmpl) { oapiDeleteMesh(hSheetTmpl); hSheetTmpl = NULL; }   // 23(m): dies with the session
 	if (pCore && hVapourPoly) {
 		pCore->DeletePoly(hVapourPoly);
 		hVapourPoly = NULL;
@@ -1614,6 +1862,7 @@ OroModule::~OroModule()
 	if (hLtgAtlas)         { oapiDestroySurface(hLtgAtlas); hLtgAtlas = NULL; }
 	ltgTexMode = false; ltgTexTried = false;
 	if (hRainCloudTex)     { oapiDestroySurface(hRainCloudTex); hRainCloudTex = NULL; }
+	ringRefBody = NULL;                        // splash lattice re-anchors next frame
 	rainCloudBuilt = -1; rainCloudN = 0;
 	if (hBoltTex)          { oapiReleaseTexture(hBoltTex); hBoltTex = NULL; }
 	boltTexTried = false;
@@ -1757,6 +2006,19 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		if (pCore->RegisterRenderProc(OroPreResolveProc, RENDERPROC_PRE_RESOLVE, this)) {
 			preResolveRegistered = true;
 			oapiWriteLogV("ORO: pre-resolve proc registered (RENDERPROC_PRE_RESOLVE, patch i). Fires only on a Build >= 260808 client.");
+		}
+	}
+
+	// Patch (u): the wet-mirror slot, so ORO's own plume appears in the standing water.
+	// Same registration story as (i) - any id is accepted, a pre-(u) client just never
+	// calls it - with one extra wrinkle worth knowing before reading a log: this one
+	// ALSO does not fire on a patched client until the ground is actually wet and the
+	// camera is under 250 m AGL, because that is when the reflection pass itself runs.
+	// So "wetMirrorLive still false" means "not proven yet", never "not supported".
+	if (!wetMirrorRegistered) {
+		if (pCore->RegisterRenderProc(OroWetMirrorProc, RENDERPROC_WET_MIRROR, this)) {
+			wetMirrorRegistered = true;
+			oapiWriteLogV("ORO: wet-mirror proc registered (RENDERPROC_WET_MIRROR, patch u). Fires only on a Build >= 260825 client, and only in the rain near the ground.");
 		}
 	}
 
@@ -1990,6 +2252,7 @@ void OroModule::ReleaseSceneOwnedBorrows(bool fromShutdownProc)
 		hRainBoltPoly = NULL;
 	}
 	if (hRainCloudTex) { oapiDestroySurface(hRainCloudTex); hRainCloudTex = NULL; }
+	ringRefBody = NULL;                        // splash lattice re-anchors next frame
 	rainCloudBuilt = -1; rainCloudN = 0;       // recreated next session
 	if (hBoltTex) { oapiReleaseTexture(hBoltTex); hBoltTex = NULL; }
 	boltTexTried = false;
@@ -2082,15 +2345,13 @@ void OroModule::ReleaseDeviceResources()
 	if (pCore && pCore->CanSetStormLight())     { pCore->SetStormLight(0.0f);     stormPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetDarkness())    { pCore->SetWetDarkness(1.0f);    wetDarkPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetGlint())       { pCore->SetWetGlint(1.0f);       glintPushed = -1.0f; }
-	if (pCore && pCore->CanSetWetReflection())  { pCore->SetWetReflection(1.0f, 1.0f, 1.0f, 1.0f, 1.0f);  reflPushed = -1.0f; swimAmpPushed = -1.0f; swimRatePushed = -1.0f; poolSizePushed = -1.0f; poolReachPushed = -1.0f; }
+	if (pCore && pCore->CanSetWetReflection())  { pCore->SetWetReflection(1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f);  reflPushed = -1.0f; swimAmpPushed = -1.0f; swimRatePushed = -1.0f; poolSizePushed = -1.0f; poolReachPushed = -1.0f; reflBlurPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetGrain())       { pCore->SetWetGrain(1.0f, 1.0f);  grainOpPushed = -1.0f; grainSizePushed = -1.0f; }
 	if (rainLtgLight && rainLtgLightV && oapiIsVessel(rainLtgLightV)) {
 		VESSEL* lv = oapiGetVesselInterface(rainLtgLightV);
 		if (lv) lv->DelLightEmitter(rainLtgLight);      // invariant 14: hand it back
 	}
 	rainLtgLight = NULL; rainLtgLightV = NULL; rainLtgLI = 0.0;
-	ReleaseSheet();
-	if (hSheetTmpl) { oapiDeleteMesh(hSheetTmpl); hSheetTmpl = NULL; }   // 23(m): dies with the session
 	if (pCore && hVapourPoly) {
 		pCore->DeletePoly(hVapourPoly);
 		hVapourPoly = NULL;
@@ -2119,6 +2380,7 @@ void OroModule::ReleaseDeviceResources()
 	if (hLtgAtlas)         { oapiDestroySurface(hLtgAtlas); hLtgAtlas = NULL; }
 	ltgTexMode = false; ltgTexTried = false;   // re-probed + recreated next session
 	if (hRainCloudTex)     { oapiDestroySurface(hRainCloudTex); hRainCloudTex = NULL; }
+	ringRefBody = NULL;                        // splash lattice re-anchors next frame
 	rainCloudBuilt = -1; rainCloudN = 0;
 	if (hBoltTex)          { oapiReleaseTexture(hBoltTex); hBoltTex = NULL; }
 	boltTexTried = false;
@@ -2138,26 +2400,24 @@ void OroModule::clbkPostStep(double simt, double simdt, double mjd)
 	UpdateTrailPost(simdt);
 }
 
-void OroModule::clbkPreStep(double simt, double simdt, double mjd)
+// ============================================================================
+// SENSE THE VIEW - which domain the camera is in, and how big the frame is.
+//
+// EXTRACTED FROM clbkPreStep 2026-08-24 SO IT CAN RUN WHILE PAUSED. The note below
+// already said what was wrong - "clbkPreStep is not called while paused, so a view
+// change made while paused will not update the gate until the sim resumes" - and a
+// public-beta tester duly found it from outside the code: pause in an external view,
+// switch to the VC, and the rain draws with the external gate still set, which puts
+// raindrops inside the cabin. Confirmed in the core rather than inferred - Orbiter.cpp
+// UpdateWorld(): "if (bRunning) ModulePreStep();".
+//
+// Called from clbkPreStep AND from clbkProcessKeyboardImmediate, which the core calls
+// every frame whether or not the sim is running. Pure sensing - nothing here
+// accumulates - so running it twice in one frame is a no-op, and that is exactly what
+// makes it safe to call from two places instead of needing a "already ran" flag.
+// ============================================================================
+void OroModule::SenseView()
 {
-	// KEYBOARD FOCUS PRIME (once, first frame). Some setups launch a scenario with the
-	// render window NOT holding keyboard focus, so the first keypresses fall through and
-	// Windows dings - and opening/closing ANY dialog cures it by handing focus back. This
-	// is a focus quirk, not an ORO effect (nothing here touches keyboard), but since ORO
-	// is loaded we can do the same hand-off automatically. Main thread owns the render
-	// window, so SetFocus is safe here; guarded to run exactly once.
-	if (!focusPrimed && pCore) {
-		HWND hRender = pCore->GetRenderWindow();
-		if (hRender) SetFocus(hRender);
-		focusPrimed = true;
-	}
-
-	// The FALLBACK projection camera, for a client without patch (k). The aurora, the
-	// lightning and the plasma are all projected in the render path now (2026-08-15) and
-	// prefer the render camera; this is what they fall back to, and it is exactly the
-	// pre-2026-08-15 behaviour - one step stale, and frozen while paused.
-	SnapPreStepCam();
-
 	// Compute the view gate on the MAIN thread (here), where oapi camera/cockpit queries
 	// are safe, and cache it for the render callback to read. Effects apply only in an
 	// internal panel/VC view - NOT the generic glass cockpit (which stays the natural
@@ -2198,9 +2458,53 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	rainVC = oapiCameraInternal() && (oapiCockpitMode() == COCKPIT_VIRTUAL)
 	      && depthClipOK;
 
+	// ⚠️ THE FLAT INTERNAL VIEWS, ON DIFFERENT TERMS (2026-08-25). A tester asked for the
+	// rain in the 2D panel and the glass cockpit, and the reason it was VC-only turns out
+	// not to apply there at all. The VC needs patch (g) because the cockpit is real 3D
+	// geometry drawn in the main scene, so without a per-pixel cut the streaks paint over
+	// the cabin. A 2D panel is not geometry - it is painted by the core's Pane::Render,
+	// which runs AFTER the pre-resolve slot ORO draws the rain in. So the panel covers the
+	// rain by DRAW ORDER, for free, and no depth buffer is involved.
+	// What it does require is patch (i): without the pre-resolve slot the rain falls back
+	// to RENDERPROC_HUD_2ND, which is after the pane, and it would paint over the panel -
+	// exactly the failure the VC gate exists to prevent. Hence preResolveLive here and
+	// depthClipOK there; each mode is gated on the thing that actually makes it correct.
+	// Kept as its OWN flag rather than widening rainVC, because rainVC still selects the
+	// deeper sheet plane and the rain-shield test, and neither belongs to a flat panel.
+	rainPanel = false;
+	if (g_fx.rainViewMode >= 1 && oapiCameraInternal() && preResolveLive) {
+		const int cm = oapiCockpitMode();
+		if      (cm == COCKPIT_PANELS)  rainPanel = true;
+		else if (cm == COCKPIT_GENERIC) rainPanel = (g_fx.rainViewMode >= 2);
+	}
+
 	// Viewport size for the render pass (tunnel geometry) - cached HERE because the
 	// render callback makes no oapi calls by policy.
 	oapiGetViewportSize(&viewW, &viewH);
+}
+
+void OroModule::clbkPreStep(double simt, double simdt, double mjd)
+{
+	// KEYBOARD FOCUS PRIME (once, first frame). Some setups launch a scenario with the
+	// render window NOT holding keyboard focus, so the first keypresses fall through and
+	// Windows dings - and opening/closing ANY dialog cures it by handing focus back. This
+	// is a focus quirk, not an ORO effect (nothing here touches keyboard), but since ORO
+	// is loaded we can do the same hand-off automatically. Main thread owns the render
+	// window, so SetFocus is safe here; guarded to run exactly once.
+	if (!focusPrimed && pCore) {
+		HWND hRender = pCore->GetRenderWindow();
+		if (hRender) SetFocus(hRender);
+		focusPrimed = true;
+	}
+
+	// The FALLBACK projection camera, for a client without patch (k). The aurora, the
+	// lightning and the plasma are all projected in the render path now (2026-08-15) and
+	// prefer the render camera; this is what they fall back to, and it is exactly the
+	// pre-2026-08-15 behaviour - one step stale, and frozen while paused.
+	SnapPreStepCam();
+
+	// View domain + frame size. Re-asked every frame, paused or not - see SenseView.
+	SenseView();
 
 	// Real-time step, shared by the scenario player and the animation clocks below.
 	const double sysdt = oapiGetSysStep();
@@ -2339,6 +2643,7 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 			if (tv->GetGroupThrusterCount(THGROUP_HOVER) > 0) avail |= 1 << ORO_THR_HOVER;
 			if (tv->GetGroupThrusterCount(THGROUP_RETRO) > 0) avail |= 1 << ORO_THR_RETRO;
 			if (OroThrusterHasUser(tv))                       avail |= 1 << ORO_THR_USER;
+			if (OroThrusterHasRcs(tv))                        avail |= 1 << ORO_THR_RCS;
 		}
 		if (!avail) avail = 1 << ORO_THR_MAIN;   // never leave the cycler with nothing
 		g_fx.thrAvail = avail;
@@ -2431,16 +2736,20 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	// FIRST - a cloud occludes what is behind it, so it must be laid down before the
 	// additive layers add light on top (graveyard G11's shelved recipe, invariant 25).
 	UpdateVapour();
-	UpdateRain();
+	UpdateRain();              // EVOLVES the storm: the envelope ramp and the wetness
+	                           //   soak. Correctly frozen under pause - no sim time
+	                           //   passes, so nothing should get wetter (his rule).
+	SenseRain();               // SENSES it: which view, which world, how high the camera
+	                           //   is. Also called every frame from
+	                           //   clbkProcessKeyboardImmediate so it stays true while
+	                           //   paused; idempotent, so the double call is a no-op.
+	                           //   ⚠️ MUST FOLLOW UpdateRain here - it reads the envelope
+	                           //   that call just advanced.
 	PushSurfaceWet();          // patch (s) - client state, pushed on change (invariant 18)
 	UpdateRainSound();         // the loop crossfade rides the envelope just published
 	UpdateThunder();           // flash events -> delayed one-shots (dist/340 s)
 	UpdateRainFlashLight();    // rain lightning's borrowed scene light - unconditional,
 	                           //   so every gate failure RETURNS the borrow (inv. 14)
-	UpdateSheet();             // the water sheet (his design) - called UNCONDITIONALLY,
-	                           //   because its own release logic must run when the rain
-	                           //   gates fail (a sheet that stays borrowed after the pill
-	                           //   goes off is a leak, not an effect)
 
 	if (ipiReady && (eclActive ||
 	                 (g_fx.greyoutEnabled    && g_fx.greyout    > 0.001f) ||
@@ -2560,6 +2869,50 @@ void OroModule::clbkDeleteVessel(OBJHANDLE hVessel)
 	// The bell shell dies WITH the vessel - just forget it (no DelMesh on a
 	// dying handle; the mesh instance is part of what is being destroyed).
 	if (hVessel == bellVessel) { bellVessel = NULL; bellMeshIdx = (UINT)-1; }
+}
+
+// ============================================================================
+// THE PAUSE-PROOF PER-FRAME TICK - and it is a keyboard callback only by address.
+//
+// ⚠️ ORO'S GATES USED TO FREEZE UNDER PAUSE, AND A PUBLIC-BETA TESTER FOUND IT THREE
+// WAYS IN ONE REPORT: pause near the ground and fly the camera to orbit and the grey
+// sky and the raindrops come with you; pause in an external view, switch to the VC, and
+// the drops are inside the cabin; and the same staleness in the plasma's own VC gate.
+// One cause - Orbiter.cpp's UpdateWorld() runs "if (bRunning) ModulePreStep();", so
+// everything ORO senses in clbkPreStep holds its last value for as long as you stay
+// paused, while the render callback happily keeps drawing from it.
+//
+// The core calls THIS from UserInput(), gated on the window being visible and active but
+// NOT on bRunning, and before the frame is rendered. Main thread, outside the render
+// pass, the same phase in which Orbiter updates its own dialogs - so oapi queries are as
+// safe here as in clbkPreStep, and invariant 1 is not bent: the render callback still
+// makes none.
+//
+// WE CONSUME NOTHING. Returning false always is deliberate and load-bearing: returning
+// true would block the key from Orbiter's own processing, and ORO has no business
+// swallowing input from a function it is using as a clock.
+//
+// KNOWN AND ACCEPTED: with the render window INACTIVE the core skips UserInput, so the
+// gates hold. Nothing is moving the camera then either, and the first frame after focus
+// returns puts it right.
+// ============================================================================
+bool OroModule::clbkProcessKeyboardImmediate(char kstate[256], bool simRunning)
+{
+	// The gates are cheap; when the sim IS running clbkPreStep has already called these
+	// in this same frame and they are idempotent, so this is a harmless second look
+	// rather than a branch that could disagree.
+	SenseView();
+	SenseRain();
+	// ⚠️ AND THE CLIENT PUSHES HAVE TO FOLLOW THE SENSING (2026-08-24, round 2). Fixing
+	// the gates alone left the raindrops correctly gone in orbit but the whole EARTH
+	// grey: PushSurfaceWet multiplies every value by s_gateF, so the gate was right, but
+	// the push that carries it to the client still only ran in clbkPreStep. The client
+	// kept the storm light from wherever you paused - the sun collapsed at the source,
+	// which from orbit is a flat grey planet. OUTPUT DERIVED FROM SENSING MUST RUN
+	// WHEREVER THE SENSING RUNS; it is change-gated internally, so calling it here costs
+	// nothing when nothing moved.
+	PushSurfaceWet();
+	return false;                           // never consume - see the note above
 }
 
 bool OroModule::clbkProcessKeyboardBuffered(DWORD key, char kstate[256], bool simRunning)
@@ -3046,8 +3399,23 @@ void OroModule::SnapPreStepCam()
 
 bool OroModule::FillProjCam(VECTOR3& pos, MATRIX3& rot, double& tanAp)
 {
-	if (pCore && pCore->CanGetRenderCam() && pCore->GetRenderCam(&pos, &rot, &tanAp))
+	if (pCore && pCore->CanGetRenderCam() && pCore->GetRenderCam(&pos, &rot, &tanAp)) {
+		// THE WET MIRROR'S ONE RECONCILIATION (patch u). The client reports a PURE planar
+		// mirror, so its basis is left-handed; the reflection RT, meanwhile, holds a
+		// horizontally flipped image, because the pass draws its meshes through an extra
+		// clip-space X flip to keep their winding legal and the ground shaders undo that
+		// when they sample. Negating the camera's RIGHT column does both jobs at once -
+		// it restores a proper right-handed rotation AND puts our screen X in the RT's
+		// convention - which is why the whole reconciliation is three lines here rather
+		// than a second projection path. VERIFIED IN THE SIM: with the panel reporting
+		// both builds' projected root, the mirror's landed within 3 px of
+		// (RT width - direct root / 2) - so this is the whole reconciliation, and the
+		// two rounds spent suspecting it were spent in the wrong place.
+		if (wetMirrorPass) {
+			rot.m11 = -rot.m11; rot.m21 = -rot.m21; rot.m31 = -rot.m31;
+		}
 		return true;
+	}
 	if (preStepCamValid) {
 		pos = preStepCam.pos; rot = preStepCam.rot; tanAp = preStepCam.tanAp;
 		return true;
@@ -3058,6 +3426,43 @@ bool OroModule::FillProjCam(VECTOR3& pos, MATRIX3& rot, double& tanAp)
 // The anchor half. See the comment on the declaration - a render camera paired with a
 // pre-step anchor is off by one step of the BODY's barycentric motion, ~500 m for Earth
 // at 60 fps, and it jitters with frame pacing rather than sitting still.
+// ----------------------------------------------------------------------------
+// THE CABIN WASH'S PROJECTION (2026-08-25) - the last member of H1's family.
+//
+// PSPlasma paints a directional glare lobe centred on where the fire actually is, plus a
+// flat term for the light bouncing round the cabin (invariant 27i). The lobe's centre used
+// to be computed in UpdateReentry, on the main thread - which does not run while PAUSED,
+// so pausing and looking around left the glare nailed to the screen where the plasma had
+// been. Nobody reported it in ten days of public beta because a soft broad bloom reads far
+// less obviously out of place than the sheath did, but it is the same defect.
+//
+// Two things it must get right, both already law elsewhere in this file:
+//  - THE CAMERA is the RENDER camera (patch k), not the pre-step one, or the fix would
+//    only be half a fix: under pause the pre-step camera is the frozen one.
+//  - THE ANCHOR is the RENDER-EPOCH position (patch k2). Pairing a render camera with a
+//    pre-step vessel position is invariant 21(a)'s first trap, and at cockpit range it
+//    would be catastrophic rather than subtle - one frame of Earth's barycentric motion
+//    is ~500 m against a glow point a few metres from the eye.
+// Makes no oapi call: FillProjCam and RenderEpochShift are both client calls (invariant 1).
+// ----------------------------------------------------------------------------
+void OroModule::UpdatePlasmaWashUV()
+{
+	if (!plasmaGlowValid || viewW == 0 || viewH == 0) return;
+	VECTOR3 cpos; MATRIX3 Rcam; double tanAp;
+	if (!FillProjCam(cpos, Rcam, tanAp)) return;      // keep the previous UV rather than lie
+	const VECTOR3 G = plasmaGlowG + RenderEpochShift(plasmaGlowV, plasmaGlowCg);
+	const VECTOR3 c = tmul(Rcam, G - cpos);
+	if (c.z < 0.1) {
+		// Behind the camera: keep the ambient lift, park the lobe well off-screen so only
+		// the flat wash remains. Same behaviour the old main-thread version had.
+		plasmaUV[0] = 0.5f; plasmaUV[1] = 2.5f;
+		return;
+	}
+	const double aspect = (double)viewW / (double)viewH;
+	plasmaUV[0] = (float)(0.5 + 0.5 * ((c.x / c.z) / (tanAp * aspect)));
+	plasmaUV[1] = (float)(0.5 - 0.5 * ((c.y / c.z) /  tanAp));   // UV y grows downward
+}
+
 VECTOR3 OroModule::RenderEpochShift(OBJHANDLE h, const VECTOR3& bodyCentrePreStep)
 {
 	if (h && pCore && pCore->CanGetRenderObjPos()) {
@@ -3130,7 +3535,7 @@ void OroModule::DrawPreResolve(oapi::Sketchpad* pSkp)
 	// per pixel - the aurora's mechanism, the scene depth includes the cockpit.
 	// rainVC embeds depthClipOK, so a depthless client keeps the VC dry rather than
 	// painting drops over the cabin.
-	if (extGate || rainVC) {
+	if (extGate || rainVC || rainPanel) {
 		BuildRainGeometry();
 		if (rainActive) DrawRainPoly(pSkp);
 	}
@@ -3154,6 +3559,76 @@ void OroModule::DrawPreResolve(oapi::Sketchpad* pSkp)
 		UpdatePlumeFx();     // render-path since 2026-08-15 (the pause fix)
 		DrawPlumePoly(pSkp, /*depthClip=*/true);
 	}
+}
+
+// ----------------------------------------------------------------------------
+// THE WET-MIRROR SLOT (client patch u, 2026-08-25) - ORO's own plume, in the standing
+// water. It fires INSIDE the client's planar-reflection pass, after the mirrored hulls,
+// exhaust billboards, beacons and particle streams and before the target is popped.
+//
+// WHY IT NEEDS A SLOT AT ALL, when all of those needed nothing: every one of them is
+// geometry the CLIENT draws, oriented from a camera-relative position and pushed through
+// the view-projection the pass already overrides - so a matrix-only mirror carried them
+// for free. Ours is screen-space Sketchpad triangles projected on the CPU and drawn after
+// the whole scene, in the pre-resolve slot; by then this pass is long over. What it
+// reflects in practice for anyone running ORO is the JET - patch (n) has already
+// suppressed the stock billboards for them, so the client's own exhaust loop in there
+// draws nothing and only the contrail survives.
+//
+// IT IS A PARAMETERISATION, NOT A SECOND RENDERER, and that is the whole design:
+//  - THE CAMERA needs no argument. For the duration of this call the client reports the
+//    MIRRORED camera through GetRenderCam, so FillProjCam - which UpdatePlumeFx already
+//    calls, at exactly one place - returns it and every screen-space offset in ~1000
+//    lines recomputes itself. One camera path, not two to keep in sync.
+//  - THE VIEWPORT comes out of the PAD, via the stock Sketchpad virtual
+//    GetRenderSurfaceSize (D3D9Pad answers from its bound target's descriptor). The
+//    reflection target is HALF RESOLUTION and ORO must never assume that: hardcoding
+//    "half" would couple us to a client implementation detail that could be retuned for
+//    performance at any time, and the pad already knows the answer. Not an oapi call
+//    (invariant 1), just a member read.
+//
+// THE BUFFER IS REUSED, NOT DOUBLED. This pass runs BEFORE the main scene, so the
+// mirrored build is drawn and finished by the time DrawPreResolve rebuilds the same
+// vertex buffer for the real view later in the same frame. Both are full-buffer updates,
+// so invariant 3 holds unchanged; the cost is one extra ~1000-triangle CPU build and one
+// half-res draw, and only while the ground is wet and the camera is under 250 m AGL.
+//
+// ⚠️ NO DEPTH CLIP HERE, and it is not an oversight. Patch (g) clips against
+// ptgBuffer[GBUF_DEPTH], which was filled from the MAIN camera in
+// RENDERPASS_NORMAL_DEPTH - inside a mirrored pass those depths describe different
+// geometry at every pixel, so the clip would cut the reflection against a scene that is
+// not the one being drawn. Without it the jet paints over the mirrored hulls, which is
+// the pre-patch-(g) trade and entirely invisible: this image only ever reaches the eye
+// through the puddle lattice, rippled, Fresnel-masked and blurred.
+//
+// ⚠️ EXTERNAL ONLY, deliberately, and it is the one thing here worth a second opinion.
+// invariant 10 makes the plume external-only because your own engines are behind the
+// cockpit - reasoning that does NOT transfer to a reflection, since a puddle ahead of the
+// nose is in plain view from the VC. Left matching every other plume path for now rather
+// than widening the invariant unasked; it is this one line if he wants it.
+// ----------------------------------------------------------------------------
+void OroModule::DrawWetMirror(oapi::Sketchpad* pSkp)
+{
+	// Latch FIRST and unconditionally - the preResolveLive rule. This firing at all is
+	// the only proof the running client HAS the slot; a pre-(u) client accepts the
+	// registration and silently never calls it.
+	wetMirrorLive = true;
+
+	if (!pSkp || !g_fx.masterArmed || !extGate) return;
+
+	SIZE sz = { 0, 0 };
+	pSkp->GetRenderSurfaceSize(&sz);          // the reflection RT, not the frame
+	if (sz.cx <= 0 || sz.cy <= 0) return;
+
+	wetMirrorPass = true;                     // FillProjCam reconciles the mirror's X
+	UpdatePlumeFx((DWORD)sz.cx, (DWORD)sz.cy);
+	wetMirrorPass = false;                    // down before anything else projects
+	// ⚠️ writeAlpha, and it is the difference between the effect working and looking
+	// half-broken. This target's ALPHA is the ground shaders' reflection mask; patch
+	// (d)'s additive path masks alpha off, which is correct on the backbuffer and
+	// wrong here. Without it the jet only survives where it overlaps the hull's own
+	// alpha - a stub at the tail rather than a plume.
+	DrawPlumePoly(pSkp, /*depthClip=*/false, /*writeAlpha=*/true);
 }
 
 void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
@@ -3437,6 +3912,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 				// does not leave the cockpit strobing with nothing to explain it.
 				pIPIPlasma->SetFloat("fFlash",
 					(g_fx.plasVCGlow > 0.001f) ? PlasmaFlashNow() : 1.0f);
+				UpdatePlasmaWashUV();   // render-path projection (2026-08-25) - see below
 				pIPIPlasma->SetFloat("vPlasmaUV", plasmaUV, sizeof(plasmaUV));
 				pIPIPlasma->SetFloat("vPlasmaCol", plasmaCol, sizeof(plasmaCol));
 				pIPIPlasma->SetFloat("fAspect", (float)viewW / (float)viewH);

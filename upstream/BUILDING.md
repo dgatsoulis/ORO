@@ -1,6 +1,6 @@
-# Rebuilding D3D9Client for ORO (NINETEEN local patches: a-g, i-s)
+# Rebuilding D3D9Client for ORO (TWENTY-ONE local patches: a-g, i-u)
 
-ORO runs on a locally-patched D3D9Client carrying **seventeen** ORO patches:
+ORO runs on a locally-patched D3D9Client carrying **twenty-one** ORO patches:
 
 - **(a) `D3D9Client-HUD-renderproc-CTD-fix.patch`** - the crash fix. Stock Orbiter 2024
   clients CTD the moment any `RENDERPROC_HUD_1ST/2ND` callback is registered
@@ -88,7 +88,7 @@ This documents the local rebuild that produced all five patches.
 
 ## Build recipe (mirrors .github/workflows/reusable-build.yml)
 
-> **THE EASY PATH (since 2026-08-13): skip step 3 entirely.** All nineteen patches are
+> **THE EASY PATH (since 2026-08-13): skip step 3 entirely.** All twenty-one patches are
 > published, already applied, on the `oro-patches` branch of
 > <https://github.com/dgatsoulis/orbiter-oro> (branched from tag `2024`). Clone that
 > instead of upstream and there is nothing to apply:
@@ -107,8 +107,8 @@ Workspace used: `C:\OrbiterDev\` (deletable; everything here recreates it).
 2. DXSDK June 2010: download `https://download.microsoft.com/download/a/e/7/ae743f1f-632b-4809-87a9-aa1bb3458e31/DXSDK_Jun10.exe`
    (~600 MB), then `7z x DXSDK_Jun10.exe DXSDK/Include DXSDK/Lib` into `C:\OrbiterDev\`.
 3. Apply the ORO patches, **with `git apply`** (see note). ⚠️ **Only SEVEN of the
-   seventeen exist as `.patch` files** — the rest are documented as code listings in the
-   per-patch sections below, because all seventeen were developed as uncommitted
+   twenty-one exist as `.patch` files** — the rest are documented as code listings in the
+   per-patch sections below, because all twenty-one were developed as uncommitted
    working-tree changes and a per-file diff would carry the earlier ones too. The
    complete, verified set is `ORO-D3D9Client-all-patches.patch` (every patch, against
    tag `2024`), or just use the fork above. The individual files are:
@@ -911,13 +911,15 @@ Release it is dead code anyway (see patch (q)'s addendum). The `[Build ######]` 
 from the SDK's module-version glue, which bakes `__DATE__` into `D3D9Client.cpp.obj`.
 **Force-touch `D3D9Client.cpp` after any client patch, then VERIFY** by scanning the built
 DLL for a `"Mmm DD YYYY"` string and confirming it is today's — the check takes seconds and
-is what caught this. With (q) the stamp is **`260812`**.
+is what caught this. With (q) the stamp is **`260812`**; with (s) it is **`260820`**; with
+**(t) it is `260824`**. (t) needs no stamp either: it changes no API, and its effect is
+visible at a glance - the menu bar stays crisp under a full-frame effect.
 
 The patched client logs `[Build YYMMDD, API YYMMDD]` (compile date) in Orbiter.log vs the
 stock `[Build 241231, API 241231]`. Patch (a) alone was `260725`; +patch (b) was `260726`;
 the client with a+b+c+d is **`260801`**; with (f) it is **`260804`**; with (g) it is
 **`260807`**; with (i)+(j) it is **`260808`**; **(k) is ALSO `260808`** - the stamp cannot
-distinguish it from (i)+(j) (same-day builds; the stamp re-bakes only when D3D9Util.cpp
+distinguish it from (i)+(j) (same-day builds; the stamp re-bakes only when D3D9Client.cpp
 recompiles), but unlike (e) it needs no stamp: **`CanGetRenderCam()` probes it by binding**.
 With (l)+(m) the stamp is **`260809`**; (l) probes by binding (`CanDrawTexPoly()`), and (m)
 has no binding to probe - it is a look change with no API - but its shader half announces
@@ -1001,3 +1003,268 @@ panel. Scene.cpp's cockpit-pass bracket (the same one patch (p) uses for shadow 
 now zeroes `gWetGlint` AND `gSurfWet` around `vFocus->Render(pDevice, true)` and
 restores them after - the interior is dry while every hull seen THROUGH the window
 keeps its full wet look. DLL-only; no shader change.
+
+**EXTENDED 2026-08-24 - BEACONS IN THE REFLECTION.** A public-beta tester asked for nav
+lights and strobes in the wet-ground mirror. They were never being lost or clipped: the
+mirror pass only ever called `vVessel::Render`, and beacons are not part of it - the main
+scene draws them in a separate later loop. One extra loop in the pass, and NO camera
+plumbing, which is the point worth recording: `vObject::RenderSpot` builds its billboard
+from the object's CAMERA-RELATIVE POSITION and draws through the same `gVP` the pass
+already overrides, so a MATRIX-ONLY mirror carries it. The blob ends up facing the real
+camera rather than the mirrored one - a tilt of ~11 deg for a camera 3 m up and a vessel
+30 m away, i.e. a round blob at 98% width, which a soft spot absorbs completely. A second
+loop rather than one, matching the main scene, so a beacon composites over every hull in
+the reflection and not just its own; strobe phase is `fmod(simt, period)`, so both passes
+agree within the frame. ⚠️ `vVessel::RenderExhaust` has the same billboard property and
+would drop in the same way, but its first line is `gcIsExhaustSuppressed()` - patch (n) -
+so it draws NOTHING for any user running ORO's own plume. And ORO's own plume can never
+arrive by this route at all: it is screen-space Sketchpad geometry drawn to the backbuffer
+after the scene, so reflecting it needs a render-proc slot INSIDE this pass plus a second
+geometry build against the mirrored camera. Same shape of problem as patch (t) - a missing
+slot, not a missing calculation. ✅ **BUILT 2026-08-25 as patch (u)**, and the "second
+geometry build" turned out to need no second CAMERA path at all - see below.
+
+**EXTENDED AGAIN 2026-08-25 - EXHAUST, PARTICLES, REFLECTION BLUR AND POOLS-OFF.**
+Three more, all following from the beacon note above. **Stock exhaust and particle streams
+join the mirror pass**: `vVessel::RenderExhaust` orients from `cdir` (the camera's position
+in VESSEL frame) and `D3D9ParticleStream::RenderDiffuse` builds every sprite from
+`p->pos - camera_gpos`, so both are CAMERA-RELATIVE like `RenderSpot` and both draw through
+the gVP the pass already overrides - a matrix-only mirror carries them. Order matches the
+main scene (exhausts, beacons, streams), because these are additive layers and the order
+they accumulate in is the look. ⚠️ `RenderExhaust`'s first line is `gcIsExhaustSuppressed()`,
+patch (n), so it draws nothing for anyone running ORO's own plume; what it restores in
+practice is the CONTRAIL. (⚠️ ORO's own jet arrived a day later, and needed a slot rather
+than a loop - see patch (u).) Streams go in whole - they are scene-owned and carry no cheap
+distance handle - exactly as the main scene and `RenderSecondaryScene` do, and this only
+runs while the ground is wet and the camera is under 250 m AGL.
+**`SetWetReflection` gains a SIXTH argument, fBlur** - how diffuse the reflected image is,
+riding `gWetGrainPrm.z` because `gWetReflPrm`'s four channels (1/W, 1/H, gain, live) are all
+taken. That vector is a TRANSPORT, not a grouping; the signpost is in Scene.cpp, since
+anyone hunting the blur will look in gWetReflPrm first. Both ground shaders widen the
+existing 3-tap vertical smear, and **at 0 the taps and weights are exactly as shipped** with
+the widening behind a uniform-driven branch, so it costs nothing while the slider is down.
+⚠️ **AND IT WAS HALF-WIRED ON THE FIRST BUILD, IN THE PLACE THIS FILE ALREADY WARNS ABOUT.**
+The blur was pushed only through Scene.cpp's `D3D9Effect` path, which serves the BASE TILES,
+while the ground a vessel parks on is TERRAIN, pushed from `Surfmgr2.cpp`. Right value,
+wrong shader - the same sweep patch (s)'s own round 1 records. **ANY NEW WET PARAMETER MUST
+BE PUSHED IN BOTH PLACES OR IT IS SILENTLY HALF-WIRED**; the rule is now written at the
+Surfmgr2 block itself. Swept afterwards: exactly two push sites, two sampling files.
+**`SetWetPoolSize` may now go NEGATIVE, to -0.1** - the only one of the six wet setters with
+a meaning below its range. Pool size only ever set the lattice SCALE and the shaders floor
+it at `1/max(0.35, z)`, so a slider at zero still produced a fine mesh of small pools; the
+ground shaders now fade standing water out across -0.1..0, which lets the addon offer a wet
+apron with no pools while the user's slider still reads a plain 0..2.
+
+## Patch (t): THE CHROME GOES LAST - Orbiter's menu bar stops being an effect surface (2026-08-24)
+
+Reported by a public-beta tester and by the author independently: with a full-frame effect
+running - blur, swim, chromatic aberration, a colour wash, and equally the rain sheet or
+the plasma - Orbiter's own menu bar and info bars are smeared along with the world, which
+makes the UI hard to read and to use. DLL-only, three files, no shader change, no new API.
+
+**THE CAUSE IS AN ORDERING ONE, AND IT IS THE CORE'S, NOT THE CLIENT'S.**
+`Scene::RenderMainScene` runs the overlay stage as
+
+```
+PushRenderTarget(backbuffer, RENDERPASS_MAINOVERLAY)
+    RENDERPROC_HUD_1ST
+    gc->Render2DOverlay()        // -> the core's Pane::Render()
+    RENDERPROC_HUD_2ND
+```
+
+and `Pane::Render()` (Src/Orbiter/Pane.cpp) draws the PILOT'S INSTRUMENTS (HUD, 2D panel,
+glass-cockpit MFDs) and then `mibar->Render()` - the USER'S CHROME - in one uninterruptible
+core call. So an addon overlay has no slot between the two: it must draw under the pilot's
+instruments or over the user's menu bar. ORO draws at HUD_2ND, hence the smear.
+
+⚠️ **THE OBVIOUS FIX IS NOT AVAILABLE.** Splitting that call means editing `Pane::Render`
+or `GraphicsClient::Render2DOverlay`, both of which live in the CORE and compile into
+Orbiter.exe. ORO patches the client only; shipping a patched Orbiter executable is a
+different distribution proposition entirely and was rejected. The client cannot reorder
+what it cannot see.
+
+⚠️ **AND THE CHEAP FIX TRADES ONE WRONGNESS FOR ANOTHER.** Moving the addon draw to
+RENDERPROC_HUD_1ST does clean the chrome, because the pane then draws after it - but then
+EVERYTHING the pane draws becomes immune to the effects. In the VC that costs nothing (the
+VC's HUD is rendered into the VC's own HUD surface in `Pane::Update` and is part of the 3D
+scene, so it keeps receiving the effects; in VC mode the pane's overlay contains only the
+bars). In 2D-panel and glass-cockpit modes it is a visible regression: a blackout would
+darken the outside view through the windows while the panel stayed lit.
+
+**SO THE CHROME IS DEFERRED INSTEAD, AND IT IS IDENTIFIED BY SURFACE IDENTITY.** This is
+the part that makes the patch small and safe. Every bar - the menu bar, the warp
+mini-readout, the action flag, and both auxiliary info bars - is drawn from ONE surface,
+loaded as `"main_menu_tgt.dds"` at `MenuInfoBar.cpp:429`, and `MenuInfoBar` is that file's
+only consumer in the entire core (`ExtraInfoBar` takes `infoTgt = mibar->menuTgt`). No
+guessing from screen position, draw order, or which overload was called:
+
+- `D3D9Client::clbkLoadSurface` tags the handle when the filename matches; `clbkReleaseSurface`
+  clears the tag at the point of `delete`, so a later allocation landing on the same address
+  can never be mistaken for the chrome.
+- `D3D9Client::clbkRender2DPanel` captures a matching draw instead of executing it, but only
+  while armed. Unarmed - i.e. everywhere else in the client - nothing changes at all.
+- `Scene.cpp` arms with `ChromeDeferBegin()` before `Render2DOverlay()` and replays with
+  `ChromeDeferFlush()` after the HUD_2ND call, still inside the same render-target bracket
+  (which runs to the `PopRenderTargets()` ~180 lines later, so there is room).
+
+**THREE DETAILS THAT ARE LOAD-BEARING:**
+
+1. ⚠️ **THE TRANSFORM IS COPIED BY VALUE.** `MenuInfoBar::Render` reuses ONE `transf` and
+   rewrites it between its own draws (it undoes the x-squeeze for the mini-readout and the
+   flag, then puts it back). `clbkRender2DPanel` reads it through a pointer, so a deferral
+   that stored the pointer would replay all three bars with whichever transform happened to
+   be there last.
+2. ⚠️ **THE FLUSH IS UNCONDITIONAL, OUTSIDE THE `if (pSketch)` GUARD.** Put it inside and a
+   frame that fails to get a pooled sketchpad loses its menu bar - a far worse failure than
+   the one being fixed. For the same reason `ChromeDeferBegin()` clears the queue rather
+   than trusting the previous frame to have emptied it, and a full queue falls through and
+   draws immediately instead of dropping a bar.
+3. `ChromeDeferFlush()` lowers the arm flag FIRST, because the replay re-enters
+   `clbkRender2DPanel` and would otherwise capture the same draws forever.
+
+**WHAT ELSE THIS CHANGES:** Orbiter's bars now sit on top of ANY addon's HUD_2ND drawing in
+this client, not just ORO's. That is the intended default - the chrome is Orbiter's own UI -
+but it is a behaviour difference a third-party addon could notice. ORO itself needed no
+change whatsoever, which is why the fix cannot regress any approved look.
+
+**FOR THE VULKAN REQUIREMENTS DOCUMENT:** the underlying request is one line - *an addon
+overlay needs a slot between the pilot's instruments and the user's chrome.* Today the two
+available slots straddle both, and an addon that draws over the world necessarily draws
+over the UI.
+
+## Patch (u): A RENDER-PROC SLOT INSIDE THE WET MIRROR - the reflection gets ORO's plume (2026-08-25)
+
+His ask, straight after the exhaust/particle extension landed: the reflection shows the
+hull and now the contrail, but not ORO's own jet. Three files, DLL-only, no shader change,
+one new render-proc id. It is the smallest of the twenty-one patches and the one with the
+highest ratio of comment to code, because every part of it is an argument about *why no
+new API was needed*.
+
+**WHY A SLOT AND NOT A LOOP.** Everything the mirror pass gained in the two previous
+rounds - meshes, exhaust billboards, beacons, particle streams - is geometry the CLIENT
+draws, oriented from a camera-relative position and pushed through the view-projection the
+pass already overrides. One loop each, no plumbing. ORO's plume is none of those things:
+it is screen-space Sketchpad triangles projected on the CPU and drawn AFTER the whole
+scene, in patch (i)'s pre-resolve slot, by which time this pass is long finished. There is
+no loop to add. It needs to be invited in.
+
+```cpp
+// gcCore.h
+#define RENDERPROC_WET_MIRROR   0x0007
+```
+
+**THE THREE PARTS**
+
+1. **`gcCore.h`** - the new id, with a doc comment that carries the three facts a consumer
+   cannot guess: the bound target is the HALF-RES reflection texture and not the
+   backbuffer; `GetRenderCam` reports the MIRRORED camera for the duration; and scene
+   depth belongs to the main camera and must not be used.
+
+2. **`Scene.h`** - `bMirrorCam` / `mirrorCamPos` / `mirrorCamRot`, and `GetRenderCam`
+   returns those while the flag is up. Patch (k)'s accessor becomes a substitution rather
+   than gaining a sibling. Aperture is untouched: a mirror does not change the field of
+   view.
+
+3. **`Scene.cpp`** - the slot itself, after the streams loop and before
+   `PopRenderTargets`, so it composites over everything else in the reflection exactly as
+   the pre-resolve slot composites over the main scene.
+
+```cpp
+VECTOR3 mp = Camera.pos - up * (2.0 * planeAGL);
+MATRIX3 mr = Camera.grot;
+for (int j = 0; j < 3; j++) {
+    VECTOR3 v = _V(mr.data[j], mr.data[3 + j], mr.data[6 + j]);   // column j
+    v -= up * (2.0 * dotp(up, v));
+    if (j == 0) v = -v;                    // handedness + the X flip
+    mr.data[j] = v.x; mr.data[3 + j] = v.y; mr.data[6 + j] = v.z;
+}
+mirrorCamPos = mp; mirrorCamRot = mr; bMirrorCam = true;
+D3D9Pad *pSkpM = GetPooledSketchpad(SKETCHPAD_2D_OVERLAY);
+if (pSkpM) { gc->MakeRenderProcCall(pSkpM, RENDERPROC_WET_MIRROR, NULL, NULL); pSkpM->EndDrawing(); }
+bMirrorCam = false;
+```
+
+**⚠️ THE MIRRORED CAMERA IS A REAL CAMERA, AND THAT IS THE WHOLE PATCH.** The obvious
+design - hand the addon the reflection matrix - would have meant a second projection path
+on the addon side, kept in sync with the first by hand, forever. It is unnecessary,
+because a planar reflection of a camera *is* a camera. Reflect the eye point and the three
+basis vectors through the plane and you get a view in which a real point P lands exactly
+where the main camera sees P's virtual image - the same identity the matrix trick in patch
+(s) part 6 already relies on, stated in camera terms instead of matrix terms.
+
+**⚠️ THE REPORTED CAMERA IS A PURE MIRROR, AND THE HANDEDNESS IS THE CONSUMER'S TO
+RECONCILE.** The reflection flips handedness (`det = -1`), which is why the pass mirrors a
+second time in clip space to keep the meshes' winding legal - and that second mirror is
+what leaves the RT holding a horizontally flipped image, which the ground shaders undo
+when they sample it. CPU-projected geometry gets no such flip, so a consumer has to mirror
+its own screen X to land in the same convention. Negating the reported camera's RIGHT
+column does both jobs at once - restores a proper right-handed rotation AND puts screen X
+in the RT's convention - so it is still a three-line reconciliation rather than a second
+projection path. It is deliberately NOT folded into the reported basis: the camera then
+describes the pass's real geometry, and the single place that has to know about the RT's
+flip is the code putting pixels into it. ORO does it in `FillProjCam`, its one camera
+entry point.
+
+**⚠️ THE VIEWPORT COMES OUT OF THE SKETCHPAD, AND NO NEW API WAS NEEDED FOR THAT EITHER.**
+The reflection target is half resolution, and an addon must never assume that: hardcoding
+"half" couples it to a client implementation detail that could be retuned for performance
+at any time. It does not have to. `D3D9Pad::BeginDrawing()` binds to
+`gc->GetTopRenderTarget()`, so a pooled pad taken *inside* the push describes the
+reflection texture - its ortho matrix, its scissor, and the stock SDK virtual
+`Sketchpad::GetRenderSurfaceSize()`, which D3D9Pad answers from `tgt_desc`. The addon asks
+the pad it was handed. Change this target's resolution and every consumer follows with no
+addon edit.
+
+**⚠️ SCENE DEPTH IS THE MAIN CAMERA'S.** `ptgBuffer[GBUF_DEPTH]` was filled in
+`RENDERPASS_NORMAL_DEPTH` from the real view, so patch (g)'s per-pixel clip is meaningless
+in here - at every pixel it describes different geometry than the one being drawn, and
+would cut the reflection against a scene that is not there. The doc comment says so;
+nothing in the client can enforce it. Consumers draw unclipped and accept painting over
+the mirrored hulls, which is invisible in practice: this image only ever reaches the eye
+through the puddle lattice, rippled, Fresnel-masked and blurred.
+⚠️ **BUT "ACCEPT PAINTING OVER THE HULLS" UNDERSTATES WHAT LOSING THE CLIP COSTS, AND
+IT COST A ROUND.** A per-pixel clip is not only an occluder - some geometry is AUTHORED
+around it and is malformed without it. ORO's throat fire is drawn UPSTREAM of the nozzle
+on purpose, as the fire seen through the bell mouth, with patch (g) carving it against the
+bell walls; unclipped it does not merely fail to be hidden, it makes the jet visibly start
+AHEAD of the engine. Anything entering this slot has to ask which of its parts exist only
+because something else was cutting them, and drop those - not just tolerate the overlap.
+(The same question applies wherever the clip can be absent, e.g. a user with SunGlare off.)
+
+**⚠️ AND A FOURTH PART, WHICH IS WHAT ACTUALLY MADE IT WORK: `D3D9Pad.cpp` GAINS A
+`0x200` "WRITE COVERAGE ALPHA" BLEND BIT.** Both of the pad's blended paths set
+`COLORWRITEENABLE 0x7` - RGB only, alpha masked off. On the BACKBUFFER that is exactly
+right: Sketchpad art there is light laid on a finished frame and has no business touching
+its alpha. **In an offscreen target whose alpha is a MASK it is exactly wrong.** The
+wet-mirror RT is cleared to alpha 0 and both ground shaders read `cVes.a` as "is anything
+reflected at this pixel", so RGB-only geometry lands in a region the shader still reads as
+empty. The first flight showed the symptom precisely: the jet survived only where it
+overlapped the hull's own alpha - a stub at the tail - which reads as a broken effect
+rather than a missing one, and cost a round being mistaken for a projection error.
+The bit is opt-in (no existing caller changes) and rides the same no-SDK-header trick as
+(d)'s `0x5` and (g)'s `0x100`. Alpha gets SEPARATE blend factors, and the linearity is the
+point: letting alpha ride the colour factors gives `a = src.a*src.a + dst.a`, a SQUARED
+coverage that all but deletes the soft outer sheath (0.15 -> 0.02) and reflects only the
+hot core. `ONE/ONE` sums coverage the way the colour sums light. A device without
+`D3DPMISCCAPS_SEPARATEALPHABLEND` degrades to exactly that squared coverage - dim, not
+broken - so it is set plainly rather than through `HR()`.
+**THE GENERAL RULE FOR ANY FUTURE OFFSCREEN SLOT: ask what the target's ALPHA MEANS before
+drawing into it.** A render proc that only ever saw the backbuffer has never had to.
+
+**COST.** One extra CPU geometry build (~1000 triangles for ORO) and one half-res draw,
+and only while `g_gcSurfaceWet > 0.01` and the camera is 1..250 m AGL - the same gate the
+pass itself already runs behind. Nothing at all in the dry, and nothing in orbit.
+
+**WHAT IT DOES NOT DO.** It does not run when the pass does not: dry ground, above 250 m,
+or a client without the patch. Registration always succeeds (`RegisterRenderProc` is a
+plain list append that accepts any non-zero id), so an addon cannot probe for this one by
+binding the way it probes `CanSetVCShadows` - it can only latch the first real invocation
+and know that "not seen yet" is not the same as "not supported". ORO logs it that way
+deliberately.
+
+**FOR THE VULKAN REQUIREMENTS DOCUMENT:** the general form is *any pass that re-renders
+the scene from a different viewpoint should be able to invite addon overlays into it, and
+should report its own camera and its own target size through the same interfaces the main
+pass uses.* Both halves of that were free here because the client already had the two
+accessors; designed in rather than patched in, it costs nothing at all.
+

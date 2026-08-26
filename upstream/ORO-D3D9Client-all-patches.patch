@@ -1,8 +1,117 @@
 diff --git a/OVP/D3D9Client/D3D9Client.cpp b/OVP/D3D9Client/D3D9Client.cpp
-index f9c5ff7..d88e102 100644
+index f9c5ff7..cff7183 100644
 --- a/OVP/D3D9Client/D3D9Client.cpp
 +++ b/OVP/D3D9Client/D3D9Client.cpp
-@@ -2761,8 +2761,14 @@ void D3D9Client::MakeRenderProcCall(Sketchpad *pSkp, DWORD id, LPD3DXMATRIX pV,
+@@ -292,7 +292,10 @@ D3D9Client::D3D9Client (HINSTANCE hInstance) :
+ 	loadd_y       (0),
+ 	loadd_w       (0),
+ 	loadd_h       (0),
+-	LabelPos      (0)
++	LabelPos      (0),
++	nChromeQ      (0),		// ORO patch (t)
++	bDeferChrome  (false),	// ORO patch (t)
++	hChromeSurf   (NULL)	// ORO patch (t)
+ 
+ {
+ }
+@@ -1934,6 +1937,24 @@ void D3D9Client::clbkRender2DPanel (SURFHANDLE *hSurf, MESHHANDLE hMesh, MATRIX3
+ {
+ 	_TRACE;
+ 
++	// ORO patch (t): "the chrome goes last". While armed - i.e. inside the core's
++	// Pane::Render() - capture the menu/info bar draws instead of executing them.
++	// Scene.cpp replays them after the RENDERPROC_HUD_2ND stage, so Orbiter's own
++	// UI ends up on top of any addon overlay instead of underneath it.
++	if (bDeferChrome && hChromeSurf && hSurf && hSurf[0] == hChromeSurf) {
++		if (nChromeQ < MAX_CHROME_DRAWS) {
++			ChromeDraw &q = ChromeQ[nChromeQ++];
++			q.hSurf    = hSurf;		// core storage, alive for the whole frame
++			q.hMesh    = hMesh;
++			q.T        = *T;		// BY VALUE - the core reuses and rewrites this
++			q.alpha    = alpha;		// transform between its own bar draws
++			q.additive = additive;
++			return;
++		}
++		// Queue full (the core issues at most three): draw it now rather than
++		// lose a bar. Ordering against the overlay is the lesser failure.
++	}
++
+ 	SURFHANDLE surf = NULL;
+ 	DWORD ngrp = oapiMeshGroupCount(hMesh);
+ 
+@@ -1981,6 +2002,40 @@ void D3D9Client::clbkRender2DPanel (SURFHANDLE *hSurf, MESHHANDLE hMesh, MATRIX3
+ 	clbkRender2DPanel (hSurf, hMesh, T, 1.0f, additive);
+ }
+ 
++// =======================================================================
++// ORO patch (t): "the chrome goes last"
++//
++// Orbiter's core draws the pilot's instruments (HUD, 2D panel, glass MFDs) and
++// the USER'S CHROME (menu bar + info bars) in one uninterruptible call,
++// Pane::Render(), which sits between RENDERPROC_HUD_1ST and RENDERPROC_HUD_2ND.
++// An addon overlay therefore has no slot between the two: it either draws under
++// the pilot's instruments or over the user's menu bar. So a full-frame effect -
++// a blur, a camera tilt, a colour wash, rain, plasma - smeared Orbiter's own UI
++// along with the world, and the menu bar became hard to read and to use.
++//
++// Nothing here identifies the bars by position or by draw order. Every one of
++// them is drawn from the single texture "main_menu_tgt.dds", tagged in
++// clbkLoadSurface(), and MenuInfoBar is that file's only consumer in the core -
++// so the test is exact, and holds in every cockpit mode, at any opacity, and
++// whatever the scroll or auto-hide state.
++// =======================================================================
++
++void D3D9Client::ChromeDeferBegin()
++{
++	nChromeQ = 0;			// never inherit a queue from a frame that failed to flush
++	bDeferChrome = true;
++}
++
++void D3D9Client::ChromeDeferFlush()
++{
++	bDeferChrome = false;	// FIRST: the replay re-enters clbkRender2DPanel
++	for (int i = 0; i < nChromeQ; i++) {
++		ChromeDraw &q = ChromeQ[i];
++		clbkRender2DPanel(q.hSurf, q.hMesh, &q.T, q.alpha, q.additive);
++	}
++	nChromeQ = 0;
++}
++
+ // =======================================================================
+ 
+ DWORD D3D9Client::clbkGetDeviceColour (BYTE r, BYTE g, BYTE b)
+@@ -2195,8 +2250,18 @@ SURFHANDLE D3D9Client::clbkLoadSurface (const char *fname, DWORD attrib, bool bP
+ 		}
+ 		*/
+ 	}
+-	
+-	return NatLoadSurface(fname, attrib, bPath);
++
++	SURFHANDLE hSrf = NatLoadSurface(fname, attrib, bPath);
++
++	// ORO patch (t): tag Orbiter's menu/info bar texture so that its draws can be
++	// held back past the addon overlay stage - see ChromeDeferBegin(). MenuInfoBar
++	// is the ONLY consumer of this file in the core, and every bar it draws (the
++	// bar itself, the warp mini-readout, the action flag and both auxiliary info
++	// bars) draws from this one surface - so it identifies the chrome exactly, in
++	// every cockpit mode and at any opacity, scroll or auto-hide state.
++	if (hSrf && fname && !_stricmp(fname, "main_menu_tgt.dds")) hChromeSurf = hSrf;
++
++	return hSrf;
+ }
+ 
+ // ==============================================================
+@@ -2305,6 +2370,9 @@ bool D3D9Client::clbkReleaseSurface(SURFHANDLE surf)
+ 	{
+ 		if (SurfaceCatalog.count(SURFACE(surf)))
+ 		{
++			// ORO patch (t): never keep comparing against a freed surface - a later
++			// allocation could land on the same address and be taken for the chrome.
++			if (surf == hChromeSurf) hChromeSurf = NULL;
+ 			delete SURFACE(surf);
+ 			return true;
+ 		}
+@@ -2761,8 +2829,14 @@ void D3D9Client::MakeRenderProcCall(Sketchpad *pSkp, DWORD id, LPD3DXMATRIX pV,
  			pSkp2->LoadDefaults();
  			if (id == RENDERPROC_EXTERIOR || id == RENDERPROC_PLANETARIUM) {
  				pSkp2->SetViewMode(Sketchpad::USER);
@@ -18,6 +127,60 @@ index f9c5ff7..d88e102 100644
  			it->proc(pSkp, it->pParam);
  			pSkp2->FlushAll(); // Flush render queue
  		}
+diff --git a/OVP/D3D9Client/D3D9Client.h b/OVP/D3D9Client/D3D9Client.h
+index 7efe1a1..0894398 100644
+--- a/OVP/D3D9Client/D3D9Client.h
++++ b/OVP/D3D9Client/D3D9Client.h
+@@ -1282,6 +1282,24 @@ public:
+ 	 */
+ 	bool OutputLoadStatus (const char *msg, int line);
+ 
++	// ---------------------------------------------------------------------
++	// ORO patch (t): "the chrome goes last"
++	// ---------------------------------------------------------------------
++	// Orbiter's Pane::Render() draws the pilot's instruments (HUD, 2D panel,
++	// glass MFDs) AND the user's chrome (menu bar + info bars) in one
++	// uninterruptible core call, which sits between RENDERPROC_HUD_1ST and
++	// RENDERPROC_HUD_2ND. An addon overlay therefore has no slot between the
++	// two - it must draw under the instruments or over the menu bar - so a
++	// full-frame effect (blur, tilt, a colour wash, rain, plasma) smears
++	// Orbiter's own UI and makes it hard to read and use.
++	//
++	// Arm ChromeDeferBegin() around Render2DOverlay() to capture the chrome
++	// draws instead of executing them, then ChromeDeferFlush() after the addon
++	// stage to replay them on top. Unarmed, nothing changes: every draw goes
++	// straight through as before.
++	void ChromeDeferBegin();
++	void ChromeDeferFlush();
++
+ private:
+ 	void BltError(SURFHANDLE src, SURFHANDLE tgt, const LPRECT s, const LPRECT t, bool bHalt = true) const;
+ 	void SketchPadTest();
+@@ -1355,6 +1373,24 @@ private:
+ 	DWORD loadd_x, loadd_y, loadd_w, loadd_h;
+ 	int LabelPos;
+ 
++	// ORO patch (t): deferred menu/info bar ("chrome") draws. See ChromeDeferBegin().
++	// The bars are identified by SURFACE IDENTITY, not by position or draw order:
++	// every one of them - the bar, the warp mini-readout, the action flag and both
++	// auxiliary info bars - is drawn from the single texture "main_menu_tgt.dds",
++	// and MenuInfoBar is its only consumer in the core.
++	struct ChromeDraw {
++		SURFHANDLE *hSurf;	// the core's own array pointer (session lifetime)
++		MESHHANDLE  hMesh;
++		MATRIX3     T;		// BY VALUE: the core mutates its transform between bar draws
++		float       alpha;
++		bool        additive;
++	};
++	static const int MAX_CHROME_DRAWS = 8;
++	ChromeDraw ChromeQ[MAX_CHROME_DRAWS];
++	int        nChromeQ;
++	bool       bDeferChrome;
++	SURFHANDLE hChromeSurf;	// tagged in clbkLoadSurface(), cleared when it is freed
++
+ }; // class D3D9Client
+ 
+ 
 diff --git a/OVP/D3D9Client/D3D9Config.cpp b/OVP/D3D9Client/D3D9Config.cpp
 index d867b73..d1709db 100644
 --- a/OVP/D3D9Client/D3D9Config.cpp
@@ -231,7 +394,7 @@ index c9213f3..fce43d6 100644
  	static D3DXHANDLE   eFogColor;     ///< Fog color input
  	static D3DXHANDLE   eTexOff;       ///< Surface tile texture offsets
 diff --git a/OVP/D3D9Client/D3D9Pad.cpp b/OVP/D3D9Client/D3D9Pad.cpp
-index e166409..94b8be7 100644
+index e166409..1c68321 100644
 --- a/OVP/D3D9Client/D3D9Pad.cpp
 +++ b/OVP/D3D9Client/D3D9Pad.cpp
 @@ -46,6 +46,10 @@ std::vector<FontCache *> fcache;
@@ -278,7 +441,7 @@ index e166409..94b8be7 100644
  	
  #ifdef SKPDBG 
  	char buf[128]; strcpy_s(buf, 128, "");
-@@ -475,6 +485,18 @@ bool D3D9Pad::Flush(HPOLY hPoly)
+@@ -475,6 +485,30 @@ bool D3D9Pad::Flush(HPOLY hPoly)
  		
  	HR(FX->SetFloat(eRandom, float(oapiRand())));
  	HR(FX->SetVector(eTarget, &vTarget));
@@ -294,13 +457,35 @@ index e166409..94b8be7 100644
 +	HR(FX->SetBool(eDepthClip, bDepthClip));
 +	if (bDepthClip) HR(FX->SetTexture(eDepthTex, g_gcSceneDepth));
 +
++	// ORO patch (u): WRITE COVERAGE ALPHA TOO (0x200 - the same no-SDK-header bit trick
++	// as patch (d)'s 0x5 and patch (g)'s 0x100). Both blended paths below mask alpha off
++	// with COLORWRITEENABLE 0x7, which is exactly right on the BACKBUFFER: art drawn
++	// there is light on top of a finished frame and must not disturb its alpha.
++	// ⚠️ IT IS EXACTLY WRONG IN AN OFFSCREEN TARGET WHOSE ALPHA IS A MASK. The wet-mirror
++	// RT is cleared to alpha 0 and the ground shaders read `cVes.a` as "is there anything
++	// reflected at this pixel"; geometry that writes only RGB therefore lands in a region
++	// the shader still reads as empty, and survives ONLY where it happens to overlap
++	// something else's alpha - which reads as a broken half-effect rather than a missing
++	// one. Opt-in, so no existing caller changes.
++	const bool bWriteAlpha = ((dwBlendState & 0x200) != 0);
++
  	HR(FX->SetTechnique(eSketch));
  	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
  
-@@ -489,6 +511,20 @@ bool D3D9Pad::Flush(HPOLY hPoly)
- 		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
- 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+@@ -486,8 +520,41 @@ bool D3D9Pad::Flush(HPOLY hPoly)
  	}
+ 
+ 	if (dwBlend == Sketchpad::BlendState::ALPHABLEND) {
+-		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
++		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, bWriteAlpha ? 0xF : 0x7);
++		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
++		if (bWriteAlpha) {
++			// Ordinary "over" for coverage: a = src.a + dst.a*(1-src.a).
++			pDev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE);
++			pDev->SetRenderState(D3DRS_SRCBLENDALPHA,  D3DBLEND_SRCALPHA);
++			pDev->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
++		}
++	}
 +	else if (dwBlend == 0x5) {
 +		// ORO patch d (2026-08-01): SKPBS_ADDITIVE - src.rgb * src.a ADDS to the
 +		// destination (light on top of the frame: plasma, glows, flames). The Sketchpad
@@ -309,16 +494,28 @@ index e166409..94b8be7 100644
 +		// it overrides the pass defaults; the pass re-establishes InvSrcAlpha on the
 +		// next BeginPass, and the explicit restore below keeps nothing leaking past
 +		// EndPass (the effect runs D3DXFX_DONOTSAVESTATE).
-+		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
-+		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
++		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, bWriteAlpha ? 0xF : 0x7);
+ 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
 +		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
 +		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE));
++		if (bWriteAlpha) {
++			// ⚠️ SEPARATE factors for alpha, and LINEAR accumulation is the point. Letting
++			// alpha ride the colour factors would give a = src.a*src.a + dst.a - a SQUARED
++			// coverage, which all but deletes the soft outer sheath (alpha ~0.15 -> 0.02)
++			// and leaves only the hot core reflected. ONE/ONE sums coverage the way the
++			// colour sums light. Set plainly, not through HR(): a device without
++			// D3DPMISCCAPS_SEPARATEALPHABLEND simply keeps the colour factors and degrades
++			// to that squared coverage, which is dim but not broken - not worth a hard
++			// failure or a log line every flush.
++			pDev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE);
++			pDev->SetRenderState(D3DRS_SRCBLENDALPHA,  D3DBLEND_ONE);
++			pDev->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_ONE);
++		}
 +		bAdditive = true;
-+	}
+ 	}
  	else if (dwBlend == Sketchpad::BlendState::COPY) {
  		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
- 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
-@@ -535,10 +571,15 @@ bool D3D9Pad::Flush(HPOLY hPoly)
+@@ -535,9 +602,17 @@ bool D3D9Pad::Flush(HPOLY hPoly)
  
  	HR(FX->EndPass());
  	HR(FX->End());
@@ -326,16 +523,18 @@ index e166409..94b8be7 100644
 +
  	HR(pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF));
  	HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, bkALPHA));
- 
++	// ORO patch (u): the separate alpha factors are per-flush like the additive ones, and
++	// leaking them would quietly change how every later draw composites alpha.
++	if (bWriteAlpha) pDev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
++
 +	if (bAdditive) {	// ORO patch d: hand back the client-wide default blend factors
 +		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
 +		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
 +	}
-+
+ 
  	//HR(pDev->SetRenderState(D3DRS_ZENABLE, bkZEN));
  	//HR(pDev->SetRenderState(D3DRS_ZWRITEENABLE, bkZW));
- 	//HR(pDev->SetRenderState(D3DRS_CULLMODE, bkCULL));
-@@ -1356,6 +1397,20 @@ void D3D9Pad::DrawPoly (HPOLY hPoly, DWORD flags)
+@@ -1356,6 +1431,20 @@ void D3D9Pad::DrawPoly (HPOLY hPoly, DWORD flags)
  		D3D9PolyBase *pBase = static_cast<D3D9PolyBase *>(hPoly);
  		int PolyType = pBase->type;
  
@@ -356,7 +555,7 @@ index e166409..94b8be7 100644
  		if ((PolyType == 0) && !HasPen()) return;
  
  		// Flush pending graphics before a use of different interface 
-@@ -1791,6 +1846,13 @@ D3DXHANDLE	 D3D9Pad::eNoiseTex = 0;
+@@ -1791,6 +1880,13 @@ D3DXHANDLE	 D3D9Pad::eNoiseTex = 0;
  D3DXHANDLE   D3D9Pad::eNoiseColor = 0;
  D3DXHANDLE   D3D9Pad::eColorMatrix = 0;
  D3DXHANDLE   D3D9Pad::eGamma = 0;
@@ -705,7 +904,7 @@ index 959af8d..b14de2f 100644
  
  class ReentryStream: public D3D9ParticleStream {
 diff --git a/OVP/D3D9Client/Scene.cpp b/OVP/D3D9Client/Scene.cpp
-index ebed069..ba2346d 100644
+index ebed069..67dacd7 100644
 --- a/OVP/D3D9Client/Scene.cpp
 +++ b/OVP/D3D9Client/Scene.cpp
 @@ -29,6 +29,10 @@
@@ -719,7 +918,7 @@ index ebed069..ba2346d 100644
  static D3DXMATRIX ident;
  
  const double LABEL_DISTLIMIT = 0.6;
-@@ -80,6 +84,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+@@ -80,6 +84,13 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
  	pOffscreenTarget = NULL;
  	pLocalCompute = NULL;
  	pRenderGlares = NULL;
@@ -727,10 +926,13 @@ index ebed069..ba2346d 100644
 +	psWetRefl = NULL;
 +	psWetReflDS = NULL;
 +	bWetReflLive = false;
++	bMirrorCam = false;			// ORO patch (u): only true inside the wet-mirror render proc
++	mirrorCamPos = _V(0, 0, 0);
++	mirrorCamRot = identity();
  	pCreateGlare = NULL;
  	viewH = h;
  	viewW = w;
-@@ -181,6 +189,15 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+@@ -181,6 +192,15 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
  
  	CreateSunGlare();
  
@@ -746,7 +948,7 @@ index ebed069..ba2346d 100644
  
  	// ------------------------------------------------------------------------------
  	// Initialize a shaders for local lights visibility checks and rendering 
-@@ -245,6 +262,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+@@ -245,6 +265,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
  		HR(pDevice->CreateDepthStencilSurface(viewW, viewH, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &pDepthNormalDS, NULL));
  		HR(D3DXCreateTexture(pDevice, viewW, viewH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &ptgBuffer[GBUF_DEPTH]));
  	}
@@ -757,7 +959,7 @@ index ebed069..ba2346d 100644
  
  
  	// Initialize post processing effects --------------------------------------------------------------------------------------------------
-@@ -328,6 +349,7 @@ Scene::~Scene ()
+@@ -328,6 +352,7 @@ Scene::~Scene ()
  	pDevice->SetRenderTarget(2, NULL);
  	pDevice->SetRenderTarget(3, NULL);
  
@@ -765,7 +967,7 @@ index ebed069..ba2346d 100644
  	for (int i = 0; i < ARRAYSIZE(psgBuffer); i++) SAFE_RELEASE(psgBuffer[i]);
  	for (int i = 0; i < ARRAYSIZE(ptgBuffer); i++) SAFE_RELEASE(ptgBuffer[i]);
  	for (int i = 0; i < ARRAYSIZE(pTextures); i++) SAFE_RELEASE(pTextures[i]);
-@@ -349,6 +371,9 @@ Scene::~Scene ()
+@@ -349,6 +374,9 @@ Scene::~Scene ()
  	SAFE_RELEASE(pIrradTemp2);
  	SAFE_RELEASE(pIrradTemp3);
  	SAFE_RELEASE(pDepthNormalDS);
@@ -775,7 +977,7 @@ index ebed069..ba2346d 100644
  	SAFE_RELEASE(pLocalResults);
  	SAFE_RELEASE(pLocalResultsSL);
  	SAFE_RELEASE(pSunTex);
-@@ -1246,12 +1271,47 @@ void Scene::RenderMainScene()
+@@ -1246,12 +1274,47 @@ void Scene::RenderMainScene()
  
  	if (!UpdateCamVis()) {
  		if (SUCCEEDED(gc->BeginScene())) {
@@ -824,7 +1026,7 @@ index ebed069..ba2346d 100644
  
  	// Update Vessel Animations
  	//
-@@ -1436,6 +1496,152 @@ void Scene::RenderMainScene()
+@@ -1436,6 +1499,269 @@ void Scene::RenderMainScene()
  
  
  	// -------------------------------------------------------------------------------------------------------
@@ -916,6 +1118,117 @@ index ebed069..ba2346d 100644
 +				HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0L));
 +				for (auto* vVes : RenderList)
 +					if (vVes->CamDist() < 1500.0) vVes->Render(pDevice, false);
++				// ⚠️ BEACONS TOO, IN A SECOND PASS (2026-08-24, a beta tester's ask:
++				// "if the beacons could be added to the water reflection?"). Nav lights
++				// and strobes were never being lost or clipped here - they are simply
++				// not part of vVessel::Render. The main scene draws them in its own
++				// later loop, and this pass only ever called the mesh half.
++				//
++				// IT NEEDS NO CAMERA PLUMBING, which is the whole reason it is one
++				// loop and not a rework: RenderSpot builds its billboard from the
++				// object's CAMERA-RELATIVE POSITION and draws through the same gVP this
++				// pass already overrides. The blob therefore faces the REAL camera
++				// rather than the mirrored one and is tilted by the angle between the
++				// two view rays - about 11 deg for a camera 3 m up and a vessel 30 m
++				// away, i.e. a round blob at 98% of its width. A soft spot tolerates
++				// that completely, which is what lets a MATRIX-ONLY mirror carry
++				// billboards at all; a custom camera has to swap the whole Camera
++				// struct because it cannot assume the object is near the plane.
++				//
++				// A SECOND LOOP, not folded into the first, matching the main scene:
++				// a beacon has to composite over EVERY hull in the reflection, not
++				// just the one it belongs to. Strobe phase is fmod(simt, period), so
++				// both passes agree within the frame and a reflection can never flash
++				// out of step with the light casting it.
++				// ⚠️ EXHAUST AND PARTICLES TOO (2026-08-25, the same tester's follow-up:
++				// the reflection showed the hull but not what was coming out of it).
++				// Same story as the beacons and the same reason it is this cheap:
++				// vVessel::RenderExhaust orients its billboard from cdir = the camera's
++				// position in VESSEL frame, and D3D9ParticleStream::RenderDiffuse builds
++				// every sprite from (p->pos - camera_gpos) - both CAMERA-RELATIVE
++				// POSITIONS, both drawn through the gVP this pass already overrides. So a
++				// matrix-only mirror carries them, with the same negligible tilt the
++				// beacons have.
++				// ORDER MATCHES THE MAIN SCENE - exhausts, beacons, then streams - because
++				// these are additive layers and the order they accumulate in is the look.
++				// ⚠️ RenderExhaust's FIRST LINE is gcIsExhaustSuppressed(), which is patch
++				// (n). Anyone running ORO's own plume has stock exhaust suppressed, so this
++				// draws nothing for them and costs nothing - it is here for the users who
++				// keep the stock billboards. ORO's own plume cannot arrive by this route at
++				// all: it is screen-space Sketchpad geometry drawn after the scene, so it
++				// would need a render-proc slot INSIDE this pass plus a second geometry
++				// build against the mirrored camera.
++				for (auto* vVes : RenderList)
++					if (vVes->IsActive() && vVes->CamDist() < 1500.0)
++						vVes->RenderExhaust();
++				for (auto* vVes : RenderList)
++					if (vVes->IsActive() && vVes->CamDist() < 1500.0)
++						vVes->RenderBeacons(pDevice);
++				// The streams are scene-owned and carry no cheap distance handle, so they
++				// go in whole, exactly as the main scene and RenderSecondaryScene do. This
++				// only ever runs while the ground is wet and the camera is under 250 m AGL.
++				for (DWORD ns = 0; ns < nstream; ns++) pstream[ns]->Render(pDevice);
++				// ⚠️ AND ORO'S OWN PLUME, WHICH CANNOT ARRIVE BY ANY OF THE ROUTES ABOVE
++				// (2026-08-25, patch (u)). Everything else in this pass is scene geometry
++				// the CLIENT draws, so overriding gVP carried it for free. ORO's jet is
++				// SCREEN-SPACE Sketchpad triangles projected on the CPU and drawn after
++				// the scene, in the pre-resolve slot - by which time this pass is long
++				// finished. So it gets a slot of its own, inside the push.
++				//
++				// TWO THINGS THE SLOT HANDS IT, and both are SUBSTITUTIONS rather than
++				// new API - which is why the addon side is a parameterisation and not a
++				// second renderer:
++				//  - THE PAD IS BOUND TO THE HALF-RES RT, not the backbuffer, because
++				//    BeginDrawing() takes gc->GetTopRenderTarget(). Its ortho matrix and
++				//    its GetRenderSurfaceSize() therefore both describe the reflection
++				//    texture, so an addon reads its viewport out of the Sketchpad it was
++				//    handed and never has to know this target is half resolution. Change
++				//    that resolution and every consumer follows with no addon edit.
++				//  - GetRenderCam() REPORTS THE MIRRORED CAMERA for the duration, so an
++				//    addon that already projects against the render camera (patch k)
++				//    needs no second camera path: one build function, run twice a frame
++				//    against two cameras.
++				//
++				// THE MIRRORED CAMERA IS A REAL CAMERA, and that is what makes the second
++				// point work at all. Reflecting the eye point and the three basis vectors
++				// through the plane gives a view in which a real point P lands exactly
++				// where the main camera sees P's virtual image - the same identity the
++				// matrix trick above relies on. Aperture is untouched: a mirror does not
++				// change the field of view.
++				//
++				// ⚠️ IT IS A PURE MIRROR, SO ITS BASIS IS LEFT-HANDED (det = -1), AND THE
++				// CONSUMER MUST RECONCILE THAT WITH THE RT ITSELF. This pass draws the
++				// meshes through an extra clip-space X flip (mFlipX above) purely to keep
++				// their winding legal, so the RT holds a horizontally mirrored image that
++				// the ground shaders undo when they sample it. CPU-projected geometry gets
++				// no mFlipX, so whatever draws here has to mirror its own screen X to land
++				// in the same convention. Deliberately NOT folded into the reported basis:
++				// the camera then describes the pass's real geometry, and the one place
++				// that has to know about the RT's flip is the code putting pixels in it.
++				//
++				// ⚠️ SCENE DEPTH IS THE MAIN CAMERA'S. ptgBuffer[GBUF_DEPTH] was filled in
++				// RENDERPASS_NORMAL_DEPTH from the real view, so patch (g)'s per-pixel
++				// clip is meaningless in here and would cut the reflection against the
++				// wrong geometry. The doc comment on RENDERPROC_WET_MIRROR says so; there
++				// is nothing this side can do to enforce it.
++				{
++					VECTOR3 mp = Camera.pos - up * (2.0 * planeAGL);
++					MATRIX3 mr = Camera.grot;
++					for (int j = 0; j < 3; j++) {
++						VECTOR3 v = _V(mr.data[j], mr.data[3 + j], mr.data[6 + j]);   // column j
++						v -= up * (2.0 * dotp(up, v));
++						mr.data[j] = v.x; mr.data[3 + j] = v.y; mr.data[6 + j] = v.z;
++					}
++					mirrorCamPos = mp;
++					mirrorCamRot = mr;
++					bMirrorCam = true;
++					D3D9Pad *pSkpM = GetPooledSketchpad(SKETCHPAD_2D_OVERLAY);
++					if (pSkpM) {
++						gc->MakeRenderProcCall(pSkpM, RENDERPROC_WET_MIRROR, NULL, NULL);
++						pSkpM->EndDrawing();
++					}
++					bMirrorCam = false;   // lowered before anything else can ask
++				}
 +				gc->PopRenderTargets();
 +				PopPass();
 +
@@ -954,8 +1267,14 @@ index ebed069..ba2346d 100644
 +			D3DXVECTOR4 wsp(g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach);
 +			D3D9Effect::FX->SetVector(D3D9Effect::eWetSwimPrm, &wsp);
 +		}
++		// ⚠️ .z CARRIES THE REFLECTION BLUR, WHICH IS NOT A GRAIN PARAMETER (2026-08-24).
++		// It rides here purely because gWetReflPrm's four channels are all taken (1/W,
++		// 1/H, gain, live) and this vector already had two spare - a transport, not a
++		// grouping. Anyone hunting the blur will look in gWetReflPrm first; this note is
++		// the signpost. See SetWetReflection's fBlur.
++		extern float g_gcWetBlur;
 +		if (D3D9Effect::eWetGrainPrm) {
-+			D3DXVECTOR4 wgp(g_gcWetGrainOp, g_gcWetGrainSize, 0.0f, 0.0f);
++			D3DXVECTOR4 wgp(g_gcWetGrainOp, g_gcWetGrainSize, g_gcWetBlur, 0.0f);
 +			D3D9Effect::FX->SetVector(D3D9Effect::eWetGrainPrm, &wgp);
 +		}
 +		if (bWetReflLive && D3D9Effect::eWetReflTex)
@@ -977,7 +1296,7 @@ index ebed069..ba2346d 100644
  	// Start Main Scene Rendering
  	// -------------------------------------------------------------------------------------------------------
  
-@@ -1956,6 +2162,60 @@ void Scene::RenderMainScene()
+@@ -1956,6 +2282,60 @@ void Scene::RenderMainScene()
  
  	if (oapiCameraInternal() && vFocus) {
  
@@ -1038,7 +1357,7 @@ index ebed069..ba2346d 100644
  		// switch cockpit lights on, external-only lights off
  		//
  		if (bLocalLight) {
-@@ -1975,7 +2235,25 @@ void Scene::RenderMainScene()
+@@ -1975,7 +2355,25 @@ void Scene::RenderMainScene()
  		if (znear>1.0)  znear=1.0;
  		OBJHANDLE hFocus = oapiGetFocusObject();
  		SetCameraFrustumLimits(znear, oapiGetSize(hFocus)*2.0);
@@ -1064,7 +1383,7 @@ index ebed069..ba2346d 100644
  	}
  
  	pDevice->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
-@@ -1984,9 +2262,24 @@ void Scene::RenderMainScene()
+@@ -1984,9 +2382,24 @@ void Scene::RenderMainScene()
  	// End Of Main Scene Rendering ---------------------------------------------
  	//
  
@@ -1091,7 +1410,25 @@ index ebed069..ba2346d 100644
  
  
  
-@@ -2958,6 +3251,19 @@ void Scene::RenderVesselShadows (OBJHANDLE hPlanet, float depth) const
+@@ -2118,12 +2531,17 @@ void Scene::RenderMainScene()
+ 		gc->MakeRenderProcCall(pSketch, RENDERPROC_HUD_1ST, NULL, NULL);
+ 		pSketch->EndDrawing(); // SKETCHPAD_2D_OVERLAY
+ 	}
++	gc->ChromeDeferBegin();		// ORO patch (t): hold back the menu/info bar draws...
+ 	gc->Render2DOverlay();
+ 	pSketch = GetPooledSketchpad(SKETCHPAD_2D_OVERLAY);
+ 	if (pSketch) {
+ 		gc->MakeRenderProcCall(pSketch, RENDERPROC_HUD_2ND, NULL, NULL);
+ 		pSketch->EndDrawing(); // SKETCHPAD_2D_OVERLAY
+ 	}
++	gc->ChromeDeferFlush();		// ...and put them back ON TOP of the addon overlay, so a
++								// full-frame effect cannot smear Orbiter's own UI.
++								// UNCONDITIONAL, outside the pSketch guard on purpose: a
++								// frame with no pooled sketchpad must still get its bars.
+ 
+ 
+ 	// Enable Freeze mode after the main scene is complete
+@@ -2958,6 +3376,19 @@ void Scene::RenderVesselShadows (OBJHANDLE hPlanet, float depth) const
  	// If this planet is not a proxy body skip the rest
  	if (hPlanet != oapiCameraProxyGbody()) return;
  
@@ -1111,7 +1448,7 @@ index ebed069..ba2346d 100644
  	// render vessel shadows
  	VOBJREC *pv;
  	for (pv = vobjFirst; pv; pv = pv->next) {
-@@ -3406,6 +3712,8 @@ bool Scene::UpdateCameraFromOrbiter(DWORD dwPass)
+@@ -3406,6 +3837,8 @@ bool Scene::UpdateCameraFromOrbiter(DWORD dwPass)
  
  	oapiCameraGlobalDir(&Camera.dir);
  	oapiCameraRotationMatrix(&grot);
@@ -1120,7 +1457,7 @@ index ebed069..ba2346d 100644
  	D3DXMatrixIdentity(&Camera.mView);
  	D3DMAT_SetRotation(&Camera.mView, &grot);
  
-@@ -3688,6 +3996,10 @@ void Scene::RenderGlares()
+@@ -3688,6 +4121,10 @@ void Scene::RenderGlares()
  			if (WorldToScreenSpace2(pos, &pt))
  			{
  				float cis = 1.0f, glare = float(Config->GFXGlare) * saturate(8.0 * AU / sdst);
@@ -1132,7 +1469,7 @@ index ebed069..ba2346d 100644
  
  				vPlanet* vp = GetCameraNearVisual();
 diff --git a/OVP/D3D9Client/Scene.h b/OVP/D3D9Client/Scene.h
-index 917f38b..6338ebb 100644
+index 917f38b..e1eb624 100644
 --- a/OVP/D3D9Client/Scene.h
 +++ b/OVP/D3D9Client/Scene.h
 @@ -134,6 +134,10 @@ public:
@@ -1158,7 +1495,7 @@ index 917f38b..6338ebb 100644
  	LPDIRECT3DTEXTURE9 GetSunTexture() const { return pSunTex; }
  	LPDIRECT3DTEXTURE9 GetSunGlareAtm() const { return pSunGlareAtm; }
  
-@@ -355,6 +364,14 @@ public:
+@@ -355,6 +364,25 @@ public:
  	float			GetCameraNearPlane() const { return Camera.nearplane; }
  	float			GetCameraAperture() const { return (float)Camera.aperture; }
  	VECTOR3			GetCameraGPos() const { return Camera.pos; }
@@ -1168,12 +1505,23 @@ index 917f38b..6338ebb 100644
 +	// so anything a module projects there is one full step stale; world-anchored geometry at
 +	// close range (the ORO reentry trail) visibly jumps by one frame of camera travel.
 +	// Refreshed by UpdateCameraFromOrbiter at the top of every pass that renders the scene.
++	// ORO patch (u): while the wet-mirror render proc runs, GetRenderCam reports the
++	// MIRRORED camera instead of the real one. An addon drawing screen-space geometry
++	// into the reflection needs the camera that pass is rendering with, and it already
++	// asks this function for it - so the whole plumbing is a substitution, not a second
++	// API. See the pass in Scene.cpp for how the two fields are built.
++	bool			bMirrorCam;
++	VECTOR3			mirrorCamPos;
++	MATRIX3			mirrorCamRot;
++
 +	void			GetRenderCam(VECTOR3* p, MATRIX3* r, double* t) const {
-+						*p = Camera.pos; *r = Camera.grot; *t = tan((double)Camera.aperture); }
++						if (bMirrorCam) { *p = mirrorCamPos; *r = mirrorCamRot; }
++						else            { *p = Camera.pos;   *r = Camera.grot;  }
++						*t = tan((double)Camera.aperture); }
  	VECTOR3			GetCameraGDir() const { return Camera.dir; }
  	OBJHANDLE		GetCameraProxyBody() const { return Camera.hObj_proxy; }
  	vPlanet *		GetCameraProxyVisual() const { return Camera.vProxy; }
-@@ -519,6 +536,15 @@ private:
+@@ -519,6 +547,15 @@ private:
  	LPDIRECT3DTEXTURE9 pTextures[TEX_COUNT];
  
  	LPDIRECT3DSURFACE9 pEnvDS, pIrradDS, pDepthNormalDS;
@@ -1190,7 +1538,7 @@ index 917f38b..6338ebb 100644
  	LPDIRECT3DSURFACE9 psShmRT[SHM_LOD_COUNT];
  	LPDIRECT3DTEXTURE9 ptShmRT[SHM_LOD_COUNT];
 diff --git a/OVP/D3D9Client/Surfmgr2.cpp b/OVP/D3D9Client/Surfmgr2.cpp
-index 85278c8..1bfdad8 100644
+index 85278c8..0f813e5 100644
 --- a/OVP/D3D9Client/Surfmgr2.cpp
 +++ b/OVP/D3D9Client/Surfmgr2.cpp
 @@ -800,7 +800,12 @@ void SurfTile::Render ()
@@ -1207,7 +1555,7 @@ index 85278c8..1bfdad8 100644
  	}
  	
  	has_specular &= pShader->bWater;
-@@ -1097,6 +1102,44 @@ void SurfTile::Render ()
+@@ -1097,6 +1102,52 @@ void SurfTile::Render ()
  	pShader->SetVSConstants(pShader->PrmVS, sp, sizeof(ShaderParams));
  	pShader->SetPSConstants(pShader->Prm, sp, sizeof(ShaderParams));
  
@@ -1237,11 +1585,19 @@ index 85278c8..1bfdad8 100644
 +			extern float g_gcWetPoolReach;
 +			extern float g_gcWetGrainOp;
 +			extern float g_gcWetGrainSize;
++			// ⚠️ .z IS THE REFLECTION BLUR, AND IT MUST BE PUSHED HERE TOO (2026-08-24).
++			// The blur was first wired only into Scene.cpp's D3D9Effect push, which serves
++			// the BASE TILES. The planet shaders are a separate shader object with their
++			// own constant table - this block - so the terrain a vessel actually parks on
++			// never saw the value and the slider did nothing at either end of its range.
++			// THE SAME SWEEP THIS BLOCK'S OWN COMMENT DESCRIBES, four rounds later: any
++			// new wet parameter has to be pushed in BOTH places or it is silently half-wired.
++			extern float g_gcWetBlur;
 +			LPDIRECT3DTEXTURE9 pWR = ((Scene*)scene)->GetWetReflTex();
 +			float wrp[4] = { 1.0f / (float)scene->ViewW(), 1.0f / (float)scene->ViewH(),
 +			                 g_gcWetRefl, pWR ? 1.0f : 0.0f };
 +			float wsp[4] = { g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach };
-+			float wgp[4] = { g_gcWetGrainOp, g_gcWetGrainSize, 0.0f, 0.0f };
++			float wgp[4] = { g_gcWetGrainOp, g_gcWetGrainSize, g_gcWetBlur, 0.0f };
 +			pShader->SetPSConstants("gWetReflPrm", wrp, sizeof(wrp));
 +			pShader->SetPSConstants("gWetSwimPrm", wsp, sizeof(wsp));
 +			pShader->SetPSConstants("gWetGrainPrm", wgp, sizeof(wgp));
@@ -1297,7 +1653,7 @@ index bb0ab52..6028604 100644
  	double p = vessel->GetAtmDensity();
  	double v = vessel->GetAirspeed();
 diff --git a/OVP/D3D9Client/gcCore.cpp b/OVP/D3D9Client/gcCore.cpp
-index 76c0d04..c158756 100644
+index 76c0d04..9274f85 100644
 --- a/OVP/D3D9Client/gcCore.cpp
 +++ b/OVP/D3D9Client/gcCore.cpp
 @@ -42,6 +42,18 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
@@ -1332,7 +1688,7 @@ index 76c0d04..c158756 100644
  	if (strcmp(name,"DeletePoly")==0) *ppFnc = &gcCore2::DeletePoly;
  	if (strcmp(name,"GetTextLength")==0) *ppFnc = &gcCore2::GetTextLength;
  	if (strcmp(name,"GetCharIndexByPosition")==0) *ppFnc = &gcCore2::GetCharIndexByPosition;
-@@ -159,11 +177,214 @@ void gcCore::FlipSwap(HSWAP hSwap)
+@@ -159,11 +177,220 @@ void gcCore::FlipSwap(HSWAP hSwap)
  
  // ===============================================================================================
  //
@@ -1455,13 +1811,19 @@ index 76c0d04..c158756 100644
 +}
 +
 +// ORO patch (s) part 6.
-+void gcCore::SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach)
++float g_gcWetBlur      = 0.0f;   // ORO patch (s) part 6: reflection diffusion, 0 = crisp
++void gcCore::SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach, float fBlur)
 +{
 +	g_gcWetRefl      = (k < 0.0f) ? 0.0f : (k > 2.0f ? 2.0f : k);
 +	g_gcWetSwimAmp   = (fSwimAmp   < 0.0f) ? 0.0f : (fSwimAmp   > 2.0f ? 2.0f : fSwimAmp);
 +	g_gcWetSwimRate  = (fSwimRate  < 0.0f) ? 0.0f : (fSwimRate  > 2.0f ? 2.0f : fSwimRate);
-+	g_gcWetPoolSize  = (fPoolSize  < 0.0f) ? 0.0f : (fPoolSize  > 2.0f ? 2.0f : fPoolSize);
++	// ⚠️ POOL SIZE ALONE MAY GO NEGATIVE, TO -0.1 (2026-08-25). It is the only one of these
++	// that carries an OFF state below its range: the ground shaders fade standing water out
++	// over -0.1..0 so the addon can offer a wet apron with no pools on it, while the user's
++	// slider still reads a plain 0..2. Everything above 0 behaves exactly as before.
++	g_gcWetPoolSize  = (fPoolSize  < -0.1f) ? -0.1f : (fPoolSize  > 2.0f ? 2.0f : fPoolSize);
 +	g_gcWetPoolReach = (fPoolReach < 0.0f) ? 0.0f : (fPoolReach > 2.0f ? 2.0f : fPoolReach);
++	g_gcWetBlur      = (fBlur      < 0.0f) ? 0.0f : (fBlur      > 2.0f ? 2.0f : fBlur);
 +}
 +
 +// ORO patch (s) part 7: the pool grain.
@@ -1549,7 +1911,7 @@ index 76c0d04..c158756 100644
  // ===============================================================================================
  //
  void gcCore::ReleaseSwap(HSWAP hSwap) 
-@@ -269,6 +490,109 @@ HPOLY gcCore::CreateTriangles(HPOLY hPoly, const gcCore::clrVtx *pt, int npt, DW
+@@ -269,6 +496,109 @@ HPOLY gcCore::CreateTriangles(HPOLY hPoly, const gcCore::clrVtx *pt, int npt, DW
  }
  
  
@@ -1660,7 +2022,7 @@ index 76c0d04..c158756 100644
  //
  void gcCore::DeletePoly(HPOLY hPoly)
 diff --git a/OVP/D3D9Client/gcCore.h b/OVP/D3D9Client/gcCore.h
-index f8634ac..57b850b 100644
+index f8634ac..6204ab3 100644
 --- a/OVP/D3D9Client/gcCore.h
 +++ b/OVP/D3D9Client/gcCore.h
 @@ -16,6 +16,11 @@
@@ -1675,15 +2037,16 @@ index f8634ac..57b850b 100644
  class gcCore;
  class gcCore2;
  
-@@ -57,6 +62,7 @@ static class gcCore2 *pCoreInterface = NULL;
+@@ -57,6 +62,8 @@ static class gcCore2 *pCoreInterface = NULL;
  #define RENDERPROC_HUD_2ND				0x0002	///< Register a HUD callback to draw over Orbiter's main HUD
  #define RENDERPROC_PLANETARIUM			0x0003	///< Register a HUD callback to draw into a planetarium view using perspective projection
  #define RENDERPROC_EXTERIOR				0x0005  ///< Register a callback to draw into an exterior vessel view using perspective projection
 +#define RENDERPROC_PRE_RESOLVE			0x0006  ///< ORO patch (i): fires after the complete scene (terrain, vessels, transparency, VC) but BEFORE the light-blur resolve/tonemap and the HUD. Art drawn here participates in HDR bloom when PostProcess=1 (the render target is still the fp16 offscreen buffer). Ortho pixel coordinates (NULL matrices), same contract as the HUD stages.
++#define RENDERPROC_WET_MIRROR			0x0007  ///< ORO patch (u): fires INSIDE the wet-ground planar reflection pass (patch (s) part 6), after the mirrored meshes/exhausts/beacons/streams and before the render target is popped. The bound target is the half-res reflection texture, NOT the backbuffer - ask the Sketchpad for its size with GetRenderSurfaceSize() rather than assuming the viewport. For its duration GetRenderCam() reports the MIRRORED camera, so an addon that already projects against the render camera needs no second camera path. That camera is a PURE planar mirror and its basis is therefore left-handed: the pass draws its own meshes through an extra clip-space X flip to keep their winding legal, so the RT holds a horizontally mirrored image which the ground shaders undo when sampling. CPU-projected geometry receives no such flip and must mirror its own screen X to match. Scene depth (patch g) belongs to the MAIN camera and must not be used here. Fires only while the ground is wet and the camera is 1..250 m AGL; ortho pixel coordinates (NULL matrices), same contract as the HUD stages.
  ///@}
  
  
-@@ -360,6 +366,15 @@ public:
+@@ -360,6 +367,15 @@ public:
  		DWORD color;
  	} clrVtx;
  
@@ -1699,7 +2062,7 @@ index f8634ac..57b850b 100644
  
  	// ===========================================================================
  	/// \name Custom swap-chain management functions
-@@ -387,6 +402,156 @@ public:
+@@ -387,6 +403,159 @@ public:
  	*/
  	gc_interface SURFHANDLE GetRenderTarget(HSWAP hSwap);
  
@@ -1841,8 +2204,11 @@ index f8634ac..57b850b 100644
 +	*   Clamped to 0..2.
 +	* \param fPoolReach Pool visibility distance scale, 1 = designed (~900 m e-fold),
 +	*   0 = camera vicinity only. Clamped to 0..2.
++	* \param fBlur Diffusion of the reflected image. 0 = the crisp mirror as shipped,
++	*   higher spreads it. Wet ground is not a mirror - it scatters - so a little of
++	*   this is the physically honest look. Clamped to 0..2.
 +	*/
-+	gc_interface void SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach);
++	gc_interface void SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach, float fBlur);
 +
 +	/**
 +	* \brief ORO patch (s) part 7: the pool-grain controls - the broken-water texture
@@ -1856,7 +2222,7 @@ index f8634ac..57b850b 100644
  	/**
  	* \brief Release a swap object after it's no longer needed.
  	* \param hSwap Handle to a swap object.
-@@ -487,6 +652,86 @@ public:
+@@ -487,6 +656,86 @@ public:
  	gc_interface HPOLY CreateTriangles(HPOLY hPoly, const clrVtx* pt, int npt, DWORD flags);
  
  
@@ -2027,7 +2393,7 @@ index 471df00..6e4274b 100644
  #include "Mesh.fx"
  #include "Vessel.fx"
 diff --git a/OVP/D3D9Client/shaders/Mesh.fx b/OVP/D3D9Client/shaders/Mesh.fx
-index 970908d..3732cf6 100644
+index 970908d..38fc548 100644
 --- a/OVP/D3D9Client/shaders/Mesh.fx
 +++ b/OVP/D3D9Client/shaders/Mesh.fx
 @@ -171,7 +171,24 @@ TileMeshVS BaseTileVS(NTVERTEX vrt)
@@ -2056,7 +2422,7 @@ index 970908d..3732cf6 100644
  {
  	// Normalize input
  	float3 nrmW = normalize(frg.nrmW);
-@@ -185,10 +202,188 @@ float4 BaseTilePS(TileMeshVS frg) : COLOR
+@@ -185,10 +202,208 @@ float4 BaseTilePS(TileMeshVS frg) : COLOR
  
  	if (d<=0) s = 0;
  
@@ -2146,6 +2512,10 @@ index 970908d..3732cf6 100644
 +		float  pud = saturate(p1 * 1.30f - 0.16f + 0.30f * gSurfWet + p3 * 0.35f)
 +		           * saturate(p2 * 1.10f + 0.35f + 0.25f * gSurfWet);
 +		pud = saturate(pud * 1.6f) * saturate((gSurfWet - 0.70f) / 0.30f);
++		// POOLS OFF AT THE BOTTOM OF THE SLIDER - see the matching note in NewPlanet.hlsl.
++		// Both ground paths, together this time: the runway is a base tile and the apron
++		// is terrain, and patch (s) has now been caught half-wired twice for exactly that.
++		pud *= saturate(gWetSwimPrm.z * 10.0f + 1.0f);
 +		pud *= exp(-dstB / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
 +
 +		float wet = gSurfWet;
@@ -2209,10 +2579,26 @@ index 970908d..3732cf6 100644
 +			ruv += float2(sin(gWetTime * 12.0f * gWetSwimPrm.y + uvT.y * 4.0f),
 +			              cos(gWetTime *  9.7f * gWetSwimPrm.y + uvT.x * 4.0f))
 +			     * (0.0005f + 0.0016f * pud) * gWetSwimPrm.x;
-+			float  smr = gWetReflPrm.y * 3.2f;                   // shorter smear
++			// REFLECTION BLUR (2026-08-24, gWetGrainPrm.z - see the note in Scene.cpp;
++			// it rides the grain vector only because gWetReflPrm has no spare channel).
++			// Wet ground is not a mirror: it scatters, and the reflection should be
++			// slightly diffuse. The knob stretches the existing vertical smear and, past
++			// zero, opens a lateral pair as well. AT 0 THE THREE TAPS AND THEIR WEIGHTS
++			// ARE EXACTLY AS SHIPPED, so the approved crisp look is bit-identical; the
++			// widening branch is uniform-driven, so every pixel takes the same path and
++			// it costs nothing while the slider is down.
++			float  blur = gWetGrainPrm.z;
++			float  smr = gWetReflPrm.y * 3.2f * (1.0f + 7.0f * blur);   // shorter smear
 +			float4 cVes = tex2D(WetReflS, ruv) * 0.5f
 +			            + tex2D(WetReflS, ruv + float2(0, smr)) * 0.3f
 +			            + tex2D(WetReflS, ruv + float2(0, smr * 2.5f)) * 0.2f;
++			if (blur > 0.001f) {
++				float  hor = gWetReflPrm.x * 9.0f * blur;
++				float4 wide = tex2D(WetReflS, ruv + float2( hor, 0))
++				            + tex2D(WetReflS, ruv + float2(-hor, 0))
++				            + tex2D(WetReflS, ruv + float2(0, -smr * 0.6f));
++				cVes = lerp(cVes, cVes * 0.4f + wide * 0.2f, saturate(blur));
++			}
 +			float  rStr = cVes.a * saturate(0.35f + 0.90f * mirror)
 +			            * saturate(0.55f * wet + 1.10f * pud) * gWetReflPrm.z;
 +			clr = lerp(clr, cVes.rgb, saturate(rStr));
@@ -2322,7 +2708,7 @@ index 618ba0b..337212f 100644
  	// Override material alpha to make reflections visible
  	cDiff.a = saturate(cDiff.a + cmax(zS + cE));
 diff --git a/OVP/D3D9Client/shaders/NewPlanet.hlsl b/OVP/D3D9Client/shaders/NewPlanet.hlsl
-index 5b43b27..abd6b65 100644
+index 5b43b27..382f0d4 100644
 --- a/OVP/D3D9Client/shaders/NewPlanet.hlsl
 +++ b/OVP/D3D9Client/shaders/NewPlanet.hlsl
 @@ -111,6 +111,13 @@ struct PerObjectParams
@@ -2408,7 +2794,7 @@ index 5b43b27..abd6b65 100644
  	// Lit the texture with various things
  	cTex.rgb *= cL * 2.0f + (cA + cDiffLocal + Const.cAmbient * Const.Ambient) * saturate(1.0f + fG + fZ) + cNgt;
  
-@@ -687,15 +733,158 @@ float4 TerrainPS(TileVS frg) : COLOR
+@@ -687,15 +733,179 @@ float4 TerrainPS(TileVS frg) : COLOR
  	cTex.rgb += cRfl * 0.75f;
  
  	// Add Specular component
@@ -2486,6 +2872,14 @@ index 5b43b27..abd6b65 100644
 +		float  pud = saturate(p1 * 1.30f - 0.16f + 0.30f * gWet + p3 * 0.35f)
 +		           * saturate(p2 * 1.10f + 0.35f + 0.25f * gWet);
 +		pud = saturate(pud * 1.6f) * saturate((gWet - 0.70f) / 0.30f);
++		// ⚠️ POOLS OFF AT THE BOTTOM OF THE SLIDER (2026-08-25, his spec). Pool size only
++		// ever set the lattice SCALE, and 1/max(0.35, z) floors it - so a slider at zero
++		// still produced a fine mesh of small pools and there was no way to have a merely
++		// WET apron with no standing water. The knob now runs -0.1..2 underneath while
++		// still reading 0..2, and this is where the negative tenth cashes in: 0 at z=-0.1,
++		// full by z=0, so the old bottom-of-range look is exactly the new 0.1 and the
++		// first twentieth of the travel fades the pools in instead of popping them.
++		pud *= saturate(gWetSwimPrm.z * 10.0f + 1.0f);
 +		pud *= exp(-dst / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
 +
 +		cTex.rgb *= saturate(lerp(1.0f, 1.0f - 0.494f * gWetDark, gWet));   // recalibrated x2: full track = old 0..1.3
@@ -2541,10 +2935,23 @@ index 5b43b27..abd6b65 100644
 +			ruv += float2(sin(Const.Time * 10.8f * gWetSwimPrm.y + vUVSrf.x * 43.0f),
 +			              cos(Const.Time *  8.5f * gWetSwimPrm.y + vUVSrf.y * 43.0f))
 +			     * (0.0007f * gWetSwimPrm.x);
-+			float  smr = gWetReflPrm.y * 3.2f;
++			// REFLECTION BLUR (2026-08-24, gWetGrainPrm.z - see the note in Scene.cpp;
++			// it rides the grain vector only because gWetReflPrm has no spare channel).
++			// Wet ground scatters rather than mirroring, so a little diffusion is the
++			// honest look. AT 0 THE TAPS AND WEIGHTS ARE EXACTLY AS SHIPPED; the widening
++			// branch is uniform-driven, so it is free while the slider is down.
++			float  blur = gWetGrainPrm.z;
++			float  smr = gWetReflPrm.y * 3.2f * (1.0f + 7.0f * blur);
 +			float4 cVes = tex2D(tWetRefl, ruv) * 0.5f
 +			            + tex2D(tWetRefl, ruv + float2(0, smr)) * 0.3f
 +			            + tex2D(tWetRefl, ruv + float2(0, smr * 2.5f)) * 0.2f;
++			if (blur > 0.001f) {
++				float  hor = gWetReflPrm.x * 9.0f * blur;
++				float4 wide = tex2D(tWetRefl, ruv + float2( hor, 0))
++				            + tex2D(tWetRefl, ruv + float2(-hor, 0))
++				            + tex2D(tWetRefl, ruv + float2(0, -smr * 0.6f));
++				cVes = lerp(cVes, cVes * 0.4f + wide * 0.2f, saturate(blur));
++			}
 +			float  rStr = cVes.a * saturate(0.30f + 2.2f * fresW)
 +			            * saturate(0.70f * gWet + 1.25f * pud) * 0.85f * gWetReflPrm.z * gran;
 +			cTex.rgb = lerp(cTex.rgb, cVes.rgb, saturate(rStr));
@@ -2568,7 +2975,7 @@ index 5b43b27..abd6b65 100644
  	cTex.rgb *= fECL;	// Apply eclipse
  	cTex.rgb += cNgt2;
  
-@@ -712,6 +901,18 @@ float4 TerrainPS(TileVS frg) : COLOR
+@@ -712,6 +922,18 @@ float4 TerrainPS(TileVS frg) : COLOR
  // Planet Cloud Renderer
  // ============================================================================
  
@@ -2587,7 +2994,7 @@ index 5b43b27..abd6b65 100644
  CldVS CloudVS(TILEVERTEX vrt)
  {
  	// Zero output.
-@@ -878,8 +1079,11 @@ float4 CloudPS(CldVS frg) : COLOR
+@@ -878,8 +1100,11 @@ float4 CloudPS(CldVS frg) : COLOR
  		cTex.rgb += sct.ray.rgb;
  		cTex.rgb *= fECL;
  

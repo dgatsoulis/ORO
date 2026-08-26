@@ -56,8 +56,12 @@
 
 namespace {
 
-	enum { BELL_MAIN = 0, BELL_HOVER, BELL_RETRO, BELL_USER, BELL_NFAM };
-	const char* FAM_NAME[BELL_NFAM] = { "MAIN", "HOVER", "RETRO", "USER" };
+	// ⚠️ THESE MIRROR ORO_THR_* EXACTLY - same order, same meaning - because the family
+	// index IS the group index (invariant 26i). RCS was appended on 2026-08-25 with the
+	// group; a mesh with no "RCS" LABEL simply has no RCS family, which is the usual
+	// every-missing-piece-is-INERT rule and needs no author to do anything.
+	enum { BELL_MAIN = 0, BELL_HOVER, BELL_RETRO, BELL_USER, BELL_RCS, BELL_NFAM };
+	const char* FAM_NAME[BELL_NFAM] = { "MAIN", "HOVER", "RETRO", "USER", "RCS" };
 
 	// Thermal timescales are USER SLIDERS now (2026-08-09, his ask):
 	//   Heat time = seconds to full glow at 100% thrust -> tau = t/3 (95% at 3 tau),
@@ -375,6 +379,22 @@ void OroModule::UpdateBellGlow(double simdt)
 		case BELL_HOVER: lvl = v->GetThrusterGroupLevel(THGROUP_HOVER); break;
 		case BELL_RETRO: lvl = v->GetThrusterGroupLevel(THGROUP_RETRO); break;
 		case BELL_USER:  lvl = BellUserLevel(v);                        break;
+		// The strongest attitude group firing right now. RCS is pulsed, so this is a
+		// spiky input by nature - the thermal model's own lag is what turns it into a
+		// glow that swells and fades rather than strobing with the jets.
+		case BELL_RCS: {
+			static const THGROUP_TYPE att[] = {
+				THGROUP_ATT_PITCHUP, THGROUP_ATT_PITCHDOWN, THGROUP_ATT_YAWLEFT,
+				THGROUP_ATT_YAWRIGHT, THGROUP_ATT_BANKLEFT, THGROUP_ATT_BANKRIGHT,
+				THGROUP_ATT_RIGHT, THGROUP_ATT_LEFT, THGROUP_ATT_UP, THGROUP_ATT_DOWN,
+				THGROUP_ATT_FORWARD, THGROUP_ATT_BACK
+			};
+			for (int a = 0; a < (int)(sizeof(att) / sizeof(att[0])); a++) {
+				const double l = v->GetThrusterGroupLevel(att[a]);
+				if (l > lvl) lvl = l;
+			}
+			break;
+		}
 		}
 		double T = (double)s_T[k];
 		const double Teq = pow(lvl, 0.25);       // radiative equilibrium: throttle^(1/4) -

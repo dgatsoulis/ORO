@@ -306,9 +306,9 @@ void OroRain_ShieldReset() { s_shieldClass[0] = 0; s_shieldTri.clear(); }
 // ============================================================================
 void OroModule::UpdateRain()
 {
-	s_rnValid = false;
-	s_gateF   = 0.0f;
-
+	// (s_rnValid / s_gateF are reset by SenseRain, which owns them now - see the split
+	//  note above that function. This half only EVOLVES the storm; it decides nothing
+	//  about where or whether it can be drawn.)
 	const float dt = (float)oapiGetSysStep();   // REAL time (invariant 4)
 	const bool  want = (g_fx.rainEnabled || g_fx.rainTest) && g_fx.masterArmed;
 
@@ -367,7 +367,32 @@ void OroModule::UpdateRain()
 	// for months. Different thing.
 	if (want && g_fx.rainWet < g_fx.rainI)
 		g_fx.rainWet = clampf(g_fx.rainWet + dt / WET_RISE, 0.0f, g_fx.rainI);
+}
 
+// ============================================================================
+// SENSE THE RAIN - where we are, and whether the storm can be drawn from here.
+//
+// ⚠️ SPLIT OUT OF UpdateRain 2026-08-24, AND THE SPLIT IS THE WHOLE FIX. A public-beta
+// tester found three separate symptoms with one cause: pause near the ground and fly the
+// camera to orbit and you keep the grey sky and the raindrops in space; pause in an
+// external view, switch to the VC, and the drops are inside the cabin. Both are this
+// function's answers going STALE, because it used to live in UpdateRain, and
+// clbkPreStep is not called while paused (Orbiter.cpp's UpdateWorld: "if (bRunning)
+// ModulePreStep()").
+//
+// THE LINE IS: WHAT SENSES THE WORLD RUNS EVERY FRAME; WHAT EVOLVES OVER TIME DOES NOT.
+// Everything here is a question about NOW - which view, which world, how high is the
+// camera, is the sun up - so it is re-asked every frame from clbkProcessKeyboardImmediate
+// (see OroModule.cpp), which the core calls whether or not the sim is running. Nothing
+// here accumulates, so calling it twice in a frame is harmless and that is what makes the
+// split safe. The storm's own build-up, and the wetness soaking in behind it, stay in
+// UpdateRain and stay frozen under pause - HIS RULE, and the better one: no sim time
+// passes, so nothing should get wetter.
+// ============================================================================
+void OroModule::SenseRain()
+{
+	s_rnValid = false;
+	s_gateF   = 0.0f;
 	g_fx.rainWhy[0] = 0;
 	rainIntensityLive = 0.0f;
 	if (g_fx.rainI <= 0.002f) return;
@@ -377,7 +402,7 @@ void OroModule::UpdateRain()
 	// blocker is the missing depth buffer, SAY SO (invariant 20g: the degradation
 	// must not be silent) - "external only" would send someone outside when the fix
 	// is turning Sun glare on.
-	if (!extGate && !rainVC) {
+	if (!extGate && !rainVC && !rainPanel) {
 		const bool vcv = oapiCameraInternal() && (oapiCockpitMode() == COCKPIT_VIRTUAL);
 		strcpy_s(g_fx.rainWhy, sizeof(g_fx.rainWhy), vcv ? "VC: SunGlare off" : "external only");
 		return;
@@ -675,16 +700,24 @@ void OroModule::PushSurfaceWet()
 		float rf = clampf(g_fx.rainRefl,      0.0f, 2.0f);
 		float sa = clampf(g_fx.rainSwimAmp,   0.0f, 2.0f);
 		float sr = clampf(g_fx.rainSwimRate,  0.0f, 2.0f);
-		float ps = clampf(g_fx.rainPoolSize,  0.0f, 2.0f);
+		// ⚠️ POOL SIZE IS REMAPPED (2026-08-25, his spec): the slider still reads 0..2, but
+		// it drives -0.1..2 underneath, and the shaders fade the pools out across that
+		// negative tenth. So 0 finally means NO STANDING WATER - previously the bottom of
+		// the range still produced a fine mesh of small pools, because the control only
+		// ever set the lattice SCALE and the shader floors that at 0.35. Today's bottom
+		// end is now the 0.1 mark, exactly as he specified.
+		float ps = -0.1f + 1.05f * clampf(g_fx.rainPoolSize, 0.0f, 2.0f);
 		float pr = clampf(g_fx.rainPoolReach, 0.0f, 2.0f);
+		float bl = clampf(g_fx.rainReflBlur,  0.0f, 2.0f);
 		if (fabsf(rf - reflPushed)      >= 0.002f ||
 		    fabsf(sa - swimAmpPushed)   >= 0.002f ||
 		    fabsf(sr - swimRatePushed)  >= 0.002f ||
 		    fabsf(ps - poolSizePushed)  >= 0.002f ||
-		    fabsf(pr - poolReachPushed) >= 0.002f) {
+		    fabsf(pr - poolReachPushed) >= 0.002f ||
+		    fabsf(bl - reflBlurPushed)  >= 0.002f) {
 			reflPushed = rf; swimAmpPushed = sa; swimRatePushed = sr;
-			poolSizePushed = ps; poolReachPushed = pr;
-			pCore->SetWetReflection(rf, sa, sr, ps, pr);
+			poolSizePushed = ps; poolReachPushed = pr; reflBlurPushed = bl;
+			pCore->SetWetReflection(rf, sa, sr, ps, pr, bl);
 		}
 	}
 	if (pCore->CanSetWetGrain()) {
@@ -770,7 +803,13 @@ void OroModule::UpdateRainSound()
 	w[0] = (1.0f - sstep(0.30f, 0.65f, e)) * inGain;                          // light
 	w[1] = sstep(0.12f, 0.45f, e) * (1.0f - sstep(0.60f, 0.92f, e)) * inGain; // medium
 	w[2] = sstep(0.50f, 0.88f, e) * inGain;                                   // heavy
-	w[3] = interior ? (0.55f + 0.45f * sstep(0.10f, 0.60f, e)) : 0.0f;        // hull taps
+	// ⚠️ THE HULL LOOP CARRIES ITS OWN VOLUME (2026-08-25, a tester's ask). It is the
+	// one layer that is about the SHIP rather than the weather - some people want the
+	// storm without the drumming - and folding it into Rain sound meant the whole
+	// outside mix had to move to quiet it. Divided by the shared uv below so the knob
+	// is genuinely independent rather than multiplying the storm volume twice.
+	const float hv = (uv > 0.001f) ? clampf(g_fx.rainHullVol, 0.0f, 2.0f) / uv : 0.0f;
+	w[3] = interior ? (0.55f + 0.45f * sstep(0.10f, 0.60f, e)) * hv : 0.0f;   // hull taps
 
 	// ^0.7 so the patter is audibly present early in the build-up (a linear map
 	// leaves the first seconds inaudible); 0.65 is the designed full-storm
@@ -971,10 +1010,46 @@ void OroModule::BuildRainGeometry()
 	east = east / el;
 	const VECTOR3 north = crossp(up, east);
 
-	const float camE = (float)dotp(camRel, east);
-	const float camN = (float)dotp(camRel, north);
+	// ⚠️ camE/camN LIVED HERE AND WERE IDENTICALLY ZERO. BOTH CONSUMERS ARE ANCHORED
+	// NOW, so they are gone (2026-08-25). east and north were both built PERPENDICULAR
+	// TO up = camRel/camR just above, so dotp(camRel, east) was camR * dotp(up, east) = 0,
+	// always - two places added them to a world coordinate and therefore added nothing.
+	// The splash lattice was fixed first, after a tester reported the rings sliding (see
+	// the anchor down in the splash section); the CLOUD-DECK BILLOW was knowingly left
+	// camera-anchored for one session, because the deck look was already approved and
+	// nobody had reported it. His call to sweep it was the right one.
+	// ⚠️ THE TWO FIXES ARE DELIBERATELY NOT THE SAME FIX. The lattice needed a stored
+	// planet-fixed reference because it has no other world coordinate to ride. The deck
+	// already had one - its TEXTURE has always been laid out in lon/lat metres - so the
+	// billow simply joined it. That is strictly better here: no stored reference means
+	// no ~10 km re-anchor, and a 1500 m billow would have shown that jump far more
+	// plainly than a field of sub-pixel rings ever could.
 	const float camU = (float)camR;
 	const float camAGL = camU - (float)s_rn.groundR;
+
+	// ⚠️ THE CAMERA'S PLANET-FIXED HORIZONTAL POSITION (2026-08-25), and the splash
+	// lattice was going without it. The header note above promises that ring positions
+	// have "the camera's own offset subtracted BEFORE the wrap - so a ring stays where it
+	// landed instead of sliding with the viewer". What was being subtracted was camE/camN,
+	// which are zero by construction (see immediately above), so the subtraction was a
+	// no-op and the entire splash field was GLUED TO THE CAMERA. A public-beta tester
+	// reported it exactly: "splashes on the ground move relative to the ground towards the
+	// camera as it rotates in the external view. In VC it looks correct." The second half
+	// of that sentence is the proof rather than an aside - in a cockpit the camera hardly
+	// translates, so a camera-glued field and a world-anchored one look the same.
+	//
+	// The fix is to measure the camera against a planet-fixed point ON THE GROUND - see
+	// the lattice anchor down in the splash section, where the vessel offset already is.
+	//
+	// ⚠️ AND THE FIRST ATTEMPT AT THAT FIX WAS WRONG IN A WAY WORTH KEEPING WRITTEN DOWN
+	// (2026-08-25). It used the camera's arc-length position in the planet's own rotating
+	// frame - R*cos(lat)*lon east, R*lat north - which IS planet-fixed and does track the
+	// camera. But plate-carree is NOT LOCALLY ISOMETRIC: the east coordinate carries a
+	// cos(lat) factor, so moving NORTH changes it too, by -sin(lat)*lon per radian. At KSC
+	// that is 0.67 m of spurious east shift per metre travelled north. He found it in one
+	// pass and described it exactly - rotating in place was clean (lat and lon do not
+	// change), translating slid sideways. A COORDINATE BEING PLANET-FIXED IS NOT ENOUGH;
+	// it also has to measure distance the same way in every direction.
 
 	const float t = (float)animT;                    // REAL time (invariant 4)
 
@@ -1147,9 +1222,32 @@ void OroModule::BuildRainGeometry()
 				for (int az = 0; az <= DK_AZ; az++) {
 					const float th = (float)(az % DK_AZ) / (float)DK_AZ * 6.2831853f;
 					const float ca = cosf(th), sa = sinf(th);
-					// the billow comes FIRST now: it displaces the surface (the sag)
-					const float wx = (camE + ca * rH) * (1.0f / 1500.0f);
-					const float wy = (camN + sa * rH) * (1.0f / 1500.0f);
+
+					// THE DECK SAMPLE'S PLANET-FIXED GROUND COORDINATE (2026-08-25).
+					// It is the coordinate the deck's TEXTURE has always ridden, and the
+					// billow now rides it too - so texels and billow cannot disagree about
+					// where a metre lies (the lightning's one-CellBasis rule), and it needs
+					// no stored reference, so unlike the splash lattice it can never pop on
+					// a re-anchor. A 1500 m billow would have shown that far more plainly
+					// than a field of sub-pixel rings ever could.
+					// Taken from the UNSAGGED point, which is what breaks the circle - the
+					// sag needs the billow and the billow needs this. Displacing a sample
+					// along the camera's up by <= 110 m moves its ground track by sag*rH/R,
+					// about 1.4 m out at the horizon ring, against a 13 km texture repeat.
+					const VECTOR3 P0 = cc.pos + east * (ca * rH) + north * (sa * rH)
+					                 + up * (double)dhL;
+					VECTOR3 dpd = P0 - pC;
+					dpd = dpd / length(dpd);
+					double sl = dotp(dpd, s_rn.axis);
+					if (sl > 1.0) sl = 1.0; else if (sl < -1.0) sl = -1.0;
+					const double lat = asin(sl);
+					const double lon = atan2(dotp(dpd, pe2), dotp(dpd, pe1));
+					const double um  = lon * s_rn.groundR * cos(lat);
+					const double vm  = lat * s_rn.groundR;
+
+					// the billow comes FIRST: it displaces the surface (the sag)
+					const float wx = (float)(um * (1.0 / 1500.0));
+					const float wy = (float)(vm * (1.0 / 1500.0));
 					const float b1 = sinf(wx * 1.9f + sinf(wy * 2.6f) + t * 0.020f)
 					               * sinf(wy * 1.5f + sinf(wx * 2.1f) - t * 0.014f);
 					const float b2 = sinf(wx * 5.3f - t * 0.031f) * sinf(wy * 4.7f + t * 0.026f);
@@ -1157,23 +1255,14 @@ void OroModule::BuildRainGeometry()
 					// heavy masses hang DOWN, weighted by elevation so the horizon
 					// rings stay put and the feather stays a feather
 					const float sag = LAY_SAG[Ld] * b1 * aEl;
-					const VECTOR3 P = cc.pos + east * (ca * rH) + north * (sa * rH)
-					                + up * (double)(dhL - sag);
+					const VECTOR3 P = P0 - up * (double)sag;
 					double pz;
 					dko[e2][az] = ProjPx(cc, P, viewW, viewH, dkx[e2][az], dky[e2][az], pz);
 					dkd[e2][az] = dist;
 
-					// the texture UV: planet-fixed lon/lat metres, per-layer repeat +
-					// rotation + drift (round 9's anti-tiling law, now across altitudes)
+					// the texture UV: the SAME planet-fixed metres the billow just used,
+					// per-layer repeat + rotation + drift (round 9's anti-tiling law)
 					if (useTex) {
-						VECTOR3 dpd = P - pC;
-						dpd = dpd / length(dpd);
-						double sl = dotp(dpd, s_rn.axis);
-						if (sl > 1.0) sl = 1.0; else if (sl < -1.0) sl = -1.0;
-						const double lat = asin(sl);
-						const double lon = atan2(dotp(dpd, pe2), dotp(dpd, pe1));
-						const double um = lon * s_rn.groundR * cos(lat);
-						const double vm = lat * s_rn.groundR;
 						const double ur = um * LAY_ROTC[Ld] - vm * LAY_ROTS[Ld];
 						const double vr = um * LAY_ROTS[Ld] + vm * LAY_ROTC[Ld];
 						dku[e2][az] = (float)(ur * ((double)rainCloudN / LAY_REP[Ld])) + t * LAY_DRIFT[Ld] * ((float)rainCloudN * (1.0f / 1024.0f));
@@ -1565,11 +1654,54 @@ void OroModule::BuildRainGeometry()
 		}
 		const int   nFld = vField ? 2 : 1;
 
+		// ⚠️ THE LATTICE ANCHOR (2026-08-25, third attempt and the one that is actually
+		// right) - what makes the rings stay on the ground.
+		//
+		// Attempt 1 subtracted camE/camN, which are structurally zero, so the field was
+		// glued to the CAMERA. Attempt 2 used the VESSEL, which is a real planet-fixed
+		// point measured through an orthonormal basis - correct while parked, and he
+		// immediately found the hole by taxiing: the anchor moves with the ship, so the
+		// splashes taxi with it.
+		//
+		// What is needed is a point on the WORLD that neither the camera nor the vessel
+		// drags around, and a sphere offers no globally isometric flat coordinate - so we
+		// keep our own reference and measure against it. lon/lat against a FIXED reference
+		// latitude is isometric to second order over the field's few hundred metres: with
+		// cos() evaluated at the REFERENCE rather than at the moving point, travelling
+		// north no longer bleeds into the east coordinate, which is precisely what broke
+		// the plate-carree attempt.
+		// Re-anchored only after ~10 km of travel, so a taxi never triggers it; when it
+		// does fire the lattice reshuffles for one frame, at a distance and speed where
+		// the rings are sub-pixel or gated off anyway.
+		const VECTOR3 pY = crossp(s_rn.axis, s_rn.pax1);
+		double sLat = dotp(camRel, s_rn.axis) / camR;
+		if (sLat >  1.0) sLat =  1.0;
+		if (sLat < -1.0) sLat = -1.0;
+		const double camLat = asin(sLat);
+		const double camLon = atan2(dotp(camRel, pY), dotp(camRel, s_rn.pax1));
+
+		double dLon = camLon - ringRefLon;
+		while (dLon >  PI) dLon -= PI2;          // the antimeridian, handled once here
+		while (dLon < -PI) dLon += PI2;
+		double refE = camR * cos(ringRefLat) * dLon;
+		double refN = camR * (camLat - ringRefLat);
+		if (ringRefBody != s_rn.hRef || fabs(refE) > 10000.0 || fabs(refN) > 10000.0) {
+			ringRefBody = s_rn.hRef;
+			ringRefLon  = camLon;
+			ringRefLat  = camLat;
+			refE = 0.0;
+			refN = 0.0;
+		}
+		const float camAE = (float)refE;         // metres east of the reference
+		const float camAN = (float)refN;         // metres north of it
+
 	  for (int fld = 0; fld < nFld; fld++) {
 		const float fE = (fld == 1) ? vfE : 0.0f;
 		const float fN = (fld == 1) ? vfN : 0.0f;
 	  for (int st = 0; st < 3; st++) {
 		const float FIELD = STRAT_FIELD[st];
+		const float camFE = camAE;      // the lattice anchor - see the note above
+		const float camFN = camAN;
 		const int   NRING = (int)(STRAT_N[st]
 		                          * clampf(g_fx.rainPuddle * 0.5f, 0.0f, 1.0f) * I);
 		const int   jofs  = st * 7919 + fld * 33331; // separate hash streams per stratum+field
@@ -1588,8 +1720,8 @@ void OroModule::BuildRainGeometry()
 			// fE/fN slide the wrap window so the field tiles around its OWN centre -
 			// the camera for field 0, the vessel for field 1 - while the ring positions
 			// stay functions of world coordinates either way.
-			const float dx = fE + wrapc(ox - camE - fE, FIELD);
-			const float dy = fN + wrapc(oy - camN - fN, FIELD);
+			const float dx = fE + wrapc(ox - camFE - fE, FIELD);
+			const float dy = fN + wrapc(oy - camFN - fN, FIELD);
 
 			// ⚠️ THE HULL IS AN UMBRELLA (round 4, his screenshot: splashes under the
 			// vessel "exactly where the raindrops shouldn't be able to reach"). The
@@ -1720,209 +1852,3 @@ void OroModule::BuildRainGeometry()
 }
 
 
-// ============================================================================
-// THE WATER SHEET (2026-08-22) - HIS DESIGN, and the reasoning is the point: after
-// three rounds of planar-mirror machinery, "what if we add a flat reflective mesh
-// under the vessel and let the client's own reflection system do the work?" Entirely
-// stock rendering - the env-map cubemaps his Reflection settings already drive - so
-// there is NO new client code in this path at all.
-//
-// WHAT IT REFLECTS, honestly: the sky (the grey overcast the reference is full of),
-// the buildings, the terrain, and OTHER vessels - but NOT its own carrier, because
-// vVessel::RenderENVMap erases the owner from its own env map unless ENVCAM_FOCUS is
-// set (VVessel.cpp:1199). Each DG's pool shows the OTHER DG. The planar mirror
-// (Reflection slider) remains the way to see a ship in its own puddle; the two
-// compose, and both have their own slider.
-//
-// CONSTRUCTION NOTES:
-//  - Untextured BY NECESSITY: a code-built mesh cannot grow texture slots
-//    (D3D9Mesh::SetTexture rejects texidx >= nTex, and there is no oapiAddTexture).
-//    23(f2) cuts the knot: UNtextured groups honour material alpha directly - so the
-//    edge blend is four concentric ring bands with per-ring materials fading out.
-//  - The outline is IRREGULAR per spoke (hashed radius, neighbour-smoothed), so the
-//    pool reads as water that found its own shape, not a stamped disc.
-//  - Placement runs through gcCore::SetMatrix (STOCK gcCore - the mechanism 23(f)
-//    reserved for gimbal-follow, first used here): every frame the mesh matrix
-//    re-levels the disc against the LOCAL UP in vessel frame and pins it to the
-//    ground under the origin, so a banking vessel does not bank its puddle.
-//  - The bell glow's whole lending discipline applies verbatim: 23(k) sceneRendered
-//    before AddMesh, materials pushed EVERY frame (23f1 - the instance is rebuilt
-//    behind our back), borrow returned on every exit path.
-// ============================================================================
-void OroModule::ReleaseSheet()
-{
-	if (sheetV && sheetIdx >= 0 && oapiIsVessel(sheetV)) {
-		VESSEL* v = oapiGetVesselInterface(sheetV);
-		if (v) v->DelMesh(sheetIdx);
-	}
-	sheetV = NULL;
-	sheetIdx = -1;
-}
-
-void OroModule::UpdateSheet()
-{
-	// the template: built once per session, deleted with it (23m - no cross-session
-	// statics; the handle lives on the module and clbkSimulationEnd nulls it)
-	if (!hSheetTmpl) {
-		const int NS = 48;                       // spokes
-		const float BAND[5] = { 0.0f, 0.55f, 0.75f, 0.90f, 1.0f };
-
-		// the pool's own shape: hashed spoke radii, smoothed so no spike survives
-		float rr[NS + 1];
-		for (int i = 0; i < NS; i++) {
-			int n = (i << 13) ^ i;
-			const int m = (n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff;
-			rr[i] = 0.74f + 0.26f * ((float)(m % 1000) * 0.001f);
-		}
-		for (int pass = 0; pass < 2; pass++) {
-			float sm[NS];
-			for (int i = 0; i < NS; i++)
-				sm[i] = (rr[(i + NS - 1) % NS] + rr[i] * 2.0f + rr[(i + 1) % NS]) * 0.25f;
-			for (int i = 0; i < NS; i++) rr[i] = sm[i];
-		}
-		rr[NS] = rr[0];
-
-		MESHHANDLE hM = oapiCreateMesh(0, NULL);
-
-		// four materials, one per ring band - the alpha ladder IS the edge blend
-		int mat0 = -1;
-		const float ringA[4] = { 1.0f, 0.80f, 0.45f, 0.15f };
-		for (int b = 0; b < 4; b++) {
-			MATERIAL mat; memset(&mat, 0, sizeof(mat));
-			mat.diffuse  = { 0.06f, 0.075f, 0.09f, ringA[b] };
-			mat.ambient  = { 0.05f, 0.06f,  0.07f, 1.0f };
-			mat.specular = { 0.9f, 0.95f, 1.0f, 1.0f }; mat.power = 60.0f;
-			mat.emissive = { 0.0f, 0.0f, 0.0f, 1.0f };
-			const int mi = (int)oapiAddMaterial(hM, &mat);
-			if (b == 0) mat0 = mi;
-		}
-		sheetMat0 = mat0;
-
-		// four groups: a centre fan and three quad rings, unit radius (the per-frame
-		// matrix carries the real size)
-		static NTVERTEX vtx[4][(NS + 1) * 2];
-		static WORD     idx[4][NS * 6];
-		for (int b = 0; b < 4; b++) {
-			const float f0 = BAND[b], f1 = BAND[b + 1];
-			int nv = 0, ni = 0;
-			if (b == 0) {
-				vtx[0][nv++] = { 0, 0, 0,  0, 1, 0,  0.5f, 0.5f };
-				for (int i = 0; i <= NS; i++) {
-					const float th = (float)i / NS * 6.2831853f;
-					const float r = rr[i] * f1;
-					vtx[0][nv++] = { cosf(th) * r, 0, sinf(th) * r,  0, 1, 0,
-					                 0.5f + 0.5f * cosf(th) * r, 0.5f + 0.5f * sinf(th) * r };
-				}
-				for (int i = 0; i < NS; i++) {
-					idx[0][ni++] = 0; idx[0][ni++] = (WORD)(i + 2); idx[0][ni++] = (WORD)(i + 1);
-				}
-			} else {
-				for (int i = 0; i <= NS; i++) {
-					const float th = (float)i / NS * 6.2831853f;
-					const float ca = cosf(th), sa = sinf(th);
-					vtx[b][nv++] = { ca * rr[i] * f0, 0, sa * rr[i] * f0,  0, 1, 0, 0, 0 };
-					vtx[b][nv++] = { ca * rr[i] * f1, 0, sa * rr[i] * f1,  0, 1, 0, 0, 0 };
-				}
-				for (int i = 0; i < NS; i++) {
-					const WORD a0 = (WORD)(i * 2), a1 = (WORD)(i * 2 + 1);
-					const WORD b0 = (WORD)(i * 2 + 2), b1 = (WORD)(i * 2 + 3);
-					idx[b][ni++] = a0; idx[b][ni++] = b1; idx[b][ni++] = a1;
-					idx[b][ni++] = a0; idx[b][ni++] = b0; idx[b][ni++] = b1;
-				}
-			}
-			MESHGROUP grp; memset(&grp, 0, sizeof(grp));
-			grp.Vtx = vtx[b]; grp.nVtx = (DWORD)nv;
-			grp.Idx = idx[b]; grp.nIdx = (DWORD)ni;
-			// ⚠️ THE CLIENT-SIDE INDEX CONVENTIONS, LEARNED FROM THE "Invalid Mesh
-			// Detected" POPUP (its log listed every failed check): MtrlIdx is 0-BASED
-			// into the material list (the OrbiterAPI header's ">= 1, 0 = none" comment
-			// describes the FILE format, not what a created mesh hands the client - the
-			// 1-based first build shifted every ring's material off by one and ran the
-			// last one out of range), and "no texture" is 0xFFFFFFFF, because the
-			// client INCREMENTS any other TexIdx value into its 1-based slot table.
-			grp.MtrlIdx = (DWORD)(mat0 + b);
-			grp.TexIdx = 0xFFFFFFFF;               // SPEC_DEFAULT: untextured - see header
-			grp.UsrFlag = 0x3;                     // never a shadow caster (patch f's flags)
-			oapiAddMeshGroup(hM, &grp);
-		}
-		hSheetTmpl = hM;
-	}
-
-	// ---- gates -------------------------------------------------------------
-	const float want = clampf(g_fx.rainSheet, 0.0f, 2.0f);
-	const bool  on = g_fx.masterArmed && (g_fx.rainEnabled || g_fx.rainTest)
-	              && want > 0.01f && g_fx.rainWet > 0.02f;
-
-	OBJHANDLE hObj = oapiCameraTarget();
-	VESSEL* v = (hObj && oapiIsVessel(hObj)) ? oapiGetVesselInterface(hObj) : NULL;
-	double altAGL = 1e9;
-	if (v) altAGL = v->GetAltitude(ALTMODE_GROUND);
-
-	// altitude behaviour, his spec: pinned to the ground while low, fading with
-	// height, gone above a threshold
-	const float altF = 1.0f - clampf(((float)altAGL - 40.0f) / 80.0f, 0.0f, 1.0f);
-
-	if (!on || !v || altF <= 0.001f) { ReleaseSheet(); return; }
-
-	// 23(k): AddMesh grows the vessel's mesh list and re-instantiates the visual -
-	// never hand that to a half-built scene on a reload.
-	if (sheetV != hObj) {
-		if (!sceneRendered) return;
-		ReleaseSheet();
-		sheetV = hObj;
-		sheetIdx = (int)v->AddMesh(hSheetTmpl);
-		v->SetMeshVisibilityMode((UINT)sheetIdx, MESHVIS_EXTERNAL);
-	}
-
-	// ---- the per-frame drive (bell idiom: EVERY frame, 23f1) ----------------
-	VISHANDLE* pvis = oapiObjectVisualPtr(hObj);
-	VISHANDLE  vis = pvis ? *pvis : NULL;
-	if (!vis) return;
-	DEVMESHHANDLE hDM = v->GetDevMesh(vis, (UINT)sheetIdx);
-	if (!hDM) return;
-
-	// placement: level against LOCAL UP in the vessel frame, pinned to the ground
-	// under the origin - a banking vessel must not bank its puddle
-	{
-		VECTOR3 vp; v->GetGlobalPos(vp);
-		OBJHANDLE hRef = v->GetSurfaceRef();
-		VECTOR3 pc = _V(0, 0, 0);
-		if (hRef) oapiGetGlobalPos(hRef, &pc);
-		VECTOR3 upG = unit(vp - pc);
-		MATRIX3 Rv; v->GetRotationMatrix(Rv);
-		VECTOR3 upL = tmul(Rv, upG);
-
-		VECTOR3 fwd = _V(0, 0, 1);
-		VECTOR3 e1 = fwd - upL * dotp(fwd, upL);
-		double e1l = length(e1);
-		if (e1l < 1e-6) { e1 = _V(1, 0, 0) - upL * upL.x; e1l = length(e1); }
-		e1 = e1 / e1l;
-		VECTOR3 e2 = crossp(upL, e1);
-
-		const float R = (float)(v->GetSize() * (1.6f + 0.7f * want));
-		VECTOR3 t = upL * (-(altAGL) + 0.12);
-
-		oapi::FMATRIX4 M(
-			(float)e1.x * R,  (float)e1.y * R,  (float)e1.z * R,  0.0f,
-			(float)upL.x,     (float)upL.y,     (float)upL.z,     0.0f,
-			(float)e2.x * R,  (float)e2.y * R,  (float)e2.z * R,  0.0f,
-			(float)t.x,       (float)t.y,       (float)t.z,       1.0f);
-		if (pCore) pCore->SetMatrix(gcCore::MatrixId::MESH, hObj, (DWORD)sheetIdx, 0, &M);
-	}
-
-	// materials every frame: alpha = wetness x slider x altitude fade, reflectivity
-	// through the 2024 PBR material extensions - this is what points the group at the
-	// client's env-map path
-	const float aBase = clampf(g_fx.rainWet, 0.0f, 1.0f) * clampf(want, 0.0f, 1.0f) * altF;
-	const float ringA[4] = { 1.0f, 0.80f, 0.45f, 0.15f };
-	const float ringR[4] = { 0.88f, 0.80f, 0.62f, 0.40f };
-	for (int b = 0; b < 4; b++) {
-		const DWORD mi = (DWORD)(sheetMat0 + b);
-		oapi::FVECTOR4 dif(0.06f, 0.075f, 0.09f, ringA[b] * aBase);
-		oapi::FVECTOR4 rfl(ringR[b], ringR[b], ringR[b], 1.0f);
-		oapi::FVECTOR4 smt(0.94f, 0.0f, 0.0f, 0.0f);
-		oapiSetMaterialEx(hDM, mi, MatProp::Diffuse, &dif);
-		oapiSetMaterialEx(hDM, mi, MatProp::Reflect, &rfl);
-		oapiSetMaterialEx(hDM, mi, MatProp::Smooth,  &smt);
-	}
-}

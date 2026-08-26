@@ -10,11 +10,11 @@ This is the first time the whole thing has been listed in one place. Everything 
 | Started | 2026-07-25 |
 | Shipped to beta | 2026-08-10 (16 days) |
 | Distinct effects | **28** — 13 physiological, 15 environmental (rain sound + thunder joined the storm) |
-| Live controls | **117** sliders/knobs, **12** colour pickers, 5 tabs + 2 sub-tabs, all thruster settings PER ENGINE GROUP |
+| Live controls | **119** sliders/knobs, **12** colour pickers, 5 tabs + 2 sub-tabs, all thruster settings PER ENGINE GROUP (MAIN / HOVER / RETRO / USER / **RCS**) |
 | Source | ~16,500 lines across 16 C++ files, plus 9 pixel shaders in one HLSL file |
-| Client patches | **19** (a–g, i–s) — every one of them load-bearing |
+| Client patches | **21** (a–g, i–u) — every one of them load-bearing |
 | Worlds with auroras | 12 |
-| Settings scopes | 3 — global / per vessel class / per body (+ a window-geometry file) |
+| Settings scopes | 3 — global / per vessel class / per body (+ a window-geometry file). The G-FORCE and VC tabs' settings can be moved between the first two per hull with a **Save target** switch |
 
 ---
 
@@ -180,7 +180,10 @@ expands through Mach 1, and the one famous aerodynamic visual nothing in Orbiter
   grey sky at any angle, with a tight sun glint that the storm collapses and a broad
   cloud-glare that grows with it. **The ships reflect in the wet ground** — a real
   mirrored render of every vessel in range, concentrated in the pools, ripple-warped at a
-  user-tuned amplitude and cadence. Hulls get wet too, across every vessel shader path:
+  user-tuned amplitude and cadence, and carrying what comes out of the ships as well as
+  the ships: nav lights and strobes, contrails and particle streams, and ORO's own
+  engine plume, each drawn from under the water rather than copied off the picture.
+  Hulls get wet too, across every vessel shader path:
   darkened, tightened specular, and a lifecycled **raindrop glint** riding the sky light.
   The deck overhead is ORO's own **two-layer textured cloud ceiling** — a main deck and
   a darker scud layer hanging beneath it, with real parallax, vertical relief and no
@@ -271,7 +274,7 @@ rather than rendering anything.
 ## 6. The client work
 
 Stock D3D9Client crashes the instant any HUD render proc is registered. That was patch (a);
-seventeen more followed. Several are outright bug fixes to the client, demonstrable with no
+nineteen more followed. Several are outright bug fixes to the client, demonstrable with no
 addon involved:
 
 - `clbkCreateParticleStream` is unimplemented — so the documented core API
@@ -284,7 +287,14 @@ addon involved:
 
 The rest add capability: backbuffer access, additive Sketchpad blend, per-pixel depth
 clipping, textured Sketchpad triangles, CPU→texture upload, render-epoch camera and body
-anchors, a pre-resolve render slot, and VC shadows.
+anchors, a pre-resolve render slot, VC shadows, and surface weather — wet ground, storm
+light, and a planar mirror that puts the ships in the puddles.
+
+And one that fixes Orbiter's own UI rather than adding anything: **patch (t) makes the menu
+bar and info bars draw LAST**. The core paints the pilot's instruments and the user's chrome
+in a single call, leaving an addon overlay no slot between them — so any full-frame effect
+smeared Orbiter's own menus along with the world. The bars are now held back and replayed
+over the top, identified by the one texture every one of them is drawn from.
 
 Full patch text and rebuild recipe: `upstream/BUILDING.md`.
 

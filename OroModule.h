@@ -30,6 +30,11 @@
 // FVECTOR4 uses the untyped max(0,r) form, which std::max cannot satisfy). So we
 // deliberately do NOT define NOMINMAX anywhere in the ORO include chain.
 #include "Orbitersdk.h"   // umbrella: OrbiterAPI.h + ModuleAPI.h (oapi::Module) + DrawAPI.h (Sketchpad)
+// ⚠️ ADDED 2026-08-25, when hPrtTex had to be sized by ORO_THR_N rather than a literal 4.
+// Every .cpp already includes both headers, but always OroModule.h FIRST, so anything here
+// that wants the thruster-group enum has to pull it in itself. Safe and cycle-free:
+// OroState.h includes nothing at all and needs only DWORD, which Orbitersdk.h just gave us.
+#include "OroState.h"
 
 class gcCore2;        // D3D9Client core interface - full definition in gcCoreAPI.h (included by the .cpp)
 class gcIPInterface;  // D3D9Client image-processing (HLSL) interface - ditto
@@ -72,6 +77,7 @@ void  OroHueRotate(float& r, float& g, float& b, float deg);
 // invented a second time.
 int  OroThrusterGroupOf(VESSEL* v, THRUSTER_HANDLE th);
 bool OroThrusterHasUser(VESSEL* v);
+bool OroThrusterHasRcs(VESSEL* v);   // ... and attitude thrusters (ORO_THR_RCS)
 
 // ORO's lifecycle module. Derives from oapi::Module for the per-frame main-thread
 // hook (clbkPreStep), the session start/end events, and keyboard input (the toggle).
@@ -108,6 +114,20 @@ public:
 	// Buffered keyboard: Ctrl+G toggles the master arm (the panic/quick kill).
 	bool clbkProcessKeyboardBuffered(DWORD key, char kstate[256], bool simRunning) override;
 
+	// ⚠️ NOT A KEYBOARD HANDLER - THE PAUSE-PROOF PER-FRAME TICK (2026-08-24).
+	// It consumes nothing and always returns false. It is here because the core calls it
+	// from UserInput() every frame gated only on the window being visible and active -
+	// NOT on the sim running, unlike ModulePreStep/PostStep - and it runs BEFORE the
+	// frame is rendered, on the main thread, in the same phase where Orbiter updates its
+	// own dialogs. So it is the one place ORO can safely re-ask oapi "where is the camera
+	// and what is it looking through" while the sim is paused. See SenseView/SenseRain.
+	bool clbkProcessKeyboardImmediate(char kstate[256], bool simRunning) override;
+
+	// The two SENSING halves, split out 2026-08-24 so they can run while paused. The rule
+	// they embody: WHAT SENSES THE WORLD RUNS EVERY FRAME, WHAT EVOLVES OVER TIME DOES NOT.
+	void SenseView();                       // view/cockpit domain gates + viewport size
+	void SenseRain();                       // where the storm is relative to the camera
+
 	// A vessel is about to be destroyed. MANDATORY for the reentry plasma: we hold a
 	// LightEmitter* belonging to that vessel, and the handle stops being valid the moment
 	// this returns. Drop the light here or the next frame touches a dead vessel.
@@ -128,6 +148,14 @@ public:
 	// step 1, 2026-08-08). Same no-oapi-calls contract as DrawOverlay.
 	void DrawPreResolve(oapi::Sketchpad* pSkp);
 
+	// Wet-mirror draw pass (client patch (u), RENDERPROC_WET_MIRROR): fires INSIDE the
+	// wet-ground planar reflection pass, with the Sketchpad bound to the HALF-RES
+	// reflection target and GetRenderCam reporting the MIRRORED camera. Public for the
+	// same reason as the two above - a file-scope thunk forwards to it. Same
+	// no-oapi-calls contract; see the definition in OroModule.cpp for why the plume
+	// cannot reach the reflection by any of the routes the client's own geometry uses.
+	void DrawWetMirror(oapi::Sketchpad* pSkp);
+
 	// Target of the GENERICPROC_SHUTDOWN thunk, so PUBLIC like the two render-proc
 	// targets above. Definition and rationale live beside the private members it
 	// releases - see the long comment at the bottom of this class.
@@ -143,6 +171,7 @@ private:
 	gcCore2* pCore = nullptr;               // D3D9Client core; NULL if D3D9Client isn't the active client
 	bool     renderProcRegistered = false;  // one-shot: the RenderProcs list survives clbkCloseSession, so register once
 	bool     preResolveRegistered = false;  // one-shot, same rule, for the patch-(i) pre-resolve slot
+	bool     wetMirrorRegistered = false;   // one-shot, same rule, for the patch-(u) wet-mirror slot
 	bool     shutdownProcRegistered = false;// one-shot, same rule (GenericProcs is a plain member vector,
 	                                        // never cleared by clbkCloseSession) - see
 	                                        // ReleaseSceneOwnedBorrows and its registration note
@@ -171,6 +200,18 @@ private:
 	                                        // so DrawOverlay keeps drawing the plasma in the old HUD_2ND slot
 	                                        // until this proves the new slot exists. Never reset: the client's
 	                                        // RenderProcs list (and the client itself) outlives our sessions.
+	// Latched TRUE the first time the patch-(u) wet-mirror slot actually FIRES, on the
+	// same reasoning as preResolveLive: RegisterRenderProc accepts any id, so a pre-(u)
+	// client takes the registration and simply never calls it. This is the ONLY honest
+	// way to tell "the client cannot do it" from "the ground is dry" - and since the
+	// pass itself only runs while the ground IS wet and the camera is under 250 m AGL,
+	// a false here means nothing until someone has been rained on at least once.
+	// Diagnostic only: nothing gates on it.
+	bool     wetMirrorLive = false;
+	// TRUE only while DrawWetMirror is running, so FillProjCam knows to reconcile the
+	// pure mirrored camera with the reflection RT's flipped convention - see the comment
+	// there, which is where the whole reconciliation lives.
+	bool     wetMirrorPass = false;
 	bool     focusPrimed = false;           // one-shot: give the render window keyboard focus on the first frame,
 	                                        // so keys don't beep at scenario start (a focus quirk, not an ORO effect)
 	bool     viewGate = false;              // cached per-frame gate (internal panel/VC view), set in clbkPreStep
@@ -388,6 +429,20 @@ private:
 	// AoA shines up through the floor (tested 2026-08-01, rejected on sight). Computed on
 	// the main thread and cached for the render callback (invariant 1).
 	float plasmaGlow   = 0.0f;               // 0..1 intensity for the focus vessel's cockpit
+	// ⚠️ THE WASH'S SNAPSHOT (2026-08-25). plasmaUV used to be computed in UpdateReentry
+	// on the main thread - which does not run while PAUSED, so the cabin wash's
+	// directional lobe stayed nailed to the screen position the plasma had when the sim
+	// stopped. Exactly H1's class, and the last member of that family left unfixed; it
+	// went unreported for ten days only because a soft broad bloom reads far less
+	// obviously out of place than the sheath did. The three VESSEL values are snapshotted
+	// on the main thread (invariant 1) and UpdatePlasmaWashUV projects them in the render
+	// path, against the render camera and the render-epoch anchor.
+	VECTOR3   plasmaGlowG  = { 0, 0, 0 };    // the glow point, pre-step global
+	VECTOR3   plasmaGlowCg = { 0, 0, 0 };    // its vessel's CENTRE - the epoch anchor's
+	                                         //   second argument, never the point itself
+	OBJHANDLE plasmaGlowV  = NULL;
+	bool      plasmaGlowValid = false;
+	void UpdatePlasmaWashUV();               // render path: snapshot -> plasmaUV
 	float plasmaUV[2]  = { 0.5f, 0.5f };     // where the plasma sits in screen UV
 	float plasmaCol[3] = { 1.0f, 0.5f, 0.2f };
 
@@ -428,6 +483,15 @@ private:
 	                                         // COCKPIT (reentryVC toggle && COCKPIT_VIRTUAL);
 	                                         // computed in clbkPreStep like the other gates
 	bool     rainVC = false;                 // 2026-08-23: the RAIN in the VIRTUAL cockpit
+	bool     rainPanel = false;              // 2026-08-25: the rain in the FLAT internal
+	                                         //   views (2D panel / glass cockpit). A
+	                                         //   SEPARATE gate from rainVC because the two
+	                                         //   are drawn on different terms: the VC needs
+	                                         //   patch (g) to cut the streaks at the window
+	                                         //   frame, while a flat panel is painted by
+	                                         //   Pane::Render AFTER the pre-resolve slot we
+	                                         //   draw in - so it occludes the rain for free
+	                                         //   and needs no depth at all, just patch (i).
 	                                         // (no toggle - follows the view like the
 	                                         // aurora; embeds depthClipOK, see clbkPreStep)
 
@@ -956,6 +1020,15 @@ private:
 	HPOLY      hRainBoltPoly = NULL;        // device resource - released with the others
 	SURFHANDLE hBoltTex = NULL;             // the loaded atlas - shutdown proc (23l)
 	bool       boltTexTried = false;        // one probe per session
+
+	// THE SPLASH LATTICE'S PLANET-FIXED REFERENCE (2026-08-25). A point on the world that
+	// the rings are measured from, so they hold their ground while both the camera AND the
+	// vessel move. Re-anchored only when the camera has travelled ~10 km from it, which no
+	// taxi run reaches. NOT G10's kind of state: nothing integrates here, a stale value
+	// only offsets the lattice, and the next re-anchor replaces it outright.
+	double     ringRefLon  = 0.0;
+	double     ringRefLat  = 0.0;
+	OBJHANDLE  ringRefBody = NULL;          // NULL = not anchored yet / world changed
 	double     boltTestT0 = -1e9;           // STRIKE test rig: fire time on the animT clock
 	// RAIN LIGHTNING (his item 3, part 1): the borrowed scene-flash light - the
 	// reentry hull light's exact pattern (refs into STABLE members, 23(k)-gated,
@@ -985,20 +1058,8 @@ private:
 	float   poolReachPushed = -1.0f;        // last pool-reach scale handed to the client
 	float   grainOpPushed   = -1.0f;        // last grain opacity handed to the client
 	float   grainSizePushed = -1.0f;        // last grain size handed to the client
+	float   reflBlurPushed  = -1.0f;        // last reflection-blur amount handed to the client
 
-	// --- THE WATER SHEET (his design, 2026-08-22; OroRain.cpp) -----------
-	// A reflective pool MESH attached under the camera-target vessel, reflecting
-	// through the client's own ENV-MAP system - entirely stock rendering, the
-	// bell-glow borrow pattern pointed at the ground. Untextured on purpose:
-	// created meshes cannot grow texture slots (D3D9Mesh::SetTexture hard-fails
-	// past nTex), and 23(f2) says untextured groups honour material alpha - so
-	// the edge fade is GEOMETRY, ring bands with per-ring materials.
-	MESHHANDLE hSheetTmpl = NULL;           // session template (23m: reset per session)
-	int        sheetIdx   = -1;             // AddMesh index while borrowed
-	OBJHANDLE  sheetV     = NULL;           // who carries it
-	int        sheetMat0  = 0;              // first of the four ring materials
-	void    UpdateSheet();                  // main thread, from UpdateRain
-	void    ReleaseSheet();                 // borrow-and-return
 	float   wetPushed   = -1.0f;            // last value handed to the client, so the push
 	                                        //   happens ON CHANGE and not every frame - it is
 	                                        //   client STATE, not a frame parameter
@@ -1118,7 +1179,13 @@ private:
 	double     plmLvlPrev[MAX_PLUMES] = {};
 	float      plmPuffPrev[MAX_PLUMES] = {};
 	void BuildPlumeModel();                 // main thread, BEFORE both consumers
-	void UpdatePlumeFx();                   // consumer 1: the jet geometry
+	// Consumer 1: the jet geometry. The two arguments are the patch-(u) WET-MIRROR
+	// parameterisation (2026-08-25) and nothing else - pass a viewport and the build
+	// projects into THAT target instead of the backbuffer. There is deliberately NO
+	// camera argument: inside the mirror slot the client reports the mirrored camera
+	// through GetRenderCam, so FillProjCam below already returns it and there is exactly
+	// one camera path to keep correct. 0,0 = the real frame.
+	void UpdatePlumeFx(DWORD ovW = 0, DWORD ovH = 0);
 
 	// --- BELL GLOW (OroBell.cpp, 2026-08-09) -----------------------------
 	// Incandescent nozzle shells: the author's Meshes\ORO\<class>_bell.msh is
@@ -1144,7 +1211,10 @@ private:
 	float   plmDkDepth[PLM_DK_MAX_TRI * 3];
 	int     plmDkVtxN = 0;
 	HPOLY   hPlumeDkPoly = NULL;            // device resource - released with the others
-	void DrawPlumePoly(oapi::Sketchpad* pSkp, bool depthClip);
+	// writeAlpha = the patch-(u) 0x200 bit: also lay down COVERAGE ALPHA. False on the
+	// backbuffer, where alpha is the frame's and not ours; TRUE in the wet-mirror RT,
+	// whose alpha IS the ground shaders' "something is reflected here" mask.
+	void DrawPlumePoly(oapi::Sketchpad* pSkp, bool depthClip, bool writeAlpha = false);
 	PlasVtx plmVtx[PLM_MAX_TRI * 3];
 	float   plmDepth[PLM_MAX_TRI * 3];      // per-vertex EUCLIDEAN camera distance (patch g)
 	int     plmVtxN = 0;                    // 0 = nothing to draw this frame
@@ -1162,7 +1232,14 @@ private:
 	// Streams are BORROWED and handed back on every exit path (invariant 14) -
 	// together with their patch-(o) exemptions, which are keyed on the stream
 	// pointer and so must be cleared before the stream is freed.
-	static const int PRT_MAX_STREAM = 24;
+	// ⚠️ 24 -> 40 WHEN RCS BECAME A GROUP (2026-08-25). A stock DeltaGlider carries about
+	// twenty attitude jets on top of its main/hover/retro set, so the old cap would have
+	// truncated - and a truncated cap does not fail loudly, it just leaves SOME RCS jets
+	// without particles while their neighbours have them, which reads as a bug rather
+	// than as a limit. The loops were already bounded, so this was never a safety issue.
+	// Cost is bounded by the per-group Rate slider, which is where to go first if RCS
+	// particles ever cost frames.
+	static const int PRT_MAX_STREAM = 40;
 	struct PrtStream {
 		PSTREAM_HANDLE  h   = NULL;         // what we must hand back
 		OBJHANDLE       hV  = NULL;         // whose vessel it is on
@@ -1170,7 +1247,7 @@ private:
 	};
 	PrtStream  prtStr[PRT_MAX_STREAM];
 	int        prtStrN     = 0;
-	SURFHANDLE hPrtTex[4]  = {};            // synthesized tinted 2x2 particle atlas, ONE PER
+	SURFHANDLE hPrtTex[ORO_THR_N] = {};            // synthesized tinted 2x2 particle atlas, ONE PER
 	                                        //   THRUSTER GROUP (2026-08-16). The particle
 	                                        //   spec has no colour field - colour lives in
 	                                        //   the texture - so per-group colour means one
