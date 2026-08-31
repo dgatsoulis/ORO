@@ -48,10 +48,15 @@
 // The duplication is safe because the flow is one-directional at every instant and
 // there is exactly ONE sync point:
 //   dialog writes ---> flat fields ---> OroThr_SyncOut() at the top of clbkPreStep
-//                                       ---> thr[thrSel] ---> every consumer.
+//                                       ---> the SELECTION's store ---> every consumer.
 // Cycling and loading go the other way (OroThr_SyncIn). NOTHING ELSE may write the
-// flat thruster fields, and no consumer may read them - consumers take the group they
-// are drawing and read thr[that group]. Grep for OroThr_ before changing any of this.
+// flat thruster fields, and no consumer may read them - consumers resolve the block
+// they are drawing through OroThr_Eff(). Grep for OroThr_ before changing any of this.
+// ⚠️ PHASE B EXTENDED THE TARGET, NOT THE LAW (2026-08-30): with a thruster selected,
+// SyncOut routes each FAMILY to its owner - exhaust/particle fields to the override
+// block that owns them, everything else (bell always, un-owned families) to the
+// group. Override CREATION is an edit-time event in the dialog (MarkDirty), so it
+// always precedes the next SyncOut and the sync stays one call each way.
 // ============================================================================
 // ⚠️ RCS JOINED ON 2026-08-25, AND IT IS APPENDED - never inserted. The index is the cfg
 // key prefix ("RCS...") and the saved thrSel, so putting it anywhere but last would have
@@ -62,7 +67,7 @@
 // RCS, so nothing of ours replaced them. The suppression was vessel-wide and the
 // replacement was group-scoped; RCS fell in the gap and simply stopped showing.
 // ALL attitude thrusters are ONE group, his call: "we don't have to do individual RCS
-// groups". Per-thruster settings are a later question.
+// groups". Per-thruster settings arrived 2026-08-30 as LAYERED OVERRIDES - see OroThrOvr.
 enum { ORO_THR_MAIN = 0, ORO_THR_HOVER, ORO_THR_RETRO, ORO_THR_USER, ORO_THR_RCS, ORO_THR_N };
 
 struct OroThrusterFx {
@@ -110,6 +115,47 @@ struct OroThrusterFx {
 	bool  prtDiffuse      = false;
 	bool  prtAirFade      = true;
 	DWORD prtColour       = 0x00FFFFFFu;
+	DWORD prtColour2      = 0x00FFFFFFu;
+	bool  prtTexStock     = false;
+	char  prtTexName[48]  = "";    // particle texture NAME ("" = ORO's synthesized atlas)
+};
+
+// ============================================================================
+// PER-THRUSTER OVERRIDES (Phase B, 2026-08-30). Group settings stay the BASE;
+// a thruster MAY own a full copy of one or both FAMILIES of the table above:
+//   EXH  = everything the plume/shimmer family draws (Shimmer*/Plume* minus bell)
+//   PRT  = the particle-stream family (Prt*)
+//   BELL = the bell-glow keys - deliberately NOT overridable in v1 (the bell is
+//          per group; a bell edit with a thruster selected edits the GROUP).
+// The rules, agreed in the Phase B discussion:
+//  - An override is CREATED by the first real edit on the matching page while a
+//    thruster is selected (exactly the clicks that amber - g_clickWasEdit is the
+//    shared oracle); it snapshots the group's block first, so the jet keeps
+//    looking as it did except the one thing you moved.
+//  - CLEAR drops the family and the thruster snaps back to inheriting, live.
+//  - Once a family is overridden, GROUP edits stop reaching that thruster's
+//    family - the block is a full copy, and that is the point.
+//  - CLASS-FAITHFUL: overrides are keyed by THRUSTER INDEX and belong to the
+//    loaded class file. In a docked stack they apply ONLY to vessels whose class
+//    name matches g_fx.loadedClass - index 3 on a docked ShuttleA is an
+//    unrelated jet from index 3 on your DG.
+//  - The pool is a FIXED array, never compacted (slot-address stability, the
+//    invariant-14 family); a freed slot is thrIdx = -1. Render-path readers
+//    re-check thrIdx so a CLEAR landing mid-frame self-heals to group values.
+//  - No blocks on disk = today's behaviour bit for bit (no migration needed).
+// ============================================================================
+static const int ORO_THR_OVR_MAX = 24;   // sparse by design: "two jets differ",
+                                         //   never "tune all 38"
+static const int ORO_THR_CACHE_MAX = 8;  // foreign-class settings cache (see below):
+                                         //   distinct vessel classes in ONE docked
+                                         //   stack beyond the focus class
+enum { ORO_FAM_EXH = 1, ORO_FAM_PRT = 2, ORO_FAM_BELL = 4 };
+struct OroThrOvr {
+	int  thrIdx = -1;         // vessel thruster index this block belongs to; -1 = free
+	bool ovrExh = false;      // exhaust family owned
+	bool ovrPrt = false;      // particle family owned
+	OroThrusterFx fx;         // the block (bell fields ride along but are never
+	                          //   read or written per thruster - see ORO_FAM_BELL)
 };
 
 struct OroEffectState {
@@ -208,6 +254,31 @@ struct OroEffectState {
 	                                     // simply cannot cycle - there is nothing to
 	                                     // cycle to, and a control that moves between
 	                                     // identical states is worse than none.
+
+	// --- PER-THRUSTER OVERRIDES (Phase B, 2026-08-30) -----------------------
+	// See the OroThrOvr block above OroEffectState for the laws. thrThrSel is the
+	// header-row THRUSTER selection: -1 = ALL (the group, today's behaviour).
+	// SESSION-ONLY on purpose - a tuning cursor, not a setting: it survives the
+	// panel closing (so a held CANCEL THRUST cannot silently widen from one jet to
+	// the whole group) and resets on a GROUP cycle or a CLASS change only.
+	OroThrOvr thrOvr[ORO_THR_OVR_MAX];
+	int   thrThrSel = -1;            // selected thruster index on the panel vessel; -1 = ALL
+	bool  thrMarkOn = true;          // MARK toggle: the in-world nozzle marker (test-rig
+	                                 //   class - never persisted, never ambers)
+	// Published by the sensing pass (SenseMarker, main thread) so the PANEL can
+	// paint without oapi calls - the plumeRegime discipline:
+	int   thrCnt  = 0;               // thrusters in the selected group on the panel vessel
+	int   thrOrd  = 0;               // 1-based ordinal of thrThrSel within the group (0 = ALL)
+	char  thrSelInfo[64] = "";       // "thr 17 - 245.0 kN" for the state line ("" at ALL)
+	bool  thrSelBelowFloor = false;  // 26(j)'s vent gate holds for the selection: a
+	                                 //   thruster with NO exhaust definition below the
+	                                 //   engine-acceleration floor draws no plume, and
+	                                 //   the caption must SAY so (H5's law)
+	bool  thrSelHasExh = false;      // the selection has an authored exhaust definition
+	bool  thrPageLive = false;       // dialog is OPEN on a THRUSTERS page (marker gate;
+	                                 //   written by the dialog, read by the render path)
+	char  loadedClass[64] = "";      // class the CLASS scope is loaded for - the
+	                                 //   class-faithful rule's reference (OroModule.cpp)
 
 	// --- ENVIRONMENT (world effects) ---
 	// Exhaust shimmer: heat-haze REFRACTION around the engine plumes in atmospheric
@@ -413,6 +484,28 @@ struct OroEffectState {
 	                               //   one of them rather than voting between them.
 	DWORD prtColour       = 0x00FFFFFFu; // COLORREF 0x00BBGGRR; white = the neutral
 	                               //   stock-ish particle
+	DWORD prtColour2      = 0x00FFFFFFu; // the SECOND tint (2026-08-30, his design): each
+	                               //   particle is randomly born with colour A or B -
+	                               //   implemented in the ATLAS (diagonal quadrant pairs
+	                               //   carry each tint; the renderer's own random quadrant
+	                               //   pick does the 50/50), so no renderer change. Both
+	                               //   white = single-colour behaviour, bit for bit.
+	bool  prtTexStock     = false; // STOCK colours: render the texture's own authored
+	                               //   colours and ignore both tints (the swatches grey).
+	                               //   In TINT mode a file's colour is REPLACED (its
+	                               //   luminance x the pick), because a multiply can only
+	                               //   darken - the 15b lesson - and "white" must mean
+	                               //   white. Default false: old cfgs keep their tints.
+	char  prtTexName[48]  = "";    // particle texture NAME, per group per class. "" = the
+	                               //   synthesized atlas; "Contrail1"/"Contrail1a" = the
+	                               //   stock textures; anything else = a .dds dropped in
+	                               //   Textures\ORO\Particles (2x2 ATLAS format - 23j).
+	                               //   The file's pixels are TINTED by prtColour and
+	                               //   uploaded through the same patch-(l) path as the
+	                               //   synthesized atlas, so the swatch keeps working
+	                               //   (white = the file as authored) and the stream's
+	                               //   SURFHANDLE never changes. Missing file at load =
+	                               //   synthesized fallback, logged once.
 	// Readouts - module-written, dialog-read (the reentryHeat discipline).
 	char  prtInfo[64]     = "";    // how many streams, or why there are none
 	int   prtCount        = 0;     // live streams
@@ -595,9 +688,63 @@ struct OroEffectState {
 	                               //   about the SHIP rather than the weather, some
 	                               //   people want the storm without the drumming, and
 	                               //   the outside mix should not have to move for it.
+	// --- RAINDROPS ON THE GLASS (2026-08-26, client patch h) -----------------
+	// The windscreen half of the storm: drops sitting ON the canopy, refracting the
+	// world through it. VC only, and only with the scene depth buffer live - the mask
+	// that tells glass from instrument panel IS that buffer, per pixel.
+	float rainGlass       = 1.0f;  // x DROPS ON THE GLASS (0..2; 0 = a clean canopy).
+	                               //   Drives COVERAGE - how many lattice cells hold a
+	                               //   drop - so it stays independent of their size.
+	float rainGlassSize   = 1.0f;  // x DROP SIZE (0..3 since 2026-08-26, his spec; 1 =
+	                               //   designed, 0 = NO DROPS AT ALL - the second off
+	                               //   switch, aurora's opt-in law). ⚠️ Deliberately
+	                               //   smaller than a windscreen photograph suggests: a
+	                               //   phone sits ~30 cm from the glass and an eye sits
+	                               //   60-80 cm from a canopy, so the same real drop
+	                               //   subtends about half the angle.
+	float rainGlassLens   = 1.0f;  // x REFRACTION (0..2; 0 = drops that only glisten,
+	                               //   which is exactly what the Sketchpad substrate
+	                               //   could have given us and the reason it was not
+	                               //   chosen). A droplet's focal length is far shorter
+	                               //   than its distance to anything outside, so past
+	                               //   ~1 the image inside genuinely inverts.
+	float rainGlassRunners = 1.0f; // x THE RUN STREAKS (2026-08-27): how many columns
+	                               //   carry a runner - a loose drop travelling down-run
+	                               //   with a fading wet trail. 0..3 (his spec), 0 = off
+	                               //   (the aurora's opt-in law). SPEED is deliberately not a
+	                               //   knob: it derives from |gravity + airflow| at the
+	                               //   glass (25e), so parked runners crawl and
+	                               //   in-flight ones whip aft on their own.
+	float rainGlassRunSize = 1.0f; // x RUNNER SIZE relative to the drop family
+	                               //   (0.4..2, default 1 = the midpoint of the two
+	                               //   flown rounds). Exists because head thickness
+	                               //   bounced twice as a constant - taste, so the
+	                               //   number is his to find (the 25(i) rule). Still
+	                               //   MULTIPLIES Drop size, so the families scale
+	                               //   together and this only sets their ratio.
+	float rainGlassRise   = 16.0f; // s, THE FILL TIME (his ask 2026-08-26): how long the
+	                               //   canopy takes to go from clean to the Glass drops
+	                               //   target once the storm is at full. Slider 10..60,
+	                               //   whole seconds; 16 is the value the look was
+	                               //   approved at. Replaces the old GLASS_RISE constant
+	                               //   in UpdateRain.
+	// (A RainGlassMesh per-class cfg key lived here for a few hours on 2026-08-26 and
+	//  was removed the same day, HIS call: the `RAIN 1` mesh token must be the ENTIRE
+	//  interface - any vessel, nothing to configure. The CLIENT reads the tokens itself
+	//  at mesh load, because clbkStoreMeshPersistent is the one place a mesh's filename
+	//  is ever spoken. See the client's RainGlassStoreScan.)
+	float rainGlassDbg    = 0.0f;  // TEMPORARY SCAFFOLD (2026-08-26): 0 = normal,
+	                               //   1 = ignore the depth mask, 2 = VISUALIZE the
+	                               //   depth buffer (green = authored window, blue =
+	                               //   interior/hull, unchanged = nothing there).
+	                               //   Never saved; removed once the drops are done.
 	// live readouts, never saved (they are the storm's current STATE, like the eye's)
 	float rainI           = 0.0f;  // the event envelope, 0..1
 	float rainWet         = 0.0f;  // ground wetness, lags rainI - build B consumes it
+	float rainGlassWet    = 0.0f;  // canopy drop coverage, lags rainI on its own faster
+	                               //   clock (GLASS_RISE) - the windscreen FILLS behind
+	                               //   the storm, drop by drop, instead of arriving
+	                               //   covered. Same instant-zero on the pill.
 	char  rainWhy[32]     = "";    // why it is not drawing, when it is not
 
 	float plasVCGlow      = 1.0f;  // x THE VC GLOW (0..3), 2026-08-20. Brightness and reach
@@ -756,13 +903,80 @@ struct OroEffectState {
 	                               //   at full strength. NOT persisted - like every other
 	                               //   TEST toggle it is a look-judging tool, and a saved
 	                               //   one would put a permanent cone on a parked ship.
-	float vapStrength     = 1.0f;  // x opacity of the shroud (0..2; 0 = off, the section
-	                               //   idiom shared with edge light and hull light)
-	float vapSize         = 1.6f;  // cone OUTER RADIUS in hull sizes (0..3). The axial
-	                               //   length is NOT a knob - it falls out of the Mach
-	                               //   angle (see OroVapour.cpp), which is the whole
-	                               //   reason the shape reads as speed rather than as a
-	                               //   decal that happens to be there.
+	float vapStrength     = 1.0f;  // OPACITY of the shroud (0..2; 0 = off). Renamed from
+	                               //   Strength in the dialog 2026-08-29 (key unchanged -
+	                               //   his tuned cfgs keep loading): up to 1.0 it is the
+	                               //   original response, above 1.0 the sheet FILLS and
+	                               //   densifies until it can hide the hull behind it -
+	                               //   his reference photos, where the disc occludes the
+	                               //   fuselage.
+	float vapSize         = 1.6f;  // SIZE X: outer radius along the wing line, in hull
+	                               //   sizes (0..3). The MASTER dimension - Y and Z below
+	                               //   are ratios of it, which is what lets a pre-split
+	                               //   cfg (one VapourSize key) load as exactly the old
+	                               //   circular, Mach-angle-length cone.
+	float vapSizeY        = 1.6f;  // SIZE Y: vertical radius in hull sizes (0..3), the
+	                               //   SAME units as Size x - his visual-pass rule:
+	                               //   "same slider values for x and y = a circular
+	                               //   cone". Default matches vapSize's default, and a
+	                               //   pre-split cfg (no Y key) gets Y := X by the
+	                               //   sentinel in OroSettings_LoadClass, so every old
+	                               //   file still loads circular.
+	float vapSizeZ        = 1.0f;  // SIZE Z: axial length as a RATIO of the Mach-angle
+	                               //   reach (0..2; 1 = the physics length). A ratio
+	                               //   rather than metres ON PURPOSE: the length still
+	                               //   stretches with Mach (invariant 25b - a raw length
+	                               //   slider turns the cone into a decal), the user
+	                               //   sculpts its proportion. 0 = a flat collar disc.
+	float vapStreaks      = 0.0f;  // COUNT of slim darker filaments (0..2 -> 0..32;
+	                               //   0 = the clean sheet, and the DEFAULT - the soot
+	                               //   streaks / aurora opt-in law, so no tuned hull
+	                               //   changes look until the slider is raised). Colour +
+	                               //   density ONLY - never geometry, which is 25(k)'s
+	                               //   surviving core: the surface stays an analytic loft.
+	float vapStreakChurn  = 1.0f;  // how violently the streaks move (0..2; 0 = frozen -
+	                               //   the Soot churn convention). Churn scales the
+	                               //   CLOCK of everything the streaks do: position
+	                               //   jitter and the flare/die intermittency both.
+	DWORD vapColour       = 0x00FAF0E8u; // the VAPOUR colour (COLORREF 0x00BBGGRR).
+	                               //   Default = the baked cool white (232,240,250):
+	                               //   condensed water with the sky's cast in it.
+	DWORD vapStreakCol    = 0x00887C76u; // the STREAK colour (118,124,136 - a darker
+	                               //   grey-blue, which is what "darker streaks" were
+	                               //   before they had a picker). Streak regions BLEND
+	                               //   toward this, so the pair can also do exhaust-
+	                               //   stained or sunset-lit vapour.
+	bool  vapBaseOn       = true;  // the BASE FILL pill (2026-08-29): the filled disc
+	                               //   closing the cone's wide end. ON by default -
+	                               //   the base is part of the look he approved; off
+	                               //   returns the open loft.
+	// --- THE SECOND CONE (2026-08-29, his spec - the Concorde photo, one collar at
+	// the nose and one at the tail). Identical controls, completely separate tuning,
+	// NO second pill: the one pill arms the whole effect and each cone's OPACITY is
+	// its own visibility. Cone 2 therefore ships at opacity 0 - invisible until asked
+	// for, so no existing cfg or fresh install changes look (the opt-in law), and a
+	// cfg with no cone-2 keys simply loads these defaults.
+	float vapStrength2    = 0.0f;  // cone 2 OPACITY - 0 = not there (the default)
+	float vapSize2        = 1.6f;  // cone 2 Size x, hull sizes
+	float vapSizeY2       = 1.6f;  // cone 2 Size y, hull sizes (equal to x = circular)
+	float vapSizeZ2       = 1.0f;  // cone 2 Size z, ratio of its Mach-angle reach
+	float vapStreaks2     = 0.0f;  // cone 2 streak count (0..2 -> 0..32)
+	float vapStreakChurn2 = 1.0f;  // cone 2 streak violence (0 = frozen)
+	float vapFlickHz2     = 4.0f;  // cone 2 breathing rate [Hz]
+	float vapPos2         = -1.0f; // cone 2 apex station, hull sizes - defaults AFT so
+	                               //   the first opacity nudge shows a second collar
+	                               //   behind the first rather than inside it
+	float vapPosX2        = 0.0f;  // cone 2 placement - see the cone-1 block's note
+	float vapPosY2        = 0.0f;
+	float vapPitch2       = 0.0f;
+	float vapYaw2         = 0.0f;
+	float vapMachMin2     = 0.85f; // cone 2's own Mach window - two bands, so the
+	float vapMachMax2     = 1.15f; //   collars can appear at different vehicle Mach
+	                               //   (real: flow goes supersonic over different
+	                               //   stations at different speeds)
+	DWORD vapColour2      = 0x00FAF0E8u; // cone 2 vapour colour
+	DWORD vapStreakCol2   = 0x00887C76u; // cone 2 streak colour
+	bool  vapBaseOn2      = true;  // cone 2's own BASE FILL pill
 	// THE MACH BAND, as a double-handled slider (his design, 2026-08-11 round 3 - the
 	// EXPANSION BAND's control kind reused). Track spans M 0.5 .. 1.5; the handles are
 	// where the shroud starts and stops existing, and the RAMPS live inside that window
@@ -785,7 +999,19 @@ struct OroEffectState {
 	                               //   upstream, ahead of the vessel centre. A per-hull
 	                               //   fact like the trail start and the VC cabin box, so
 	                               //   it is a knob forever rather than a constant waiting
-	                               //   to be baked.
+	                               //   to be baked. Renamed "Position z" on the panel when
+	                               //   x/y joined (2026-08-30, his fix round) - the KEY
+	                               //   stays VapourPos, so old cfgs load unchanged.
+	// FULL PLACEMENT (2026-08-30, his fix round: "for some vessels that's not
+	// enough"). Position x/y nudge the apex along the VESSEL's own axes (Orbiter's
+	// convention: x = right, y = up), in hull sizes like z; Pitch/Yaw tilt the
+	// cone's axis off the relative wind about the vessel's x/y axes, +-30 deg,
+	// pivoting at the apex. Bipolar, snap to zero; 0/0/0/0 = the pre-fix cone
+	// bit for bit. Roll is deliberately absent - a surface of revolution.
+	float vapPosX         = 0.0f;  // apex nudge along vessel +X (right), hull sizes
+	float vapPosY         = 0.0f;  // apex nudge along vessel +Y (up), hull sizes
+	float vapPitch        = 0.0f;  // axis tilt about vessel X [deg], + = apex up
+	float vapYaw          = 0.0f;  // axis tilt about vessel Y [deg], + = apex right
 	// Readouts - module-written, dialog-read (the reentryHeat discipline: a threshold
 	// nobody can see is indistinguishable from a bug).
 	float vapMach         = 0.0f;  // the camera-target vessel's Mach number
@@ -1284,10 +1510,77 @@ bool        OroBloomKnown();
 // See the long note above OroThrusterFx. SyncOut is called once per step, before any
 // consumer runs; SyncIn after anything replaces the selected group's stored values.
 // Cycle advances thrSel to the next AVAILABLE group, syncing both ways as it goes.
-void        OroThr_SyncOut();          // flat edit buffer -> thr[thrSel]
-void        OroThr_SyncIn();           // thr[thrSel] -> flat edit buffer
+void        OroThr_SyncOut();          // flat edit buffer -> the SELECTION's store
+                                       //   (thr[thrSel], or the owning override block;
+                                       //   bell-family fields always route to the group)
+void        OroThr_SyncIn();           // the selection's EFFECTIVE values -> flat buffer
 void        OroThr_Cycle();            // advance to the next group the vessel has
+                                       //   (resets the thruster selection to ALL)
+// --- per-thruster overrides (Phase B; all in OroModule.cpp) ------------------
+class VESSEL;                                // fwd only - this header carries no oapi types
+OroThrOvr*  OroThr_FindOvr(int thrIdx);      // NULL if the thruster owns no block
+OroThrOvr*  OroThr_EnsureOvr(int fam);       // adopt a family for the SELECTED thruster
+                                             //   (snapshot-from-group; NULL = pool full/ALL)
+void        OroThr_ClearOvr(int fam);        // drop a family from the selection; frees the
+                                             //   slot when neither family remains
+void        OroThr_ResetOvr();               // wipe pool + selection (class load / revert)
+void        OroThr_CycleThr(int dir);        // header-row thruster cycler: ALL <-> n/m,
+                                             //   within the selected group (+1 / -1)
+bool        OroThr_ClassMatch(VESSEL* v);    // does this vessel's class match the loaded
+                                             //   class file? (the class-faithful rule;
+                                             //   main thread only - it calls oapi)
+// The resolver every consumer reads through (invariant 26a's law at thruster
+// grain). MEMORY-ONLY on purpose: the render path may call it (live values, so
+// paused tuning keeps whatever responsiveness it has today), and a freed slot
+// self-heals to the group. fam is ORO_FAM_EXH or ORO_FAM_PRT; thrIdx -1 or an
+// unfaithful vessel resolves to the group.
+const OroThrusterFx& OroThr_Eff(int grp, int thrIdx, int fam);
+
+// --- THE PER-VESSEL CLASS CACHE (2026-08-30, his SRB report) -----------------
+// ORO loads ONE class file live - the focus vessel's - and used to apply it to
+// every vessel in the camera-target stack. With stock streams suppressed
+// STACK-WIDE, any stack vessel of a foreign class fell in the suppress/replace
+// gap the moment the loaded class's matching group pill was off: his tuned
+// Atlantis_SRB.cfg sat on disk while the launch flew bald boosters, because the
+// ORBITER's class said USERPrtOn = FALSE.
+// So foreign classes get a read-only settings CACHE: when a stack vessel's class
+// is first seen, its cfg's THRUSTER tables (groups + per-thruster override
+// blocks) load into a slot, and consumers resolve per VESSEL through EffC.
+// THE READ RULE IS THE CONSERVATIVE ONE: a foreign class WITH a cfg answers to
+// its own file; a foreign class WITHOUT one resolves to the live tables - which
+// is today's behaviour bit for bit, so untuned stacks change nothing.
+// The cache is read-only (the panel edits the FOCUS class only - invariant 26b
+// untouched), lazily filled on the main thread, invalidated on class save/load,
+// and wiped at simulation start (a file-static outliving the session is 23m's
+// landmine). Slots never move; EffC is memory-only, so the render path may call
+// it. Live per-thruster overrides still apply ONLY to focus-class vessels.
+int         OroThr_CacheFor(VESSEL* v);        // cache slot for v's class, or -1 =
+                                               //   use the LIVE tables (focus class,
+                                               //   no cfg on disk, or cache full).
+                                               //   Main thread only - may read a file.
+const OroThrusterFx& OroThr_EffC(int cacheIdx, int grp, int thrIdx, int fam);
+                                               // Eff through a cache slot (-1 = live).
+                                               //   Memory-only; render-path legal.
+const OroThrusterFx* OroThr_CacheGrp(int cacheIdx, int grp);  // NULL if slot invalid
+int         OroThr_CacheOvrSlot(int cacheIdx, int thrIdx);    // cached override slot
+                                                              //   owning the PRT family
+                                                              //   for that thruster, -1
+const OroThrusterFx* OroThr_CacheOvrFx(int cacheIdx, int slot);  // that slot's block
+DWORD       OroThr_CacheGen();                 // bumps on any cache load/drop/reset -
+                                               //   folded into the particle rebuild
+                                               //   signature so cached changes rebuild
+void        OroThr_CacheDrop(const char* cls); // invalidate one class (save/load hooks)
+void        OroThr_CacheReset();               // wipe all (simulation start)
 void        OroThr_SetPrtAll(bool on); // ORO's particle streams on/off for EVERY group
 bool        OroThr_AnyPrtOn();         // is ANY group streaming? (vessel-wide truth)
+// Patch (y) bridge for the PARTICLES page's COPY STOCK button. Plain floats on
+// purpose: this header stays free of oapi types, and the dialog never needs the
+// PARTICLESTREAMSPEC layout.
+int         OroPrt_StockSpecCount();   // stock streams matching the SELECTED GROUP (by thrust
+                                       //   direction, per-thruster duplicates folded);
+                                       //   -1 = patch (y) absent
+bool        OroPrt_StockSpecGet(int idx, float* size, float* life, float* rate, float* speed,
+                                float* spread, float* growth, float* slowdown,
+                                bool* diffuse, bool* airfade);
 const char* OroThr_Name(int grp);      // "MAIN" / "HOVER" / "RETRO" / "USER"
 int         OroThr_Count();            // how many groups this vessel has (1 = no cycling)

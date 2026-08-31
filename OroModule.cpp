@@ -345,18 +345,177 @@ void OroModule::DrawRainPoly(oapi::Sketchpad* pSkp)
 // lifting stays with the client-side storm light (patch s part 2), which dims only the SUN.
 void OroModule::DrawGloomPass()
 {
+	// TEMPORARY DIAGNOSTIC, ROUND 2 (2026-08-26). Round 1 sat BELOW this early return, so
+	// "all bits clear" could not distinguish "bailed here" from "never called" - the
+	// instrument was downstream of the thing it was measuring. These five are recorded
+	// BEFORE the return, and glassDiagI carries the intensity as the RENDER PATH sees it,
+	// which is the one value the clbkPreStep line cannot report.
+	glassDiag = 0x80;
+	if (rainIntensityLive > 0.002f) glassDiag |= 0x0100;
+	if (ipiReady)                   glassDiag |= 0x0200;
+	if (pCore)                      glassDiag |= 0x0400;
+	if (hFrameTex)                  glassDiag |= 0x0800;
+	if (pIPIGloom)                  glassDiag |= 0x1000;
+	if (viewGate)                   glassDiag |= 0x2000;
+	glassDiagI = rainIntensityLive;
+
 	if (rainIntensityLive <= 0.002f || !ipiReady || !pCore || !hFrameTex || !pIPIGloom) return;
 	// The SLIDER is read HERE, in the render path, not in clbkPreStep - which does not run
 	// while paused, so folding it in on the main thread made the control dead in exactly
 	// the state the look gets judged in (invariant 1).
 	float gs = g_fx.rainGloom; if (gs < 0.0f) gs = 0.0f; if (gs > 2.0f) gs = 2.0f;
 	const float gl = rainIntensityLive * gs * 0.5f;
-	if (gl <= 0.002f) return;
+
+	// --- RAINDROPS ON THE GLASS (2026-08-26, client patch h) --------------------
+	// VC ONLY, and that is a physical statement rather than a budget one: these drops
+	// are ON the canopy, so a view with no canopy in it has nowhere to put them. Note
+	// the flat internal modes (rainPanel) are deliberately NOT included - a 2D panel is
+	// an overlay painted by Pane::Render, not glass, and there is no window to wet.
+	float dr = 0.0f;
+	VECTOR3 cpos; MATRIX3 Rcam; double tanAp = 0.5;
+	// TEMPORARY DIAGNOSTIC (2026-08-26). The drops draw nothing and every link in the
+	// chain reads correct, which is the standing signal to stop reading and instrument.
+	// The render path may not log (invariant 1), so the bits are DEFERRED to clbkPreStep.
+	if (rainVC)                  glassDiag |= 0x01;
+	if (rainGlassOK)             glassDiag |= 0x02;
+	if (ipiDepthOK)              glassDiag |= 0x04;
+	if (g_fx.rainGlass > 0.001f) glassDiag |= 0x08;
+	if (viewH > 0)               glassDiag |= 0x10;
+	if (rainVC && rainGlassOK && ipiDepthOK && g_fx.rainGlass > 0.001f &&
+	    g_fx.rainGlassSize > 0.05f && viewH > 0 &&
+	    FillProjCam(cpos, Rcam, tanAp)) {
+		glassDiag |= 0x20;
+		// COVERAGE = the user's target x the glass fill (2026-08-26, his build-up ask).
+		// rainGlassWet is the canopy's own soak scalar (UpdateRain, GLASS_RISE), so the
+		// window FILLS toward wherever the Glass drops slider points - each cell's hash
+		// is its birth order, so drops pop in one at a time. The 0.9 keeps the approved
+		// full-storm look: slider 2.0 lands on the same ~90% cell occupancy he signed
+		// off, not a wall-to-wall 100%.
+		// ⚠️ rainIntensityLive is deliberately NOT a factor here: it carries the altitude
+		// gate through s_gateF semantics (climb out of the storm and the drops on your
+		// glass would thin out mid-climb, which is backwards - they were deposited). The
+		// glass scalar already snaps to zero with the pill, which is the A/B rule.
+		// ⚠️ rainGateLive, NOT rainIntensityLive: the gate says "is this a place drops
+		// can exist" (right world, below the weather - fading over the same 5-9 km band,
+		// which reads as the airflow stripping them on the climb), while the envelope
+		// says "is it raining NOW" - and deposited drops must survive the storm easing.
+		// Without the gate the fill scalar - which deliberately keeps running everywhere,
+		// like every envelope - would put drops on the glass in ORBIT.
+		float ds = g_fx.rainGlass; if (ds > 2.0f) ds = 2.0f;
+		float gw = g_fx.rainGlassWet; if (gw < 0.0f) gw = 0.0f; if (gw > 1.0f) gw = 1.0f;
+		dr = 0.9f * ds * 0.5f * gw * rainGateLive;
+	}
+
+	// Nothing to do at all - and BOTH terms have to be idle, because the drops must
+	// survive a Gloom slider at zero (they are not the overcast, they are on the window).
+	if (gl <= 0.002f && dr <= 0.002f) return;
+
 	SURFHANDLE hBB = pCore->GetBackBufferHandle();
 	if (!hBB || !pCore->CopyResource(hFrameTex, hBB)) return;
 	pIPIGloom->SetTexture("tSrc", hFrameTex, IPF_CLAMP_U | IPF_CLAMP_V | IPF_LINEAR);
 	pIPIGloom->SetOutput(0, hBB);
 	pIPIGloom->SetFloat("fGloom", gl > 1.0f ? 1.0f : gl);
+
+	if (dr > 0.002f) {
+		// ⚠️ PATCH (h). If the bind FAILS the buffer does not exist this session
+		// (SunGlare off) and the mask would be a constant - which would paper drops
+		// across the instrument panel. Degrade to no drops rather than assume, exactly
+		// as the Sketchpad clip does, and let the RAIN caption carry the reason.
+		if (!pCore->SetIPISceneDepth(pIPIGloom, "tDepth", IPF_POINT | IPF_CLAMP)) dr = 0.0f;
+		else glassDiag |= 0x40;
+	}
+	glassDiagDr = dr;
+
+	if (dr > 0.002f) {
+		// THE CAMERA AXES, EXPRESSED IN THE VESSEL FRAME. This is what nails the drops
+		// to the glass while the pilot looks around: the shader turns each pixel into a
+		// view ray, rotates it here, and hashes the lattice on the result - so the field
+		// is a property of the airframe, not of where the eye happens to point.
+		// Camera axes in WORLD are the COLUMNS of Rcam (ProjectToUV uses tmul, i.e.
+		// Rcam^T, to go world -> camera). tmul against the vessel rotation then takes
+		// them the rest of the way into the vessel frame.
+		const VECTOR3 cR = tmul(rainGlassRot, _V(Rcam.m11, Rcam.m21, Rcam.m31));
+		const VECTOR3 cU = tmul(rainGlassRot, _V(Rcam.m12, Rcam.m22, Rcam.m32));
+		const VECTOR3 cF = tmul(rainGlassRot, _V(Rcam.m13, Rcam.m23, Rcam.m33));
+		const float axR[3] = { (float)cR.x, (float)cR.y, (float)cR.z };
+		const float axU[3] = { (float)cU.x, (float)cU.y, (float)cU.z };
+		const float axF[3] = { (float)cF.x, (float)cF.y, (float)cF.z };
+		const float run[3] = { (float)rainGlassRun.x, (float)rainGlassRun.y, (float)rainGlassRun.z };
+
+		// SIZE, as lattice cells per radian - so it is an ANGULAR size and a drop does
+		// not change when the viewport does. 100 cells/rad puts a mid-size drop at
+		// ~13 px across on a 1920-wide frame at a typical VC aperture, which is about
+		// what a 5 mm drop on a canopy 0.8 m from the eye actually subtends.
+		// ⚠️ That is a good deal smaller than a windscreen PHOTOGRAPH suggests, and the
+		// difference is the camera: a phone sits ~30 cm from the glass, an eye sits
+		// 60-80 cm from a canopy, so the same drop covers about half the angle.
+		// 0..3 since 2026-08-26 (his spec); at/below 0.05 the entry condition above has
+		// already switched the drops off entirely, so this floor only guards the divide.
+		float dsz = g_fx.rainGlassSize; if (dsz < 0.08f) dsz = 0.08f; if (dsz > 3.0f) dsz = 3.0f;
+		float dln = g_fx.rainGlassLens; if (dln < 0.0f) dln = 0.0f; if (dln > 2.0f) dln = 2.0f;
+
+		pIPIGloom->SetFloat("fDrop",     dr);
+		pIPIGloom->SetFloat("fDropCell", 100.0f / dsz);
+		pIPIGloom->SetFloat("fDropLens", 4.0f * dln);
+		// (The 1.6 m glass-plane guess that used to sit here is GONE - the mask is the
+		// SIGN of the depth now: mesh groups the author flags with FLAG 1000 write their
+		// distance negated in the client's depth pass, patch (h) part 2. His design,
+		// 2026-08-26: "the burden is on the user to apply it to the correct groups" -
+		// exact per-pixel windows on any hull, no per-class number to tune, and the deep
+		// cabin that broke the plane heuristic cannot break an authored mask.)
+		pIPIGloom->SetFloat("fDropDbg",  g_fx.rainGlassDbg);   // TEMPORARY scaffold
+		// THE RUNNERS (2026-08-27). Amount is his knob; SPEED is not - it derives from
+		// the sensed |gravity + airflow| (invariant 25e), mapped to column-cells/s.
+		// The square term is what separates the regimes: parked (mag ~9.8) a runner
+		// crawls the pane in ~20 s; at approach speeds it sweeps aft in under a second.
+		{
+			float ra = g_fx.rainGlassRunners; if (ra < 0.0f) ra = 0.0f; if (ra > 3.0f) ra = 3.0f;
+			const float mag  = rainGlassRunMag;
+			float radS = 0.045f + mag * mag * 4.0e-5f;         // rad/s along the meridian
+			if (radS > 0.9f) radS = 0.9f;
+			pIPIGloom->SetFloat("fRunAmt", ra);
+			pIPIGloom->SetFloat("fRunSpd", radS);
+			// Drop size scales BOTH families; Runner size sets only their RATIO -
+			// one uniform carries the product, and the shader's column-overflow cap
+			// guards the combined extreme.
+			float rsz = g_fx.rainGlassRunSize; if (rsz < 0.4f) rsz = 0.4f; if (rsz > 2.0f) rsz = 2.0f;
+			pIPIGloom->SetFloat("fRunSize", dsz * rsz);
+			pIPIGloom->SetFloat("fTime",   animT);             // real time (invariant 4)
+			// The streaks' polar chart: an orthonormal basis AROUND the run axis, built
+			// from whichever vessel axis is least parallel to it so it can never
+			// degenerate. The chart is anchored to the AXIS, not to any per-pixel
+			// projection - the projection is exactly what rang the forward window.
+			// ref = vessel +X, always: the run axis lives in the vessel's Y/Z plane
+			// (gravity down, airflow aft) short of extreme sideslip, so X stays
+			// clear of it through the WHOLE down->aft tilt of an acceleration - a
+			// conditional ref would snap the chart once mid-takeoff.
+			const VECTOR3 R1  = rainGlassRun;
+			const VECTOR3 ref = (fabs(R1.x) < 0.9) ? _V(1, 0, 0) : _V(0, 1, 0);
+			VECTOR3 R2 = crossp(ref, R1); R2 = R2 / length(R2);
+			const VECTOR3 R3 = crossp(R1, R2);
+			const float rA[3] = { (float)R2.x, (float)R2.y, (float)R2.z };
+			const float rB[3] = { (float)R3.x, (float)R3.y, (float)R3.z };
+			pIPIGloom->SetFloat("vGlRunA", rA, sizeof(rA));
+			pIPIGloom->SetFloat("vGlRunB", rB, sizeof(rB));
+		}
+		pIPIGloom->SetFloat("fTanAp",    (float)tanAp);
+		pIPIGloom->SetFloat("fAspect",   (float)viewW / (float)viewH);
+		pIPIGloom->SetFloat("vGlR",   axR, sizeof(axR));
+		pIPIGloom->SetFloat("vGlU",   axU, sizeof(axU));
+		pIPIGloom->SetFloat("vGlF",   axF, sizeof(axF));
+		pIPIGloom->SetFloat("vGlRun", run, sizeof(run));
+	}
+	else {
+		pIPIGloom->SetFloat("fDrop", 0.0f);
+		// UNBIND, don't just branch past it. The shader's tDepth fetch is inside a
+		// uniform branch and is not taken here, but leaving a texture bound across
+		// frames is how a pointer outlives the thing it points at - the 23(m) shape.
+		// The interface is per session (ReleaseDeviceResources) and the bind is redone
+		// every frame, so this is belt and braces rather than a live bug; it costs one
+		// call in a path that is already doing nothing.
+		pIPIGloom->SetTexture("tDepth", NULL, 0);
+	}
+
 	pIPIGloom->Execute((DWORD)0, true, gcIPInterface::Rect);
 }
 
@@ -623,6 +782,12 @@ namespace {
 		// (23i) - a test rig that comes back on at load reads as a bug in the weather.
 		{ "RainOn",           &g_fx.rainEnabled,      ST_B },
 		{ "RainGloom",        &g_fx.rainGloom,        ST_F },
+		{ "RainGlass",        &g_fx.rainGlass,        ST_F },
+		{ "RainGlassSize",    &g_fx.rainGlassSize,    ST_F },
+		{ "RainGlassLens",    &g_fx.rainGlassLens,    ST_F },
+		{ "RainGlassRise",    &g_fx.rainGlassRise,    ST_F },
+		{ "RainGlassRunners", &g_fx.rainGlassRunners, ST_F },
+		{ "RainGlassRunSize", &g_fx.rainGlassRunSize, ST_F },
 		{ "RainDensity",      &g_fx.rainDensity,      ST_F },
 		{ "RainStreak",       &g_fx.rainStreak,       ST_F },
 		{ "RainStreakGlow",   &g_fx.rainStreakA,      ST_F },
@@ -837,6 +1002,8 @@ namespace {
 		{ "PrtDiffuse",       &g_fx.prtDiffuse,       ST_B },
 		{ "PrtAirFade",       &g_fx.prtAirFade,       ST_B },
 		{ "PrtColour",        &g_fx.prtColour,        ST_I },
+	{ "PrtColour2",       &g_fx.prtColour2,       ST_I },
+	{ "PrtTexStock",      &g_fx.prtTexStock,      ST_B },
 		{ "ReentryTrim",      &g_fx.reentry,          ST_F },
 		{ "PlasSaturation",   &g_fx.plasSat,          ST_F },
 		{ "PlasHullLight",    &g_fx.plasLight,        ST_F },
@@ -870,12 +1037,49 @@ namespace {
 		// questions about the airframe: how wide the shroud stands off, and where along
 		// the flow axis the flow first goes supersonic (which is a question about the
 		// nose). Its LENGTH is deliberately absent - that comes from the Mach angle.
-		{ "VapourStrength",   &g_fx.vapStrength,      ST_F },
-		{ "VapourSize",       &g_fx.vapSize,          ST_F },
-		{ "VapourPos",        &g_fx.vapPos,           ST_F },
+		{ "VapourStrength",   &g_fx.vapStrength,      ST_F },   // the dialog says OPACITY
+		                                                        // since 2026-08-29; the key
+		                                                        // stays so tuned cfgs load
+		{ "VapourSize",       &g_fx.vapSize,          ST_F },   // = Size X, the master. Y/Z
+		{ "VapourSizeY",      &g_fx.vapSizeY,         ST_F },   //   are RATIOS of it, so a
+		{ "VapourSizeZ",      &g_fx.vapSizeZ,         ST_F },   //   pre-split cfg (no Y/Z
+		                                                        //   keys -> defaults 1.0)
+		                                                        //   loads as the old cone
+		                                                        //   bit for bit
+		{ "VapourStreaks",    &g_fx.vapStreaks,       ST_F },   // 0 = clean sheet (default)
+		{ "VapourStreakChurn",&g_fx.vapStreakChurn,   ST_F },
+		{ "VapourColour",     &g_fx.vapColour,        ST_I },   // COLORREF bits via int,
+		{ "VapourStreakCol",  &g_fx.vapStreakCol,     ST_I },   //   the PlasmaTint pattern
+		{ "VapourBaseFill",   &g_fx.vapBaseOn,        ST_B },   // the base disc pill
+		{ "VapourPos",        &g_fx.vapPos,           ST_F },   // "Position z" on the panel;
+	                                                        //   key unchanged (old cfgs)
+	{ "VapourPosX",       &g_fx.vapPosX,          ST_F },   // full placement, 2026-08-30
+	{ "VapourPosY",       &g_fx.vapPosY,          ST_F },   //   (missing keys = 0 = the
+	{ "VapourPitch",      &g_fx.vapPitch,         ST_F },   //   pre-fix cone exactly)
+	{ "VapourYaw",        &g_fx.vapYaw,           ST_F },
 		{ "VapourMachMin",    &g_fx.vapMachMin,       ST_F },   // the band handles: where
 		{ "VapourMachMax",    &g_fx.vapMachMax,       ST_F },   //   the shroud lives
 		{ "VapourFlickHz",    &g_fx.vapFlickHz,       ST_F },
+		// THE SECOND CONE (2026-08-29): the identical set with a 2. A cfg without
+		// these keys loads the defaults, whose opacity is 0 - no second cone until
+		// a hull is given one, so nothing older changes look.
+		{ "Vapour2Strength",  &g_fx.vapStrength2,     ST_F },
+		{ "Vapour2Size",      &g_fx.vapSize2,         ST_F },
+		{ "Vapour2SizeY",     &g_fx.vapSizeY2,        ST_F },
+		{ "Vapour2SizeZ",     &g_fx.vapSizeZ2,        ST_F },
+		{ "Vapour2Streaks",   &g_fx.vapStreaks2,      ST_F },
+		{ "Vapour2StreakChurn",&g_fx.vapStreakChurn2, ST_F },
+		{ "Vapour2Colour",    &g_fx.vapColour2,       ST_I },
+		{ "Vapour2StreakCol", &g_fx.vapStreakCol2,    ST_I },
+		{ "Vapour2BaseFill",  &g_fx.vapBaseOn2,       ST_B },
+		{ "Vapour2Pos",       &g_fx.vapPos2,          ST_F },
+	{ "Vapour2PosX",      &g_fx.vapPosX2,         ST_F },
+	{ "Vapour2PosY",      &g_fx.vapPosY2,         ST_F },
+	{ "Vapour2Pitch",     &g_fx.vapPitch2,        ST_F },
+	{ "Vapour2Yaw",       &g_fx.vapYaw2,          ST_F },
+		{ "Vapour2MachMin",   &g_fx.vapMachMin2,      ST_F },
+		{ "Vapour2MachMax",   &g_fx.vapMachMax2,      ST_F },
+		{ "Vapour2FlickHz",   &g_fx.vapFlickHz2,      ST_F },
 
 		{ "CopShift",         &g_fx.copShift,         ST_F },   // the most per-vessel
 		                                                        // number in the addon
@@ -1190,6 +1394,10 @@ bool OroSettings_SaveScope(int mask)
 				}
 			}
 			oapiCloseFile(fc, FILE_OUT);
+			// The class cache: this file just changed on disk, so any cached copy of
+			// it is stale. The focus class resolves live anyway; this covers the
+			// focus-it, tune-it, save-it, focus-away round trip.
+			OroThr_CacheDrop(g_setClass);
 		}
 	}
 
@@ -1349,7 +1557,9 @@ void OroSettings_SaveHelpSize(int w, int h)
 	A.prtRate = B.prtRate;                 A.prtSpeed = B.prtSpeed;               \
 	A.prtSpread = B.prtSpread;             A.prtGrowth = B.prtGrowth;             \
 	A.prtSlowdown = B.prtSlowdown;         A.prtDiffuse = B.prtDiffuse;           \
-	A.prtAirFade = B.prtAirFade;           A.prtColour = B.prtColour;
+	A.prtAirFade = B.prtAirFade;           A.prtColour = B.prtColour;             \
+	A.prtColour2 = B.prtColour2;           A.prtTexStock = B.prtTexStock;         \
+	strcpy_s(A.prtTexName, B.prtTexName);
 
 // ----------------------------------------------------------------------------
 // THE PER-GROUP CONFIG KEYS. One table, walked four times with a prefix, rather than
@@ -1364,51 +1574,78 @@ void OroSettings_SaveHelpSize(int w, int h)
 // user's existing tuning was, nothing is lost, and nothing looks different until they
 // cycle and change something. A prefixed key, when present, then overrides its group.
 // ----------------------------------------------------------------------------
-struct ThrKey { const char* key; size_t off; int type; };
+// fam (Phase B): which override FAMILY the key belongs to. EXH and PRT can be
+// owned per thruster; BELL is deliberately group-only in v1 - a bell edit with a
+// thruster selected edits the GROUP, and bell keys are never written per thruster.
+struct ThrKey { const char* key; size_t off; int type; int fam; };
 static const ThrKey THRSET[] = {
-	{ "ShimmerOn",      offsetof(OroThrusterFx, shimmerEnabled), ST_B },
-	{ "Shimmer",        offsetof(OroThrusterFx, shimmer),        ST_F },
-	{ "ShimmerOfs",     offsetof(OroThrusterFx, shimmerOfs),     ST_F },
-	{ "PlumeOn",        offsetof(OroThrusterFx, plumeEnabled),   ST_B },
-	{ "Plume",          offsetof(OroThrusterFx, plume),          ST_F },
-	{ "PlumePhysics",   offsetof(OroThrusterFx, plumePhysics),   ST_B },
-	{ "PlumeExpHi",     offsetof(OroThrusterFx, plumeExpHi),     ST_F },
-	{ "PlumeExpLo",     offsetof(OroThrusterFx, plumeExpLo),     ST_F },
-	{ "PlumeWidth",     offsetof(OroThrusterFx, plumeWidth),     ST_F },
-	{ "PlumeLen",       offsetof(OroThrusterFx, plumeLen),       ST_F },
-	{ "PlumeCells",     offsetof(OroThrusterFx, plumeCells),     ST_F },
-	{ "PlumeDiamond",   offsetof(OroThrusterFx, plumeDiamond),   ST_F },
-	{ "PlumeSpacing",   offsetof(OroThrusterFx, plumeSpacing),   ST_F },
-	{ "PlumeBloomWid",  offsetof(OroThrusterFx, plumeBloomWid),  ST_F },
-	{ "PlumeBloomBri",  offsetof(OroThrusterFx, plumeBloomBri),  ST_F },
-	{ "PlumeThroatOfs", offsetof(OroThrusterFx, plumeThroatOfs), ST_F },
-	{ "PlumeThroat",    offsetof(OroThrusterFx, plumeThroat),    ST_F },
-	{ "PlumeSootRate",  offsetof(OroThrusterFx, plumeSootRate),  ST_F },
-	{ "PlumeSoot",      offsetof(OroThrusterFx, plumeSoot),      ST_F },
-	{ "PlumeColJet",    offsetof(OroThrusterFx, plumeColJet),    ST_I },
-	{ "PlumeColBloom",  offsetof(OroThrusterFx, plumeColBloom),  ST_I },
-	{ "PlumeBellOn",    offsetof(OroThrusterFx, plumeBellOn),    ST_B },
-	{ "PlumeBellGlow",  offsetof(OroThrusterFx, plumeBellGlow),  ST_F },
-	{ "PlumeBellHeatT", offsetof(OroThrusterFx, plumeBellHeatT), ST_F },
-	{ "PlumeBellCoolT", offsetof(OroThrusterFx, plumeBellCoolT), ST_F },
-	{ "BellTint",       offsetof(OroThrusterFx, bellTint),       ST_I },
-	{ "PrtOn",          offsetof(OroThrusterFx, prtEnabled),     ST_B },
-	{ "PrtOffset",      offsetof(OroThrusterFx, prtOffset),      ST_F },
-	{ "PrtSize",        offsetof(OroThrusterFx, prtSize),        ST_F },
-	{ "PrtLifetime",    offsetof(OroThrusterFx, prtLifetime),    ST_F },
-	{ "PrtRate",        offsetof(OroThrusterFx, prtRate),        ST_F },
-	{ "PrtSpeed",       offsetof(OroThrusterFx, prtSpeed),       ST_F },
-	{ "PrtSpread",      offsetof(OroThrusterFx, prtSpread),      ST_F },
-	{ "PrtGrowth",      offsetof(OroThrusterFx, prtGrowth),      ST_F },
-	{ "PrtSlowdown",    offsetof(OroThrusterFx, prtSlowdown),    ST_F },
-	{ "PrtDiffuse",     offsetof(OroThrusterFx, prtDiffuse),     ST_B },
-	{ "PrtAirFade",     offsetof(OroThrusterFx, prtAirFade),     ST_B },
-	{ "PrtColour",      offsetof(OroThrusterFx, prtColour),      ST_I },
+	{ "ShimmerOn",      offsetof(OroThrusterFx, shimmerEnabled), ST_B, ORO_FAM_EXH },
+	{ "Shimmer",        offsetof(OroThrusterFx, shimmer),        ST_F, ORO_FAM_EXH },
+	{ "ShimmerOfs",     offsetof(OroThrusterFx, shimmerOfs),     ST_F, ORO_FAM_EXH },
+	{ "PlumeOn",        offsetof(OroThrusterFx, plumeEnabled),   ST_B, ORO_FAM_EXH },
+	{ "Plume",          offsetof(OroThrusterFx, plume),          ST_F, ORO_FAM_EXH },
+	{ "PlumePhysics",   offsetof(OroThrusterFx, plumePhysics),   ST_B, ORO_FAM_EXH },
+	{ "PlumeExpHi",     offsetof(OroThrusterFx, plumeExpHi),     ST_F, ORO_FAM_EXH },
+	{ "PlumeExpLo",     offsetof(OroThrusterFx, plumeExpLo),     ST_F, ORO_FAM_EXH },
+	{ "PlumeWidth",     offsetof(OroThrusterFx, plumeWidth),     ST_F, ORO_FAM_EXH },
+	{ "PlumeLen",       offsetof(OroThrusterFx, plumeLen),       ST_F, ORO_FAM_EXH },
+	{ "PlumeCells",     offsetof(OroThrusterFx, plumeCells),     ST_F, ORO_FAM_EXH },
+	{ "PlumeDiamond",   offsetof(OroThrusterFx, plumeDiamond),   ST_F, ORO_FAM_EXH },
+	{ "PlumeSpacing",   offsetof(OroThrusterFx, plumeSpacing),   ST_F, ORO_FAM_EXH },
+	{ "PlumeBloomWid",  offsetof(OroThrusterFx, plumeBloomWid),  ST_F, ORO_FAM_EXH },
+	{ "PlumeBloomBri",  offsetof(OroThrusterFx, plumeBloomBri),  ST_F, ORO_FAM_EXH },
+	{ "PlumeThroatOfs", offsetof(OroThrusterFx, plumeThroatOfs), ST_F, ORO_FAM_EXH },
+	{ "PlumeThroat",    offsetof(OroThrusterFx, plumeThroat),    ST_F, ORO_FAM_EXH },
+	{ "PlumeSootRate",  offsetof(OroThrusterFx, plumeSootRate),  ST_F, ORO_FAM_EXH },
+	{ "PlumeSoot",      offsetof(OroThrusterFx, plumeSoot),      ST_F, ORO_FAM_EXH },
+	{ "PlumeColJet",    offsetof(OroThrusterFx, plumeColJet),    ST_I, ORO_FAM_EXH },
+	{ "PlumeColBloom",  offsetof(OroThrusterFx, plumeColBloom),  ST_I, ORO_FAM_EXH },
+	{ "PlumeBellOn",    offsetof(OroThrusterFx, plumeBellOn),    ST_B, ORO_FAM_BELL },
+	{ "PlumeBellGlow",  offsetof(OroThrusterFx, plumeBellGlow),  ST_F, ORO_FAM_BELL },
+	{ "PlumeBellHeatT", offsetof(OroThrusterFx, plumeBellHeatT), ST_F, ORO_FAM_BELL },
+	{ "PlumeBellCoolT", offsetof(OroThrusterFx, plumeBellCoolT), ST_F, ORO_FAM_BELL },
+	{ "BellTint",       offsetof(OroThrusterFx, bellTint),       ST_I, ORO_FAM_BELL },
+	{ "PrtOn",          offsetof(OroThrusterFx, prtEnabled),     ST_B, ORO_FAM_PRT },
+	{ "PrtOffset",      offsetof(OroThrusterFx, prtOffset),      ST_F, ORO_FAM_PRT },
+	{ "PrtSize",        offsetof(OroThrusterFx, prtSize),        ST_F, ORO_FAM_PRT },
+	{ "PrtLifetime",    offsetof(OroThrusterFx, prtLifetime),    ST_F, ORO_FAM_PRT },
+	{ "PrtRate",        offsetof(OroThrusterFx, prtRate),        ST_F, ORO_FAM_PRT },
+	{ "PrtSpeed",       offsetof(OroThrusterFx, prtSpeed),       ST_F, ORO_FAM_PRT },
+	{ "PrtSpread",      offsetof(OroThrusterFx, prtSpread),      ST_F, ORO_FAM_PRT },
+	{ "PrtGrowth",      offsetof(OroThrusterFx, prtGrowth),      ST_F, ORO_FAM_PRT },
+	{ "PrtSlowdown",    offsetof(OroThrusterFx, prtSlowdown),    ST_F, ORO_FAM_PRT },
+	{ "PrtDiffuse",     offsetof(OroThrusterFx, prtDiffuse),     ST_B, ORO_FAM_PRT },
+	{ "PrtAirFade",     offsetof(OroThrusterFx, prtAirFade),     ST_B, ORO_FAM_PRT },
+	{ "PrtColour",      offsetof(OroThrusterFx, prtColour),      ST_I, ORO_FAM_PRT },
+	{ "PrtColour2",     offsetof(OroThrusterFx, prtColour2),     ST_I, ORO_FAM_PRT },
+	{ "PrtTexStock",    offsetof(OroThrusterFx, prtTexStock),    ST_B, ORO_FAM_PRT },
 };
 static const int NTHRSET = (int)(sizeof(THRSET) / sizeof(THRSET[0]));
 
+// Copy the fields of the given FAMILIES between two blocks. prtTexName is not in
+// THRSET (it is the one string key, written separately) but it IS particle-family
+// state, so it rides the PRT mask here.
+static void ThrCopyFam(OroThrusterFx& dst, const OroThrusterFx& src, int famMask)
+{
+	char* d = (char*)&dst;
+	const char* s = (const char*)&src;
+	for (int i = 0; i < NTHRSET; i++) {
+		if (!(THRSET[i].fam & famMask)) continue;
+		switch (THRSET[i].type) {
+		case ST_F: *(float*)(d + THRSET[i].off) = *(const float*)(s + THRSET[i].off); break;
+		case ST_B: *(bool*) (d + THRSET[i].off) = *(const bool*) (s + THRSET[i].off); break;
+		case ST_I: *(DWORD*)(d + THRSET[i].off) = *(const DWORD*)(s + THRSET[i].off); break;
+		}
+	}
+	if (famMask & ORO_FAM_PRT) strcpy_s(dst.prtTexName, src.prtTexName);
+}
+
 static void ThrWriteGroups(FILEHANDLE f)
 {
+	// Bank the sliders FIRST: a save clicked right after an edit - or while PAUSED,
+	// when clbkPreStep's periodic SyncOut is not running - must write what the panel
+	// shows, not last frame's storage.
+	OroThr_SyncOut();
 	char key[96];
 	for (int gi = 0; gi < ORO_THR_N; gi++) {
 		char* base = (char*)&g_fx.thr[gi];
@@ -1423,6 +1660,47 @@ static void ThrWriteGroups(FILEHANDLE f)
 			case ST_B: oapiWriteItem_bool (f, K(key), *(bool*)p);          break;
 			case ST_I: oapiWriteItem_int  (f, K(key), (int)*(DWORD*)p);    break;
 			}
+		}
+		// The ONE string key, special-cased beside the typed table rather than
+		// threading an ST_S through the whole machinery. Written only when set -
+		// Orbiter's writer TRUNCATES, so clearing back to the synthesized atlas
+		// erases the old key on the next save for free (no stale-block trap).
+		OroThrusterFx& T = g_fx.thr[gi];
+		if (T.prtTexName[0]) {
+			sprintf_s(key, "%sPrtTex", OroThr_Name(gi));
+			oapiWriteItem_string(f, K(key), T.prtTexName);
+		}
+	}
+	// ---- PER-THRUSTER OVERRIDE BLOCKS (Phase B) ----------------------------
+	// Sparse: only live blocks write, only the FAMILIES they own, each behind an
+	// explicit flag key (THR<idx>_OvrExh / _OvrPrt). The flag is load-bearing:
+	// block-exists is the flag, never "some key happened to be present", so a
+	// hand-edited partial block still loads sanely with group values as fallback
+	// (the 17c class of read rule). The truncating writer erases CLEARED blocks
+	// on the next save for free.
+	for (int s = 0; s < ORO_THR_OVR_MAX; s++) {
+		const OroThrOvr& o = g_fx.thrOvr[s];
+		if (o.thrIdx < 0 || (!o.ovrExh && !o.ovrPrt)) continue;
+		char* base = (char*)&o.fx;
+		oapiWriteLine(f, K(""));
+		sprintf_s(key, "; --- thruster %d override ---", o.thrIdx);
+		oapiWriteLine(f, key);
+		if (o.ovrExh) { sprintf_s(key, "THR%d_OvrExh", o.thrIdx); oapiWriteItem_bool(f, K(key), true); }
+		if (o.ovrPrt) { sprintf_s(key, "THR%d_OvrPrt", o.thrIdx); oapiWriteItem_bool(f, K(key), true); }
+		const int famMask = (o.ovrExh ? ORO_FAM_EXH : 0) | (o.ovrPrt ? ORO_FAM_PRT : 0);
+		for (int i = 0; i < NTHRSET; i++) {
+			if (!(THRSET[i].fam & famMask)) continue;
+			sprintf_s(key, "THR%d_%s", o.thrIdx, THRSET[i].key);
+			void* p = base + THRSET[i].off;
+			switch (THRSET[i].type) {
+			case ST_F: oapiWriteItem_float(f, K(key), (double)*(float*)p); break;
+			case ST_B: oapiWriteItem_bool (f, K(key), *(bool*)p);          break;
+			case ST_I: oapiWriteItem_int  (f, K(key), (int)*(DWORD*)p);    break;
+			}
+		}
+		if (o.ovrPrt && o.fx.prtTexName[0]) {
+			sprintf_s(key, "THR%d_PrtTex", o.thrIdx);
+			oapiWriteItem_string(f, K(key), (char*)o.fx.prtTexName);
 		}
 	}
 }
@@ -1451,22 +1729,435 @@ static void ThrReadGroups(FILEHANDLE f)
 			case ST_I: { int    v; if (oapiReadItem_int  (f, K(key), v)) *(DWORD*)p = (DWORD)v; break; }
 			}
 		}
+		// The string key (see ThrWriteGroups): present = override the group; absent =
+		// keep current, the same rule as every other per-class look setting.
+		char buf[256];
+		sprintf_s(key, "%sPrtTex", OroThr_Name(gi));
+		if (oapiReadItem_string(f, K(key), buf)) {
+			buf[sizeof(g_fx.thr[gi].prtTexName) - 1] = 0;
+			strcpy_s(g_fx.thr[gi].prtTexName, buf);
+		}
 	}
-	OroThr_SyncIn();      // and show the selected group on the sliders
+	// STEP 3 - PER-THRUSTER OVERRIDE BLOCKS (Phase B). The pool was wiped by the
+	// class load before this file was opened, so everything here is a fresh read.
+	// GROUPS FIRST is load-bearing: each block's base is a snapshot of its own
+	// thruster's GROUP as just loaded, and any key the file is missing keeps that
+	// fallback (the 17c class of read rule). Probing is bounded by the FOCUS
+	// vessel's real thruster count - the class these settings belong to - so a
+	// stale key from a reworked addon version is simply never asked about.
+	{
+		VESSEL* v = oapiGetFocusInterface();
+		const int nthr = v ? (int)v->GetThrusterCount() : 0;
+		const int nprobe = nthr < 96 ? nthr : 96;
+		int nloaded = 0;
+		char buf[256];
+		for (int ti = 0; ti < nprobe; ti++) {
+			bool fe = false, fp = false; bool b;
+			sprintf_s(key, "THR%d_OvrExh", ti);
+			if (oapiReadItem_bool(f, K(key), b)) fe = b;
+			sprintf_s(key, "THR%d_OvrPrt", ti);
+			if (oapiReadItem_bool(f, K(key), b)) fp = b;
+			if (!fe && !fp) continue;
+			THRUSTER_HANDLE th = v->GetThrusterHandleByIndex((DWORD)ti);
+			if (!th) continue;
+			const int grp = OroThrusterGroupOf(v, th);
+			if (grp < 0) continue;
+			OroThrOvr* o = NULL;
+			for (int s = 0; s < ORO_THR_OVR_MAX && !o; s++)
+				if (g_fx.thrOvr[s].thrIdx < 0) o = &g_fx.thrOvr[s];
+			if (!o) break;                              // pool full: the rest stay group
+			o->thrIdx = ti;
+			o->ovrExh = fe;
+			o->ovrPrt = fp;
+			o->fx = g_fx.thr[grp];                      // the fallback base
+			const int famMask = (fe ? ORO_FAM_EXH : 0) | (fp ? ORO_FAM_PRT : 0);
+			char* base = (char*)&o->fx;
+			for (int i = 0; i < NTHRSET; i++) {
+				if (!(THRSET[i].fam & famMask)) continue;
+				sprintf_s(key, "THR%d_%s", ti, THRSET[i].key);
+				void* p = base + THRSET[i].off;
+				switch (THRSET[i].type) {
+				case ST_F: { double d; if (oapiReadItem_float(f, K(key), d)) *(float*)p = (float)d; break; }
+				case ST_B: { bool  bb; if (oapiReadItem_bool (f, K(key), bb)) *(bool*)p  = bb;      break; }
+				case ST_I: { int   iv; if (oapiReadItem_int  (f, K(key), iv)) *(DWORD*)p = (DWORD)iv; break; }
+				}
+			}
+			if (fp) {
+				sprintf_s(key, "THR%d_PrtTex", ti);
+				if (oapiReadItem_string(f, K(key), buf)) {
+					buf[sizeof(o->fx.prtTexName) - 1] = 0;
+					strcpy_s(o->fx.prtTexName, buf);
+				}
+			}
+			nloaded++;
+		}
+		if (nloaded)
+			oapiWriteLogV("ORO: loaded %d per-thruster override block%s.",
+			              nloaded, nloaded == 1 ? "" : "s");
+	}
+	OroThr_SyncIn();      // and show the selection on the sliders
 }
 
 static int ThrClamp(int g) { return (g < 0 || g >= ORO_THR_N) ? ORO_THR_MAIN : g; }
 
+static OBJHANDLE PrtSpecVessel();          // the PANEL vessel (defined below, COPY STOCK's)
+
+// The selection's owning override block, if any (Phase B).
+static OroThrOvr* ThrSelOvr()
+{
+	return (g_fx.thrThrSel >= 0) ? OroThr_FindOvr(g_fx.thrThrSel) : NULL;
+}
+
 void OroThr_SyncOut()
 {
-	OroThrusterFx& d = g_fx.thr[ThrClamp(g_fx.thrSel)];
-	ORO_THR_FIELDS(d, g_fx)
+	// Gather the flat buffer once, then route each FAMILY to its owner (the law in
+	// OroState.h: an owned family to its override block, bell ALWAYS to the group,
+	// everything un-owned to the group). With no thruster selected this degenerates
+	// to the original whole-struct copy into thr[thrSel], bit for bit.
+	OroThrusterFx cur;
+	ORO_THR_FIELDS(cur, g_fx)
+	OroThrusterFx& grp = g_fx.thr[ThrClamp(g_fx.thrSel)];
+	OroThrOvr* o = ThrSelOvr();
+	int grpMask = ORO_FAM_BELL | ORO_FAM_EXH | ORO_FAM_PRT;
+	if (o && o->ovrExh) { ThrCopyFam(o->fx, cur, ORO_FAM_EXH); grpMask &= ~ORO_FAM_EXH; }
+	if (o && o->ovrPrt) { ThrCopyFam(o->fx, cur, ORO_FAM_PRT); grpMask &= ~ORO_FAM_PRT; }
+	ThrCopyFam(grp, cur, grpMask);
 }
 
 void OroThr_SyncIn()
 {
-	const OroThrusterFx& s = g_fx.thr[ThrClamp(g_fx.thrSel)];
-	ORO_THR_FIELDS(g_fx, s)
+	// Compose the selection's EFFECTIVE values: group base, owned families overlaid.
+	OroThrusterFx eff = g_fx.thr[ThrClamp(g_fx.thrSel)];
+	OroThrOvr* o = ThrSelOvr();
+	if (o && o->ovrExh) ThrCopyFam(eff, o->fx, ORO_FAM_EXH);
+	if (o && o->ovrPrt) ThrCopyFam(eff, o->fx, ORO_FAM_PRT);
+	ORO_THR_FIELDS(g_fx, eff)
+}
+
+// ---- the override pool (Phase B, 2026-08-30) --------------------------------
+// Fixed array, never compacted (slot-address stability); memory-only lookups so
+// the render path may resolve through them. The laws live above OroThrOvr.
+
+OroThrOvr* OroThr_FindOvr(int thrIdx)
+{
+	if (thrIdx < 0) return NULL;
+	for (int i = 0; i < ORO_THR_OVR_MAX; i++)
+		if (g_fx.thrOvr[i].thrIdx == thrIdx) return &g_fx.thrOvr[i];
+	return NULL;
+}
+
+const OroThrusterFx& OroThr_Eff(int grp, int thrIdx, int fam)
+{
+	if (thrIdx >= 0) {
+		for (int i = 0; i < ORO_THR_OVR_MAX; i++) {
+			const OroThrOvr& o = g_fx.thrOvr[i];
+			if (o.thrIdx != thrIdx) continue;
+			// re-checking the flag here is what lets a CLEAR landing mid-frame
+			// self-heal to group values instead of dangling
+			if ((fam == ORO_FAM_EXH && o.ovrExh) || (fam == ORO_FAM_PRT && o.ovrPrt))
+				return o.fx;
+			break;
+		}
+	}
+	return g_fx.thr[ThrClamp(grp)];
+}
+
+OroThrOvr* OroThr_EnsureOvr(int fam)
+{
+	const int ti = g_fx.thrThrSel;
+	if (ti < 0 || !(fam & (ORO_FAM_EXH | ORO_FAM_PRT))) return NULL;
+	OroThrOvr* o = OroThr_FindOvr(ti);
+	if (!o) {
+		for (int i = 0; i < ORO_THR_OVR_MAX && !o; i++)
+			if (g_fx.thrOvr[i].thrIdx < 0) o = &g_fx.thrOvr[i];
+		if (!o) return NULL;                 // pool full (24 blocks): the edit still lands
+		                                     //   on the group - sparse is the design
+		o->thrIdx = ti;
+		o->ovrExh = o->ovrPrt = false;
+		o->fx = g_fx.thr[ThrClamp(g_fx.thrSel)];
+	}
+	// Adopting a family snapshots it from the GROUP at that moment; the edit that
+	// caused this lands on the block at the next SyncOut, so the jet keeps looking
+	// as it did except the one thing that moved.
+	if ((fam & ORO_FAM_EXH) && !o->ovrExh) { ThrCopyFam(o->fx, g_fx.thr[ThrClamp(g_fx.thrSel)], ORO_FAM_EXH); o->ovrExh = true; }
+	if ((fam & ORO_FAM_PRT) && !o->ovrPrt) { ThrCopyFam(o->fx, g_fx.thr[ThrClamp(g_fx.thrSel)], ORO_FAM_PRT); o->ovrPrt = true; }
+	return o;
+}
+
+void OroThr_ClearOvr(int fam)
+{
+	OroThrOvr* o = ThrSelOvr();
+	if (!o) return;
+	if (fam & ORO_FAM_EXH) o->ovrExh = false;
+	if (fam & ORO_FAM_PRT) o->ovrPrt = false;
+	if (!o->ovrExh && !o->ovrPrt) o->thrIdx = -1;    // free the slot (never compacts)
+	OroThr_SyncIn();                                 // the sliders snap back to inheriting
+}
+
+void OroThr_ResetOvr()
+{
+	for (int i = 0; i < ORO_THR_OVR_MAX; i++) {
+		g_fx.thrOvr[i].thrIdx = -1;
+		g_fx.thrOvr[i].ovrExh = g_fx.thrOvr[i].ovrPrt = false;
+	}
+	g_fx.thrThrSel = -1;
+	g_fx.thrOrd = 0;
+	g_fx.thrSelInfo[0] = 0;
+}
+
+bool OroThr_ClassMatch(VESSEL* v)
+{
+	if (!v || !g_fx.loadedClass[0]) return false;
+	const char* c = v->GetClassNameA();
+	return c && _stricmp(c, g_fx.loadedClass) == 0;
+}
+
+// The header-row thruster cycler: ALL <-> 1/m <-> ... within the SELECTED group on
+// the panel vessel, wrapping both ways. Main thread (a click handler) - oapi is fine
+// here, exactly as the COPY STOCK machinery below.
+void OroThr_CycleThr(int dir)
+{
+	OroThr_SyncOut();                        // bank what is on the sliders NOW
+	VESSEL* v = NULL;
+	{
+		OBJHANDLE h = PrtSpecVessel();
+		if (h) v = oapiGetVesselInterface(h);
+	}
+	static const int SEQ_MAX = 256;
+	int seq[SEQ_MAX]; int nseq = 0;
+	const int grp = ThrClamp(g_fx.thrSel);
+	if (v) {
+		const DWORD n = v->GetThrusterCount();
+		for (DWORD i = 0; i < n && nseq < SEQ_MAX; i++) {
+			THRUSTER_HANDLE th = v->GetThrusterHandleByIndex(i);
+			if (th && OroThrusterGroupOf(v, th) == grp) seq[nseq++] = (int)i;
+		}
+	}
+	if (!nseq) { g_fx.thrThrSel = -1; g_fx.thrOrd = 0; g_fx.thrCnt = 0; OroThr_SyncIn(); return; }
+	int pos = -1;                            // position in the ring: -1 = ALL
+	for (int i = 0; i < nseq; i++) if (seq[i] == g_fx.thrThrSel) { pos = i; break; }
+	const int ring = nseq + 1;               // 0 = ALL, 1..nseq = the thrusters
+	const int cur  = (pos < 0) ? 0 : pos + 1;
+	const int nxt  = ((cur + dir) % ring + ring) % ring;
+	g_fx.thrThrSel = (nxt == 0) ? -1 : seq[nxt - 1];
+	g_fx.thrCnt = nseq;
+	g_fx.thrOrd = nxt;                       // 0 = ALL, else 1-based ordinal
+	OroThr_SyncIn();                         // and show the selection's effective values
+}
+
+// ---- THE PER-VESSEL CLASS CACHE (2026-08-30) --------------------------------
+// The laws live above the declarations in OroState.h. Storage is file-static and
+// opaque; slots NEVER move (the invariant-14 address family), so EffC pointers
+// taken within a frame stay valid - eviction does not exist, only drop-by-name,
+// which happens on the main thread before any consumer runs.
+
+namespace {
+	struct ThrClassCache {
+		char cls[64];                 // class name; "" = free slot
+		bool hasFile;                 // false = KNOWN no cfg (negative cache: the
+		                              //   file is probed once per class per session)
+		OroThrusterFx thr[ORO_THR_N];
+		OroThrOvr     ovr[ORO_THR_OVR_MAX];
+	};
+	ThrClassCache g_thrCache[ORO_THR_CACHE_MAX];
+	DWORD g_thrCacheGen = 1;
+	bool  g_thrCacheFullWarned = false;
+}
+
+DWORD OroThr_CacheGen() { return g_thrCacheGen; }
+
+const OroThrusterFx* OroThr_CacheGrp(int cacheIdx, int grp)
+{
+	if (cacheIdx < 0 || cacheIdx >= ORO_THR_CACHE_MAX) return NULL;
+	if (!g_thrCache[cacheIdx].cls[0]) return NULL;
+	return &g_thrCache[cacheIdx].thr[ThrClamp(grp)];
+}
+
+// The cached-override lookups the particle texture path needs: WHICH override slot
+// owns a thruster's particle family, and that slot's block. His first real use of
+// the cache hit exactly this - the SRB motor's Contrail4 lives in a THR0 override,
+// and baking it with the group's texture rendered the wrong contrail (2026-08-30).
+int OroThr_CacheOvrSlot(int cacheIdx, int thrIdx)
+{
+	if (cacheIdx < 0 || cacheIdx >= ORO_THR_CACHE_MAX || thrIdx < 0) return -1;
+	if (!g_thrCache[cacheIdx].cls[0]) return -1;
+	for (int i = 0; i < ORO_THR_OVR_MAX; i++) {
+		const OroThrOvr& o = g_thrCache[cacheIdx].ovr[i];
+		if (o.thrIdx == thrIdx) return o.ovrPrt ? i : -1;
+	}
+	return -1;
+}
+
+const OroThrusterFx* OroThr_CacheOvrFx(int cacheIdx, int slot)
+{
+	if (cacheIdx < 0 || cacheIdx >= ORO_THR_CACHE_MAX) return NULL;
+	if (slot < 0 || slot >= ORO_THR_OVR_MAX) return NULL;
+	if (!g_thrCache[cacheIdx].cls[0] || g_thrCache[cacheIdx].ovr[slot].thrIdx < 0) return NULL;
+	return &g_thrCache[cacheIdx].ovr[slot].fx;
+}
+
+const OroThrusterFx& OroThr_EffC(int cacheIdx, int grp, int thrIdx, int fam)
+{
+	if (cacheIdx >= 0 && cacheIdx < ORO_THR_CACHE_MAX && g_thrCache[cacheIdx].cls[0]) {
+		const ThrClassCache& c = g_thrCache[cacheIdx];
+		if (thrIdx >= 0) {
+			for (int i = 0; i < ORO_THR_OVR_MAX; i++) {
+				const OroThrOvr& o = c.ovr[i];
+				if (o.thrIdx != thrIdx) continue;
+				if ((fam == ORO_FAM_EXH && o.ovrExh) || (fam == ORO_FAM_PRT && o.ovrPrt))
+					return o.fx;
+				break;
+			}
+		}
+		return c.thr[ThrClamp(grp)];
+	}
+	return OroThr_Eff(grp, thrIdx, fam);
+}
+
+void OroThr_CacheDrop(const char* cls)
+{
+	if (!cls || !cls[0]) return;
+	for (int i = 0; i < ORO_THR_CACHE_MAX; i++)
+		if (g_thrCache[i].cls[0] && _stricmp(g_thrCache[i].cls, cls) == 0) {
+			g_thrCache[i].cls[0] = 0;
+			g_thrCacheGen++;
+		}
+}
+
+void OroThr_CacheReset()
+{
+	for (int i = 0; i < ORO_THR_CACHE_MAX; i++) g_thrCache[i].cls[0] = 0;
+	g_thrCacheFullWarned = false;
+	g_thrCacheGen++;
+}
+
+// Fill one slot from Config\ORO\<class>.cfg - the CACHE mirror of ThrReadGroups,
+// kept as its own function so the flown live path stays untouched. ⚠️ KEEP THE TWO
+// IN STEP: same migration (unprefixed keys seed every group), same prefixed
+// per-group read, same THR<idx> override blocks with the 17c flag-key rule. The
+// one deliberate difference: the migration BASE is the struct DEFAULTS, not the
+// live sliders - a foreign class must never inherit the focus class's look
+// through a loader side door.
+static bool ThrCacheLoad(ThrClassCache& c, VESSEL* v, const char* cls)
+{
+	strcpy_s(c.cls, cls);
+	c.hasFile = false;
+	for (int i = 0; i < ORO_THR_OVR_MAX; i++) {
+		c.ovr[i].thrIdx = -1;
+		c.ovr[i].ovrExh = c.ovr[i].ovrPrt = false;
+	}
+	char fn[64], rel[128], key[96], buf[256];
+	ClassFileName(cls, fn, sizeof(fn));
+	sprintf_s(rel, "ORO\\%s.cfg", fn);
+	FILEHANDLE f = oapiOpenFile(rel, FILE_IN, CONFIG);
+	OroThrusterFx base;                       // struct defaults
+	if (!f) {
+		for (int gi = 0; gi < ORO_THR_N; gi++) c.thr[gi] = base;
+		return false;                         // negative-cached: probed once
+	}
+	// STEP 1 - the migration: unprefixed keys over the defaults, seeding every group.
+	{
+		char* p0 = (char*)&base;
+		for (int i = 0; i < NTHRSET; i++) {
+			void* p = p0 + THRSET[i].off;
+			switch (THRSET[i].type) {
+			case ST_F: { double d; if (oapiReadItem_float(f, K(THRSET[i].key), d)) *(float*)p = (float)d; break; }
+			case ST_B: { bool   b; if (oapiReadItem_bool (f, K(THRSET[i].key), b)) *(bool*)p  = b;        break; }
+			case ST_I: { int    n; if (oapiReadItem_int  (f, K(THRSET[i].key), n)) *(DWORD*)p = (DWORD)n; break; }
+			}
+		}
+	}
+	for (int gi = 0; gi < ORO_THR_N; gi++) c.thr[gi] = base;
+	// STEP 2 - prefixed keys override their own group.
+	for (int gi = 0; gi < ORO_THR_N; gi++) {
+		char* p0 = (char*)&c.thr[gi];
+		for (int i = 0; i < NTHRSET; i++) {
+			sprintf_s(key, "%s%s", OroThr_Name(gi), THRSET[i].key);
+			void* p = p0 + THRSET[i].off;
+			switch (THRSET[i].type) {
+			case ST_F: { double d; if (oapiReadItem_float(f, K(key), d)) *(float*)p = (float)d; break; }
+			case ST_B: { bool   b; if (oapiReadItem_bool (f, K(key), b)) *(bool*)p  = b;        break; }
+			case ST_I: { int    n; if (oapiReadItem_int  (f, K(key), n)) *(DWORD*)p = (DWORD)n; break; }
+			}
+		}
+		sprintf_s(key, "%sPrtTex", OroThr_Name(gi));
+		if (oapiReadItem_string(f, K(key), buf)) {
+			buf[sizeof(c.thr[gi].prtTexName) - 1] = 0;
+			strcpy_s(c.thr[gi].prtTexName, buf);
+		}
+	}
+	// STEP 3 - the THR<idx> override blocks, probed against THIS vessel's thrusters.
+	{
+		const int nthr = (int)v->GetThrusterCount();
+		const int nprobe = nthr < 96 ? nthr : 96;
+		int novr = 0, nloaded = 0;
+		for (int ti = 0; ti < nprobe && novr < ORO_THR_OVR_MAX; ti++) {
+			bool fe = false, fp = false; bool b;
+			sprintf_s(key, "THR%d_OvrExh", ti);
+			if (oapiReadItem_bool(f, K(key), b)) fe = b;
+			sprintf_s(key, "THR%d_OvrPrt", ti);
+			if (oapiReadItem_bool(f, K(key), b)) fp = b;
+			if (!fe && !fp) continue;
+			THRUSTER_HANDLE th = v->GetThrusterHandleByIndex((DWORD)ti);
+			if (!th) continue;
+			const int grp = OroThrusterGroupOf(v, th);
+			if (grp < 0) continue;
+			OroThrOvr& o = c.ovr[novr++];
+			o.thrIdx = ti;
+			o.ovrExh = fe;
+			o.ovrPrt = fp;
+			o.fx = c.thr[grp];                // group fallback base (the 17c read rule)
+			const int famMask = (fe ? ORO_FAM_EXH : 0) | (fp ? ORO_FAM_PRT : 0);
+			char* p0 = (char*)&o.fx;
+			for (int i = 0; i < NTHRSET; i++) {
+				if (!(THRSET[i].fam & famMask)) continue;
+				sprintf_s(key, "THR%d_%s", ti, THRSET[i].key);
+				void* p = p0 + THRSET[i].off;
+				switch (THRSET[i].type) {
+				case ST_F: { double d; if (oapiReadItem_float(f, K(key), d)) *(float*)p = (float)d; break; }
+				case ST_B: { bool  bb; if (oapiReadItem_bool (f, K(key), bb)) *(bool*)p  = bb;      break; }
+				case ST_I: { int   iv; if (oapiReadItem_int  (f, K(key), iv)) *(DWORD*)p = (DWORD)iv; break; }
+				}
+			}
+			if (fp) {
+				sprintf_s(key, "THR%d_PrtTex", ti);
+				if (oapiReadItem_string(f, K(key), buf)) {
+					buf[sizeof(o.fx.prtTexName) - 1] = 0;
+					strcpy_s(o.fx.prtTexName, buf);
+				}
+			}
+			nloaded++;
+		}
+		oapiCloseFile(f, FILE_IN);
+		oapiWriteLogV("ORO: cached thruster settings for class %s (%d override block%s).",
+		              cls, nloaded, nloaded == 1 ? "" : "s");
+	}
+	c.hasFile = true;
+	return true;
+}
+
+int OroThr_CacheFor(VESSEL* v)
+{
+	if (!v) return -1;
+	const char* cls = v->GetClassNameA();
+	if (!cls || !cls[0]) return -1;
+	if (_stricmp(cls, g_setClass) == 0) return -1;     // the focus class IS the live tables
+	int freeSlot = -1;
+	for (int i = 0; i < ORO_THR_CACHE_MAX; i++) {
+		if (!g_thrCache[i].cls[0]) { if (freeSlot < 0) freeSlot = i; continue; }
+		if (_stricmp(g_thrCache[i].cls, cls) == 0)
+			return g_thrCache[i].hasFile ? i : -1;     // negative-cached: no file = live
+	}
+	if (freeSlot < 0) {
+		if (!g_thrCacheFullWarned) {
+			g_thrCacheFullWarned = true;
+			oapiWriteLogV("ORO: thruster class cache full (%d classes) - %s takes the "
+			              "loaded class's settings.", ORO_THR_CACHE_MAX, cls);
+		}
+		return -1;                                     // degrade to today's behaviour
+	}
+	g_thrCacheGen++;                                   // the particle sig watches this
+	return ThrCacheLoad(g_thrCache[freeSlot], v, cls) ? freeSlot : -1;
 }
 
 const char* OroThr_Name(int grp)
@@ -1484,7 +2175,10 @@ int OroThr_Count()
 
 void OroThr_Cycle()
 {
-	OroThr_SyncOut();                       // bank what is on the sliders NOW
+	OroThr_SyncOut();                       // bank what is on the sliders NOW (the old
+	                                        //   selection's targets - order matters)
+	g_fx.thrThrSel = -1;                    // a new group starts at ALL (Phase B): the
+	g_fx.thrOrd = 0;                        //   thruster selection is group-scoped
 	for (int step = 1; step <= ORO_THR_N; step++) {
 		const int cand = (g_fx.thrSel + step) % ORO_THR_N;
 		if (g_fx.thrAvail & (1 << cand)) { g_fx.thrSel = cand; break; }
@@ -1505,6 +2199,10 @@ void OroThr_Cycle()
 void OroThr_SetPrtAll(bool on)
 {
 	for (int i = 0; i < ORO_THR_N; i++) g_fx.thr[i].prtEnabled = on;
+	// Phase B: a vessel-wide switch means the OVERRIDE blocks too, or an overridden
+	// jet would go on streaming after "off - no exhaust particles at all".
+	for (int i = 0; i < ORO_THR_OVR_MAX; i++)
+		if (g_fx.thrOvr[i].thrIdx >= 0) g_fx.thrOvr[i].fx.prtEnabled = on;
 	g_fx.prtEnabled = on;
 }
 
@@ -1517,8 +2215,17 @@ void OroThr_SetPrtAll(bool on)
 bool OroThr_AnyPrtOn()
 {
 	const int sel = ThrClamp(g_fx.thrSel);
+	// With a THRUSTER selected the edit buffer describes that thruster, not the
+	// group - so the group array answers for the group and the buffer answers only
+	// for the block it is actually editing (Phase B).
+	const bool bufIsGroup = (g_fx.thrThrSel < 0);
 	for (int i = 0; i < ORO_THR_N; i++)
-		if ((i == sel) ? g_fx.prtEnabled : g_fx.thr[i].prtEnabled) return true;
+		if ((i == sel && bufIsGroup) ? g_fx.prtEnabled : g_fx.thr[i].prtEnabled) return true;
+	for (int i = 0; i < ORO_THR_OVR_MAX; i++) {
+		const OroThrOvr& o = g_fx.thrOvr[i];
+		if (o.thrIdx < 0 || !o.ovrPrt) continue;
+		if (o.thrIdx == g_fx.thrThrSel ? g_fx.prtEnabled : o.fx.prtEnabled) return true;
+	}
 	return false;
 }
 
@@ -1564,6 +2271,16 @@ void OroSettings_LoadClass(const char* cls)
 	if (!cls || !cls[0]) return;
 	if (_stricmp(cls, g_setClass) == 0) return;        // already current
 	strcpy_s(g_setClass, cls);
+	// Phase B: overrides belong to a CLASS FILE, so a class change wipes the pool and
+	// the thruster selection BEFORE anything is read - including the no-file early
+	// return below (a hull with no cfg keeps the current sliders but must never keep
+	// another hull's thruster overrides; index 3 means a different jet here). This is
+	// also what makes ThrReadGroups' migration SyncOut juggling mean pure groups.
+	strcpy_s(g_fx.loadedClass, cls);                   // the class-faithful reference
+	OroThr_ResetOvr();
+	OroThr_CacheDrop(cls);                             // this class is LIVE now - a stale
+	                                                   //   cache slot would shadow it the
+	                                                   //   moment focus moves away again
 
 	// ⚠️ THE PILOT BLOCK RESETS FIRST - before the file is read AND before the no-file
 	// early return below. Both orderings matter. Clearing the flag first means a class file
@@ -1589,7 +2306,17 @@ void OroSettings_LoadClass(const char* cls)
 		              " (pilot: global).", cls);
 		return;
 	}
+	// ⚠️ THE SIZE-Y SENTINEL (2026-08-29). Size y became ABSOLUTE (same units as Size x -
+	// his rule: equal sliders = a circular cone), which breaks the usual missing-key
+	// story: a cfg from the one-Size era would load X from its VapourSize key and leave
+	// Y at whatever was current, giving a tuned hull a silently elliptical cone. So Y is
+	// parked at an impossible value before the read; if the file carried no VapourSizeY
+	// it is still negative afterwards and becomes X - a pre-split file loads the exact
+	// circular cone it always meant. Deliberately placed AFTER the no-file early return:
+	// a hull with no cfg keeps the current sliders, exactly as before.
+	g_fx.vapSizeY = -1.0f;
 	const int n = ReadTable(f, CLASSSET, NCLASSSET);
+	if (g_fx.vapSizeY < 0.0f) g_fx.vapSizeY = g_fx.vapSize;
 	ThrReadGroups(f);            // per group, with the unprefixed-key migration
 	// ... and this hull's own pilot settings, if it declared any. PilotScope came in with
 	// CLASSSET a line ago, so by here we already know whether to look.
@@ -1718,6 +2445,129 @@ bool OroDepthClipOK() { return g_depthClipMirror; }
 // the client cannot suppress (a switch that cannot do anything is worse than none).
 static bool g_stockExSupported = false;
 bool OroStockExhaustSupported() { return g_stockExSupported; }
+
+// ---------------------------------------------------------------------------
+// Patch (y) bridge: the PARTICLES page's COPY STOCK button. The core pointer
+// doubles as the capability flag (probe-by-binding, set at session start).
+// Read-only queries - nothing is lent, so 23(k)'s load-window rule does not
+// apply. The vessel is the same one the particle system edits (camera target,
+// focus fallback - the OroParticles.cpp convention).
+// ---------------------------------------------------------------------------
+static gcCore2* g_prtSpecCore = nullptr;
+
+static OBJHANDLE PrtSpecVessel()
+{
+	OBJHANDLE h = oapiCameraTarget();
+	if (!h || oapiGetObjectType(h) != OBJTP_VESSEL) h = oapiGetFocusObject();
+	return h;
+}
+
+// The GROUP FILTER + DEDUPE (his ask, 2026-08-30: "is there no way to pre-detect
+// which one was used for the stock main engines?"). Each stream's reported THRUST
+// DIRECTION is a pointer into the vessel's own thruster storage, so matching it
+// against the selected group's thruster directions classifies the stream - DG mains
+// thrust +Z, hovers +Y, and the ~10 raw streams collapse further because stock code
+// attaches ONE stream PER THRUSTER: byte-identical specs fold into one entry. On a
+// DeltaGlider MAIN therefore offers exactly TWO candidates - the contrail and the
+// flame puffs.
+static int PrtStockForGroup(int gi, int wantK, PARTICLESTREAMSPEC* outSpec)
+{
+	if (!g_prtSpecCore) return -1;
+	OBJHANDLE h = PrtSpecVessel();
+	if (!h) return 0;
+	VESSEL* v = oapiGetVesselInterface(h);
+	if (!v) return 0;
+	const DWORD nth = v->GetThrusterCount();
+
+	// Phase B (round 2): with a THRUSTER selected the candidates narrow to exactly
+	// the streams attached to THAT thruster. Patch (y)'s pos/dir are dereferenced
+	// from pointers INTO the vessel's own thruster storage, so a thruster-attached
+	// stream's position is bit-identical to GetThrusterRef - an epsilon equality on
+	// position AND direction names the thruster exactly, sharper than the group
+	// path's folding. The one honest fallback: a stream the author attached at an
+	// EXPLICIT offset (the AddExhaustStream(th, pos, spec) overload) points at a
+	// stored copy, sits at NO thruster's ref, and degrades to the direction-only
+	// test - offered rather than lost, exactly today's group behaviour for it.
+	const bool perThr = (g_fx.thrThrSel >= 0);
+	VECTOR3 selRef = _V(0, 0, 0), selDir = _V(0, 0, 0);
+	if (perThr) {
+		THRUSTER_HANDLE th = ((DWORD)g_fx.thrThrSel < nth)
+		                   ? v->GetThrusterHandleByIndex((DWORD)g_fx.thrThrSel) : NULL;
+		if (!th) return 0;
+		v->GetThrusterRef(th, selRef);
+		v->GetThrusterDir(th, selDir);
+		const double L = length(selDir);
+		if (L < 1e-6) return 0;
+		selDir = selDir * (1.0 / L);
+	}
+	// The selected group's thrust directions (the group path), and EVERY thruster's
+	// ref position - the offset-stream fallback needs "sits at no thruster at all".
+	VECTOR3 gdir[64]; int ng = 0;
+	VECTOR3 tref[128]; int nr = 0;
+	for (DWORD i = 0; i < nth; i++) {
+		THRUSTER_HANDLE th = v->GetThrusterHandleByIndex(i);
+		if (!th) continue;
+		if (nr < 128) { v->GetThrusterRef(th, tref[nr]); nr++; }
+		if (OroThrusterGroupOf(v, th) != gi) continue;
+		VECTOR3 d; v->GetThrusterDir(th, d);
+		const double L = length(d);
+		if (L > 1e-6 && ng < 64) gdir[ng++] = d * (1.0 / L);
+	}
+	if (!perThr && !ng) return 0;
+	const int total = g_prtSpecCore->GetExhaustStreamSpec(h, -1, NULL, NULL, NULL);
+	PARTICLESTREAMSPEC uniq[16]; int nu = 0;
+	for (int i = 0; i < total; i++) {
+		PARTICLESTREAMSPEC ps; VECTOR3 sp, sd;
+		if (i >= g_prtSpecCore->GetExhaustStreamSpec(h, i, &ps, &sp, &sd)) break;
+		const double L = length(sd);
+		if (L < 1e-6) continue;
+		sd = sd * (1.0 / L);
+		if (perThr) {
+			if (dotp(sd, selDir) <= 0.999) continue;         // not this thruster's way
+			if (length(sp - selRef) > 1e-3) {                // not AT the thruster...
+				bool atAny = false;                          // ...an offset stream, or
+				for (int t = 0; t < nr && !atAny; t++)       //    another thruster's?
+					atAny = (length(sp - tref[t]) < 1e-3);
+				if (atAny) continue;                         // someone else's - skip
+			}
+		} else {
+			bool inGrp = false;
+			for (int t = 0; t < ng && !inGrp; t++) inGrp = (dotp(sd, gdir[t]) > 0.98);
+			if (!inGrp) continue;
+		}
+		// fold per-thruster duplicates: OroGetSpec zero-fills, so memcmp is honest
+		bool dup = false;
+		for (int u = 0; u < nu && !dup; u++) dup = !memcmp(&uniq[u], &ps, sizeof(ps));
+		if (dup || nu >= 16) continue;
+		if (wantK == nu && outSpec) *outSpec = ps;
+		uniq[nu++] = ps;
+	}
+	return nu;
+}
+
+int OroPrt_StockSpecCount()
+{
+	return PrtStockForGroup(ThrClamp(g_fx.thrSel), -1, NULL);
+}
+
+bool OroPrt_StockSpecGet(int idx, float* size, float* life, float* rate, float* speed,
+                         float* spread, float* growth, float* slowdown,
+                         bool* diffuse, bool* airfade)
+{
+	if (!g_prtSpecCore || idx < 0) return false;
+	PARTICLESTREAMSPEC ps;
+	if (idx >= PrtStockForGroup(ThrClamp(g_fx.thrSel), idx, &ps)) return false;
+	*size     = (float)ps.srcsize;
+	*life     = (float)ps.lifetime;
+	*rate     = (float)ps.srcrate;
+	*speed    = (float)ps.v0;
+	*spread   = (float)ps.srcspread;
+	*growth   = (float)ps.growthrate;
+	*slowdown = (float)ps.atmslowdown;
+	*diffuse  = (ps.ltype == PARTICLESTREAMSPEC::DIFFUSE);
+	*airfade  = (ps.atmsmap != PARTICLESTREAMSPEC::ATM_FLAT);
+	return true;
+}
 
 // Same pattern for patch (l)'s textured sprites: the EXHAUST PARTICLES section greys
 // out wholesale without them. Mirrored from prtTexMode each pre-step rather than once
@@ -1892,6 +2742,9 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	// end, so a previous crash or a forced exit cannot leave a stale handle armed for this
 	// run. Reusing one was the reload CTD's access-violation face; see OroBell_Reset.
 	OroBell_Reset();
+	OroThr_CacheReset();     // the class cache is per session too (23m's rule: a
+	                         //   file-static must not outlive what it describes -
+	                         //   cfgs may have been edited between scenarios)
 	OroRain_ShieldReset();   // same rule: re-probe the shield mesh next storm (he
 	                         // iterates on the file between runs)
 	pCore = gcGetCoreInterface();
@@ -1936,6 +2789,11 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		              vcShadowSupported ? "available" : "NOT available");
 		oapiWriteLogV("ORO: stock exhaust suppression (patch n) %s.",
 		              g_stockExSupported ? "available" : "NOT available");
+		// Patch (y): stock stream-spec readback for the COPY STOCK buttons.
+		g_prtSpecCore = pCore->CanGetExhaustStreamSpec() ? pCore : nullptr;
+		oapiWriteLogV("ORO: stream-spec readback (patch y) %s.",
+		              g_prtSpecCore ? "available - COPY STOCK live"
+		                            : "NOT available - COPY STOCK greyed");
 		oapiWriteLogV("ORO: surface wetness (patch s) %s.",
 		              pCore->CanSetSurfaceWetness() ? "available - rain can wet the ground"
 		                                            : "NOT available - rain falls on dry ground");
@@ -2113,6 +2971,19 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 			}
 		}
 		if (rainSndLoaded) oapiWriteLogV("ORO: rain sound loops loaded (3 tiers).");
+		// ... and their MUFFLED interior twins (tools/rainmuffle.py, 2026-08-27).
+		// All-or-nothing like the exterior set; absent, the mixer falls back to the
+		// old inside-the-hull volume duck rather than half a crossfade.
+		static const char* RAIN_IN_WAVS[] = { "Rain_light_in.wav", "Rain_medium_in.wav", "Rain_heavy_in.wav" };
+		rainSndInLoaded = true;
+		for (int i = 0; i < 3; i++) {
+			char path[MAX_PATH];
+			sprintf_s(path, "XRSound\\ORO\\%s", RAIN_IN_WAVS[i]);
+			if (!pXRSound->LoadWav(SND_RAIN_IN_BASE + i, path, XRSound::PlaybackType::Global))
+				rainSndInLoaded = false;
+		}
+		oapiWriteLogV("ORO: interior (muffled) rain tiers %s.",
+		              rainSndInLoaded ? "loaded" : "missing - volume duck fallback");
 		// The THUNDER set (sourced from freesound - the credit ledger is
 		// XRSound\ORO\README.txt; leveled by tools/thunderprep.py). Per-file
 		// tolerant: a missing variant narrows the pick, an empty class skips.
@@ -2124,6 +2995,10 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 				sprintf_s(path, "XRSound\\ORO\\Thunder_%s_%d.wav", THUN_CLS[i / 3], (i % 3) + 1);
 				thunLoaded[i] = pXRSound->LoadWav(SND_THUNDER_BASE + i, path, XRSound::PlaybackType::Global);
 				if (thunLoaded[i]) nThun++;
+				// ... and the clap's muffled twin (rainmuffle.py) - same per-file
+				// tolerance; the fire site picks the family by the CURRENT view.
+				sprintf_s(path, "XRSound\\ORO\\Thunder_%s_%d_in.wav", THUN_CLS[i / 3], (i % 3) + 1);
+				thunInLoaded[i] = pXRSound->LoadWav(SND_THUNDER_IN_BASE + i, path, XRSound::PlaybackType::Global);
 			}
 			oapiWriteLogV("ORO: thunder set - %d of %d files loaded.", nThun, (int)THUN_FILES);
 		}
@@ -2132,7 +3007,7 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	}
 	// Fresh session, fresh mixer: no loop is playing yet, whatever a previous
 	// session's state said (the 23(m) sweep - state reset belongs at START).
-	for (int i = 0; i < SND_RAIN_N; i++) {
+	for (int i = 0; i < SND_RAIN_CH; i++) {
 		rainSndLvl[i] = 0.0f; rainSndOn[i] = false; rainSndPushed[i] = 0.0f;
 	}
 	for (int q = 0; q < THUN_Q; q++) thunQ[q].vol = 0.0f;
@@ -2182,7 +3057,9 @@ void OroModule::clbkSimulationEnd()
 			pXRSound->StopWav(SND_SCEN_BASE + i);
 		}
 		for (int i = 0; i < SND_RAIN_N; i++) pXRSound->StopWav(SND_RAIN_BASE + i);
+		for (int i = 0; i < 3; i++)          pXRSound->StopWav(SND_RAIN_IN_BASE + i);
 		for (int i = 0; i < THUN_FILES; i++) pXRSound->StopWav(SND_THUNDER_BASE + i);
+		for (int i = 0; i < THUN_FILES; i++) pXRSound->StopWav(SND_THUNDER_IN_BASE + i);
 		delete pXRSound; pXRSound = nullptr;
 	}
 	seqSoundPlaying = false;
@@ -2457,6 +3334,9 @@ void OroModule::SenseView()
 	// pushes (wet ground, storm light) and the sounds come inside with it.
 	rainVC = oapiCameraInternal() && (oapiCockpitMode() == COCKPIT_VIRTUAL)
 	      && depthClipOK;
+	// The PLUME follows the same recipe (2026-08-29): RCS jets are visible from the
+	// flight deck, so the jet draws in the VC too, cut at the window frame per pixel.
+	plumeVC = rainVC;
 
 	// ⚠️ THE FLAT INTERNAL VIEWS, ON DIFFERENT TERMS (2026-08-25). A tester asked for the
 	// rain in the 2D panel and the glass cockpit, and the reason it was VC-only turns out
@@ -2481,6 +3361,144 @@ void OroModule::SenseView()
 	// Viewport size for the render pass (tunnel geometry) - cached HERE because the
 	// render callback makes no oapi calls by policy.
 	oapiGetViewportSize(&viewW, &viewH);
+
+	SenseMarker();     // Phase B: selection validity, its readouts, the nozzle marker
+}
+
+// ----------------------------------------------------------------------------
+// Phase B's sensing half (2026-08-30): validate the header-row thruster selection
+// against the PANEL vessel, publish the readouts the dialog paints from (paint may
+// not call oapi - the plumeRegime discipline), and snapshot the nozzle marker(s)
+// for the render path. Rides SenseView, so it runs from clbkPreStep AND the
+// keyboard-immediate tick: every frame, paused included, idempotent throughout.
+// ----------------------------------------------------------------------------
+void OroModule::SenseMarker()
+{
+	mkN = 0;
+	g_fx.thrPageLive = OroDlg_ThrPageLive();   // single writer; close-safe (IsWindow)
+	// The PANEL vessel - the ship the thruster pages describe (camera target,
+	// focus fallback: the same resolution as thrAvail and COPY STOCK).
+	OBJHANDLE h = oapiCameraTarget();
+	if (!h || oapiGetObjectType(h) != OBJTP_VESSEL) h = oapiGetFocusObject();
+	VESSEL* v = (h && oapiGetObjectType(h) == OBJTP_VESSEL) ? oapiGetVesselInterface(h) : NULL;
+	if (!v) {
+		// ⚠️ A dying selection must RESYNC the flat buffer (memory-only, safe here):
+		// left alone, the buffer keeps the dead thruster's values with the selection
+		// reading ALL, and the next SyncOut would copy them onto the GROUP.
+		if (g_fx.thrThrSel >= 0) { g_fx.thrThrSel = -1; OroThr_SyncIn(); }
+		g_fx.thrCnt = 0; g_fx.thrOrd = 0;
+		g_fx.thrSelInfo[0] = 0; g_fx.thrSelBelowFloor = false; g_fx.thrSelHasExh = false;
+		return;
+	}
+
+	const int   grp  = (g_fx.thrSel >= 0 && g_fx.thrSel < ORO_THR_N) ? g_fx.thrSel : 0;
+	const DWORD nthr = v->GetThrusterCount();
+
+	// Membership + validation: a selection that no longer classifies into the
+	// selected group (vessel switch, group cycle from the keyboard path, staging)
+	// falls back to ALL rather than pointing at a stranger's jet.
+	int cnt = 0, ord = 0;
+	int selIdx = g_fx.thrThrSel;
+	bool selValid = false;
+	for (DWORD i = 0; i < nthr; i++) {
+		THRUSTER_HANDLE th = v->GetThrusterHandleByIndex(i);
+		if (!th || OroThrusterGroupOf(v, th) != grp) continue;
+		cnt++;
+		if ((int)i == selIdx) { selValid = true; ord = cnt; }
+	}
+	if (selIdx >= 0 && !selValid) {
+		// Same resync rule as the no-vessel path above: a force-reset without a
+		// SyncIn leaves the dead thruster's values in the flat buffer addressed to
+		// the GROUP - the one way this design could silently rewrite group settings.
+		g_fx.thrThrSel = -1; selIdx = -1; ord = 0;
+		OroThr_SyncIn();
+	}
+	g_fx.thrCnt = cnt;
+	g_fx.thrOrd = ord;
+
+	g_fx.thrSelInfo[0]    = 0;
+	g_fx.thrSelBelowFloor = false;
+	g_fx.thrSelHasExh     = false;
+
+	const bool wantMarkers = g_fx.thrMarkOn && g_fx.thrPageLive && g_fx.masterArmed;
+	mkOwn = h;
+	v->GetGlobalPos(mkCg);
+	mkScale = v->GetSize();
+
+	if (selIdx < 0 && !wantMarkers) return;    // nothing below is needed
+
+	// ⚠️ MARKERS ARE PER NOZZLE, NOT PER THRUSTER (his DG report, 2026-08-30). The
+	// DG feeds one attitude thruster from SEVERAL AddExhaust nozzles (each pitch
+	// thruster owns two, port + starboard), so a per-thruster marker ringed the
+	// first nozzle and left its twins bare - "some marks are missing". The JET
+	// draws per exhaust; the marker now walks the same list and agrees with it.
+	// The selected thruster rings ALL of its nozzles bright - the honest picture,
+	// since one thruster's override covers all its exhausts. A thruster with NO
+	// authored exhaust (the scramjet family, 26j) falls back to GetThrusterRef/Dir
+	// with one marker, exactly as before.
+	static const int TH_MAX = 256;
+	THRUSTER_HANDLE hh[TH_MAX];
+	bool exSeen[TH_MAX] = {};
+	const int nh = (int)(nthr < (DWORD)TH_MAX ? nthr : (DWORD)TH_MAX);
+	for (int t = 0; t < nh; t++) hh[t] = v->GetThrusterHandleByIndex((DWORD)t);
+
+	auto wantThr = [&](int ti) -> bool {
+		if (!hh[ti]) return false;
+		if (selIdx >= 0) return ti == selIdx;
+		return OroThrusterGroupOf(v, hh[ti]) == grp;
+	};
+	const bool bright = (selIdx >= 0);
+
+	EXHAUSTSPEC es;
+	const DWORD nex = v->GetExhaustCount();
+	for (DWORD e = 0; e < nex; e++) {
+		v->GetExhaustSpec(e, &es);
+		if (!es.th || !es.lpos || !es.ldir) continue;
+		int ti = -1;
+		for (int t = 0; t < nh; t++) if (hh[t] == es.th) { ti = t; break; }
+		if (ti < 0) continue;
+		exSeen[ti] = true;                     // the caption's "has authored exhaust"
+		if (!wantMarkers || mkN >= MK_MAX || !wantThr(ti)) continue;
+		VECTOR3 ldir = *es.ldir;
+		const double L = length(ldir);
+		if (L < 1e-9) continue;
+		ldir = ldir * (1.0 / L);
+		v->Local2Global(*es.lpos - ldir * es.lofs, mkPos[mkN]);
+		VECTOR3 fl = -ldir;                    // exhaust flows OPPOSITE the thrust
+		v->GlobalRot(fl, mkDir[mkN]);
+		mkBri[mkN] = bright;
+		mkN++;
+	}
+	// Exhaust-less thrusters: one marker at the thrust reference (26j's family).
+	if (wantMarkers) {
+		for (int t = 0; t < nh && mkN < MK_MAX; t++) {
+			if (exSeen[t] || !wantThr(t)) continue;
+			VECTOR3 lpos, ldir;
+			v->GetThrusterRef(hh[t], lpos);
+			v->GetThrusterDir(hh[t], ldir);
+			const double L = length(ldir);
+			if (L < 1e-9) continue;
+			ldir = ldir * (1.0 / L);
+			v->Local2Global(lpos, mkPos[mkN]);
+			VECTOR3 fl = -ldir;
+			v->GlobalRot(fl, mkDir[mkN]);
+			mkBri[mkN] = bright;
+			mkN++;
+		}
+	}
+
+	if (selIdx >= 0 && selIdx < nh && hh[selIdx]) {
+		const double m  = v->GetMass();
+		const double f0 = v->GetThrusterMax0(hh[selIdx]);
+		g_fx.thrSelHasExh = exSeen[selIdx];
+		// 26(j)'s vent reading in static form: no authored exhaust AND too weak to
+		// push the ship even at FULL throttle = plumbing, not propulsion. The plume
+		// admission gate holds for it, and the caption must say so (H5's law).
+		g_fx.thrSelBelowFloor = !exSeen[selIdx] && m > 1.0 && (f0 / m) < OroPlumeSynAccMin();
+		if      (f0 >= 9.5e5) sprintf_s(g_fx.thrSelInfo, "thr %d - %.2f MN", selIdx, f0 * 1e-6);
+		else if (f0 >= 950.0) sprintf_s(g_fx.thrSelInfo, "thr %d - %.1f kN", selIdx, f0 * 1e-3);
+		else                  sprintf_s(g_fx.thrSelInfo, "thr %d - %.0f N",  selIdx, f0);
+	}
 }
 
 void OroModule::clbkPreStep(double simt, double simdt, double mjd)
@@ -2723,6 +3741,36 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 		              depthClipOK ? "available - aurora + VC plasma clip per pixel"
 		                          : "NOT available - screen-space overlay fallback");
 	}
+	// PATCH (h), the same probe-by-binding discipline and the same reason for logging it:
+	// without the depth buffer in the IPI shader the windscreen drops have no way to tell
+	// glass from instrument panel, so they do not draw at all - and a silently absent
+	// effect is exactly the ambiguity the (g) line above exists to remove.
+	ipiDepthOK = pCore && pCore->CanSetIPISceneDepth() && pCore->HasDepthBuffer();
+	if (ipiDepthLogged != (ipiDepthOK ? 1 : 0)) {
+		ipiDepthLogged = ipiDepthOK ? 1 : 0;
+		oapiWriteLogV("ORO: client scene depth in IPI (patch h) %s.",
+		              ipiDepthOK ? "available - raindrops on the VC glass"
+		                         : "NOT available - no drops on the glass");
+	}
+	// TEMPORARY DIAGNOSTIC (2026-08-26) - see glassDiag. One line a second while the rain
+	// is live, so a short VC flight says which link is open. Removed on sign-off.
+	if (rainIntensityLive > 0.002f && simt - glassDiagT > 1.0) {
+		glassDiagT = simt;
+		oapiWriteLogV("ORO GLASS DIAG: 0x%04X entry[call%d I%d ipi%d core%d tex%d gloom%d vgate%d]"
+		              " gate[vc%d ok%d ipiD%d sld%d vh%d cam%d bind%d]"
+		              " Irender %.3f Ipre %.3f dr %.3f dbg %.0f",
+		              glassDiag,
+		              (glassDiag & 0x0080) ? 1 : 0, (glassDiag & 0x0100) ? 1 : 0,
+		              (glassDiag & 0x0200) ? 1 : 0, (glassDiag & 0x0400) ? 1 : 0,
+		              (glassDiag & 0x0800) ? 1 : 0, (glassDiag & 0x1000) ? 1 : 0,
+		              (glassDiag & 0x2000) ? 1 : 0,
+		              (glassDiag & 0x01) ? 1 : 0, (glassDiag & 0x02) ? 1 : 0,
+		              (glassDiag & 0x04) ? 1 : 0, (glassDiag & 0x08) ? 1 : 0,
+		              (glassDiag & 0x10) ? 1 : 0, (glassDiag & 0x20) ? 1 : 0,
+		              (glassDiag & 0x40) ? 1 : 0,
+		              glassDiagI, rainIntensityLive, glassDiagDr, g_fx.rainGlassDbg);
+		glassDiag = 0;   // so a stale value can never be read as a fresh one
+	}
 	UpdateAurora();
 
 	// LIGHTNING: storm cells from the world's own cloud tiles, flash discs on the deck
@@ -2751,6 +3799,16 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	UpdateRainFlashLight();    // rain lightning's borrowed scene light - unconditional,
 	                           //   so every gate failure RETURNS the borrow (inv. 14)
 
+	// ⚠️ THIS LIST IS THE SET OF hFrameTex CONSUMERS, AND IT MUST TRACK THEM (2026-08-26).
+	// Every Draw*Pass that resamples the frame early-returns on !hFrameTex, so a consumer
+	// missing from this list does not error - it silently draws nothing, UNLESS some other
+	// effect happened to create the texture first (it persists for the session, so one
+	// moment of lit engines or one frame of greyout arms it forever - which is exactly why
+	// the gap hid). Found because the GLASS DROPS were the first consumer ever tested from
+	// a cold start with nothing else live: parked VC storm, PHYSICS mode at rest, engines
+	// idle - list all false, texture never allocated, whole premium stack skipped. The
+	// GOD RAYS and the rain GLOOM had the same latent gap since the day each shipped.
+	// New resample consumer => new line here, in the same commit.
 	if (ipiReady && (eclActive ||
 	                 (g_fx.greyoutEnabled    && g_fx.greyout    > 0.001f) ||
 	                 (g_fx.blurEnabled       && g_fx.blur       > 0.001f) ||
@@ -2758,7 +3816,9 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	                 (g_fx.swimEnabled       && g_fx.swim       > 0.001f) ||
 	                 (g_fx.tiltEnabled       && (g_fx.tilt > 0.001f || fabs(g_fx.tiltLean) > 0.001f)) ||
 	                 (g_fx.reentryEnabled    && plasmaGlow > 0.001f) ||
-	                 plumeCount > 0))
+	                 plumeCount > 0 ||
+	                 grActive ||                       // god rays - missing since 2026-08-11
+	                 rainIntensityLive > 0.002f))      // rain gloom + glass drops - since 2026-08-22
 		EnsureFrameTex();
 
 	// Animation clocks: REAL time, not sim time - the spot shimmer and the blink are
@@ -3150,22 +4210,50 @@ void OroModule::UpdateCopShift()
 // ----------------------------------------------------------------------------
 // CANCEL THRUST - the test-stand rig (user request 2026-08-09, for plume tuning:
 // the DG at full throttle rolled off the runway before the sliders got a fair
-// try). The vessel's own TOTAL thrust vector, negated, applied at the CoM every
-// step - invariant 9's mechanism exactly: AddForce lives one timestep, so there
+// try). Invariant 9's mechanism exactly: AddForce lives one timestep, so there
 // is nothing to hand back, and disarm/Ctrl+G or the pill releases the ship on
-// the next step. Thrust FORCE only: engine/RCS torque survives, which on a
-// balanced vessel is ~zero and keeps the attitude controls honest while held.
-// SESSION-ONLY by design - see the note on g_fx.cancelThrust.
+// the next step. SESSION-ONLY by design - see the note on g_fx.cancelThrust.
+// ⚠️ PHASE B RESCOPED IT (2026-08-30, his requirement): the hold nulls the
+// SELECTED scope - one thruster, or the selected group at ALL - each thruster
+// cancelled at its OWN position, so its force and torque die together while
+// everything outside the scope (attitude control included) stays fully honest,
+// the old "keeps the controls honest" rationale in stronger form. The pre-B
+// whole-ship CoM null is expressible as "select the group you are firing"; what
+// is no longer expressible is nulling two groups at once.
 // ----------------------------------------------------------------------------
 void OroModule::UpdateCancelThrust()
 {
 	if (!g_fx.masterArmed || !g_fx.cancelThrust) return;
-	VESSEL* v = oapiGetFocusInterface();
+	// ⚠️ SCOPED TO THE SELECTION SINCE PHASE B (2026-08-30, his requirement): the pill
+	// nulls the SELECTED thruster, or the selected GROUP at ALL - not the whole ship.
+	// And it cancels each thruster AT ITS OWN POSITION: AddForce(-F, ref) kills that
+	// thruster's force AND its torque exactly, so a lone RCS jet under the hold moves
+	// nothing at all - while every OUT-OF-SCOPE group (attitude control included)
+	// stays fully honest, which is the old comment's rationale in stronger form.
+	// The scope follows the selection LIVE while held; the caption names it.
+	// Acts on the PANEL vessel (camera target, focus fallback) - the ship the
+	// thruster pages describe and the selection indexes into.
+	OBJHANDLE h = oapiCameraTarget();
+	if (!h || oapiGetObjectType(h) != OBJTP_VESSEL) h = oapiGetFocusObject();
+	VESSEL* v = (h && oapiGetObjectType(h) == OBJTP_VESSEL) ? oapiGetVesselInterface(h) : NULL;
 	if (!v) return;
-	VECTOR3 T = _V(0, 0, 0);
-	v->GetThrustVector(T);                              // total, pressure-adjusted [N]
-	if (length(T) < 1.0) return;                        // engines idle - nothing to null
-	v->AddForce(-T, _V(0, 0, 0));
+	const int grp = (g_fx.thrSel >= 0 && g_fx.thrSel < ORO_THR_N) ? g_fx.thrSel : 0;
+	const DWORD n = v->GetThrusterCount();
+	for (DWORD i = 0; i < n; i++) {
+		THRUSTER_HANDLE th = v->GetThrusterHandleByIndex(i);
+		if (!th) continue;
+		if (g_fx.thrThrSel >= 0) { if ((int)i != g_fx.thrThrSel) continue; }
+		else if (OroThrusterGroupOf(v, th) != grp) continue;
+		const double lvl = v->GetThrusterLevel(th);
+		if (lvl <= 1e-4) continue;
+		VECTOR3 d; v->GetThrusterDir(th, d);
+		const double L = length(d);
+		if (L < 1e-9) continue;
+		const double F = v->GetThrusterMax(th) * lvl;   // pressure-adjusted current max
+		if (F < 0.5) continue;
+		VECTOR3 ref; v->GetThrusterRef(th, ref);
+		v->AddForce(d * (-(F / L)), ref);
+	}
 }
 
 void OroModule::UpdateCameraShake()
@@ -3268,6 +4356,20 @@ void OroModule::UpdateShimmerPlumes()
 		bool anyOn = false;
 		for (int gi = 0; gi < ORO_THR_N; gi++)
 			if (g_fx.thr[gi].shimmerEnabled && g_fx.thr[gi].shimmer > 0.001f) anyOn = true;
+		// Phase B: an override can enable the haze on one jet while its group is off
+		// (memory-only scan - this runs in the render path).
+		for (int s = 0; s < ORO_THR_OVR_MAX && !anyOn; s++) {
+			const OroThrOvr& o = g_fx.thrOvr[s];
+			if (o.thrIdx >= 0 && o.ovrExh && o.fx.shimmerEnabled && o.fx.shimmer > 0.001f)
+				anyOn = true;
+		}
+		// ... and so can a CACHED foreign class in the stack (also memory-only).
+		for (int ci = 0; ci < ORO_THR_CACHE_MAX && !anyOn; ci++) {
+			for (int gi = 0; gi < ORO_THR_N && !anyOn; gi++) {
+				const OroThrusterFx* T = OroThr_CacheGrp(ci, gi);
+				if (T && T->shimmerEnabled && T->shimmer > 0.001f) anyOn = true;
+			}
+		}
 		if (!anyOn) return;
 	}
 
@@ -3291,7 +4393,7 @@ void OroModule::UpdateShimmerPlumes()
 	if (!FillProjCam(cpos, Rcam, tanAp)) return;
 	const double aspect = (double)viewW / (double)viewH;
 
-	for (int p = 0; p < plmModelN && plumeCount < MAX_PLUMES; p++) {
+	for (int p = 0; p < plmModelN && plumeCount < SHIM_PLUMES; p++) {
 		const PlumeModel& e = plmModel[p];
 
 		// Capsule from the model: root at the nozzle plus the Offset knob along
@@ -3299,8 +4401,11 @@ void OroModule::UpdateShimmerPlumes()
 		// ⚠️ RENDER-EPOCH ANCHOR (invariant 21a) - the same correction the jet applies.
 		// The haze is diffuse enough to hide a 500 m offset far better than the jet does,
 		// which is precisely why it would have gone unnoticed.
-		const OroThrusterFx& T = g_fx.thr[(e.grp >= 0 && e.grp < ORO_THR_N) ? e.grp : 0];
-		if (!T.shimmerEnabled || T.shimmer <= 0.001f) continue;   // this group hazes nothing
+		// Phase B: resolve through the override pool AND the class cache (memory-only,
+		// render-path legal). The strength stays one uniform; "strongest contributor"
+		// now reads effective per-thruster, per-class values - the same rule, finer.
+		const OroThrusterFx& T = OroThr_EffC(e.cls, e.grp, e.thrIdx, ORO_FAM_EXH);
+		if (!T.shimmerEnabled || T.shimmer <= 0.001f) continue;   // this plume hazes nothing
 		if (T.shimmer > plmShimStr) plmShimStr = T.shimmer;       // strongest contributor
 
 		const VECTOR3 rootR = e.rootG + RenderEpochShift(e.hOwn, e.ownCg);
@@ -3360,7 +4465,7 @@ void OroModule::UpdateShimmerPlumes()
 		s.str = atmW * (float)(vis * pow(e.level, 0.40));
 		s.hpk = (float)(0.15 + 0.45 * e.level);
 	}
-	for (int i = plumeCount; i < MAX_PLUMES; i++) plumes[i] = PlumeScr{};   // unused: str = 0
+	for (int i = plumeCount; i < SHIM_PLUMES; i++) plumes[i] = PlumeScr{};   // unused: str = 0
 }
 
 // ----------------------------------------------------------------------------
@@ -3550,12 +4655,15 @@ void OroModule::DrawPreResolve(oapi::Sketchpad* pSkp)
 		DrawTrailPoly(pSkp, /*depthClip=*/true);
 		DrawPlasmaPoly(pSkp, /*depthClip=*/true);
 	}
-	// PLUME EXPANSION - external only (invariant 10: your own engines are behind the
-	// cockpit). Pre-bloom is exactly where the diamond cores want to composite: the
+	// PLUME EXPANSION - external, and since 2026-08-29 the VIRTUAL COCKPIT too: RCS
+	// made "your own engines are behind the cockpit" false (the OMS pods sit outside
+	// the aft windows), and plumeVC embeds the patch-(g) clip so the jet cuts at the
+	// window frame instead of painting over the cabin.
+	// Pre-bloom is exactly where the diamond cores want to composite: the
 	// fp16 chain accumulates them past 1.0 and the client's threshold bloom whitens
 	// them (the Firefly law) - and the shimmer's resample runs later in DrawOverlay,
 	// so the diamonds ripple through their own heat haze, which is physically right.
-	if (extGate) {
+	if (extGate || plumeVC) {
 		UpdatePlumeFx();     // render-path since 2026-08-15 (the pause fix)
 		DrawPlumePoly(pSkp, /*depthClip=*/true);
 	}
@@ -3614,7 +4722,10 @@ void OroModule::DrawWetMirror(oapi::Sketchpad* pSkp)
 	// registration and silently never calls it.
 	wetMirrorLive = true;
 
-	if (!pSkp || !g_fx.masterArmed || !extGate) return;
+	// extGate OR plumeVC (2026-08-29): the reflection is visible through the VC
+	// windows too, and since the jet now draws in the VC its mirror image must
+	// keep up - a mirror missing only OUR plume would be the (w) lesson inverted.
+	if (!pSkp || !g_fx.masterArmed || !(extGate || plumeVC)) return;
 
 	SIZE sz = { 0, 0 };
 	pSkp->GetRenderSurfaceSize(&sz);          // the reflection RT, not the frame
@@ -3677,9 +4788,10 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		if (ipiReady && pCore && hFrameTex && pIPIShimmer && plumeCount > 0) {
 			SURFHANDLE hBB = pCore->GetBackBufferHandle();
 			if (hBB && pCore->CopyResource(hFrameTex, hBB)) {
-				// Plume table -> shader arrays (MAX_PLUMES entries; unused slots carry str 0).
-				float axes[MAX_PLUMES * 4], prm[MAX_PLUMES * 4];
-				for (int i = 0; i < MAX_PLUMES; i++) {
+				// Plume table -> shader arrays (SHIM_PLUMES entries - the shimmer keeps its
+				// strongest-6 contract while the jet pool is 16; see MAX_PLUMES).
+				float axes[SHIM_PLUMES * 4], prm[SHIM_PLUMES * 4];
+				for (int i = 0; i < SHIM_PLUMES; i++) {
 					axes[i * 4 + 0] = plumes[i].ax; axes[i * 4 + 1] = plumes[i].ay;
 					axes[i * 4 + 2] = plumes[i].bx; axes[i * 4 + 3] = plumes[i].by;
 					prm[i * 4 + 0]  = plumes[i].rad; prm[i * 4 + 1] = plumes[i].str;
@@ -3766,6 +4878,12 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		BuildVCGlow();             // the cockpit's own technique - see the pre-resolve slot
 		DrawTrailPoly(pSkp, /*depthClip=*/true);
 		DrawPlasmaPoly(pSkp, /*depthClip=*/true);
+	}
+	// PLUME in the VC - the fallback slot, same rule as the plasma above (the
+	// pre-resolve slot draws it on a patch-(i) client). See plumeVC.
+	if (plumeVC && !preResolveLive) {
+		UpdatePlumeFx();
+		DrawPlumePoly(pSkp, /*depthClip=*/true);
 	}
 
 	// --- AURORA through the cockpit windows (patch g) --------------------

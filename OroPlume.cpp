@@ -228,6 +228,10 @@ namespace {
 	const int N_THR_STD = (int)(sizeof(THR_STD) / sizeof(THR_STD[0]));
 }
 
+// The synthesized-nozzle admission floor, exported so SenseMarker's below-threshold
+// caption reads the SAME number the plume gate applies (one definition, 26a's rule).
+double OroPlumeSynAccMin() { return PLM_SYN_ACC_MIN; }
+
 int OroThrusterGroupOf(VESSEL* v, THRUSTER_HANDLE th)
 {
 	if (!v || !th) return -1;
@@ -293,16 +297,20 @@ void OroModule::BuildPlumeModel()
 	const double lp = log10(P > 0.01 ? P : 0.01);
 	plmRho = v->GetAtmDensity();                                 // the shimmer's air gate
 
-	float dWg[ORO_THR_N], bWg[ORO_THR_N];
-	for (int gi = 0; gi < ORO_THR_N; gi++) {
-		const OroThrusterFx& T = g_fx.thr[gi];
+	// Phase B factored the blend into a lambda: the per-group hoist stays for the
+	// common path, and a candidate whose THRUSTER override owns the exhaust family
+	// gets its band computed from ITS OWN handles - a per-thruster rated pressure is
+	// the mixed-propellant use case this whole feature exists for.
+	auto bandOf = [&](const OroThrusterFx& T, float& dW, float& bW) {
 		const double lpHi = clampd(T.plumeExpHi, PLM_EXP_LPMIN + 0.5, PLM_EXP_LPMAX);
 		const double lpLo = clampd(T.plumeExpLo, PLM_EXP_LPMIN, lpHi - 0.5);
 		const double win  = lpHi - lpLo;
 		const double diaRamp = PLM_FR_DIA * win, bloRamp = PLM_FR_BLO * win;
-		dWg[gi] = (float)clampd((lp - (lpHi - diaRamp)) / diaRamp, 0.0, 1.0);
-		bWg[gi] = (float)clampd(((lpLo + bloRamp) - lp) / bloRamp, 0.0, 1.0);
-	}
+		dW = (float)clampd((lp - (lpHi - diaRamp)) / diaRamp, 0.0, 1.0);
+		bW = (float)clampd(((lpLo + bloRamp) - lp) / bloRamp, 0.0, 1.0);
+	};
+	float dWg[ORO_THR_N], bWg[ORO_THR_N];
+	for (int gi = 0; gi < ORO_THR_N; gi++) bandOf(g_fx.thr[gi], dWg[gi], bWg[gi]);
 
 	// Readouts publish UNCONDITIONALLY once the vessel resolves (the reentryHeat
 	// discipline): the dialog must show what the model would do even from the
@@ -311,7 +319,13 @@ void OroModule::BuildPlumeModel()
 	// EDITING, which is the one whose band you are dragging.
 	{
 		const int gs = (g_fx.thrSel >= 0 && g_fx.thrSel < ORO_THR_N) ? g_fx.thrSel : 0;
-		const float dW = dWg[gs], bW = bWg[gs];
+		float dW = dWg[gs], bW = bWg[gs];
+		// Phase B: with a THRUSTER selected the readout answers for ITS effective
+		// band - the caption belongs to whatever the panel is editing.
+		if (g_fx.thrThrSel >= 0) {
+			const OroThrusterFx& Ts = OroThr_Eff(gs, g_fx.thrThrSel, ORO_FAM_EXH);
+			if (&Ts != &g_fx.thr[gs]) bandOf(Ts, dW, bW);
+		}
 		g_fx.plumeAtmKPa = (float)(P * 1e-3);
 		if      (dW >= 0.35f) strcpy_s(g_fx.plumeRegime, "overexpanded - diamonds");
 		else if (dW >  0.02f) strcpy_s(g_fx.plumeRegime, "overexpanded");
@@ -353,10 +367,10 @@ void OroModule::BuildPlumeModel()
 
 	// Gather lit, qualifying exhausts across the stack; keep the strongest
 	// MAX_PLUMES (biggest + hottest wins) - ONE selection every consumer inherits.
-	// Qualifying = MAIN / RETRO / HOVER / USER, per vessel. RCS is excluded by
-	// OroThrusterGroupOf returning -1 for every THGROUP_ATT_* thruster (the shimmer's
-	// original user call - RCS puffs are tiny, numerous, and would eat the budget for
-	// no visible gain).
+	// Qualifying = any classifiable group - RCS INCLUDED since 26(k) made it the
+	// fifth group (2026-08-26; the old "RCS is excluded" note here outlived the
+	// change by four days and was corrected in the Phase B commit). grp < 0 now
+	// only means an exhaust with no thruster handle at all.
 	// ⚠️ THE GROUP IS CARRIED THROUGH NOW (2026-08-16). It used to be discarded right
 	// here: the three groups were flattened into one handle set and all that survived
 	// was the exhaust index, which is why one set of sliders had to serve every engine
@@ -365,13 +379,31 @@ void OroModule::BuildPlumeModel()
 	// The POOL STAYS SHARED (his call): the six brightest plumes win whatever group
 	// they belong to. A group whose plume pill is off is skipped below, so it now
 	// frees its slots instead of holding them - a small win that falls out for free.
-	struct Cand { float w; DWORD idx; int vs; int grp; bool syn; THRUSTER_HANDLE th; };
+	// Phase B: candidates resolve their THRUSTER INDEX at scan time (main thread) so
+	// per-thruster overrides can answer the enable question and travel into the model
+	// - the render path then never asks oapi for it. CLASS-FAITHFUL here: LIVE
+	// overrides belong to the loaded class file, so a stack vessel of any other class
+	// takes them never (index 3 on a docked ShuttleA is an unrelated jet from index 3
+	// on your DG). A foreign class WITH ITS OWN CFG resolves through the class CACHE
+	// instead (his SRB report, 2026-08-30): its groups AND its own THR<idx> override
+	// blocks apply, so the boosters answer to Atlantis_SRB.cfg whoever has focus. A
+	// foreign class with no cfg keeps the live tables - today's behaviour bit for bit.
+	struct Cand { float w; DWORD idx; int vs; int grp; bool syn; THRUSTER_HANDLE th; int thrIdx; int cls; };
 	Cand cand[32];
 	int nc = 0;
 	EXHAUSTSPEC es;
+	auto thrIdxOf = [](VESSEL* sv, THRUSTER_HANDLE th) -> int {
+		if (!th) return -1;
+		const DWORD n = sv->GetThrusterCount();
+		for (DWORD t = 0; t < n; t++)
+			if (sv->GetThrusterHandleByIndex(t) == th) return (int)t;
+		return -1;
+	};
 	for (int s = 0; s < nStack && nc < 32; s++) {
 		VESSEL* sv = oapiGetVesselInterface(stack[s]);
 		if (!sv) continue;
+		const int  cIdx     = OroThr_CacheFor(sv);          // >= 0: its own class file
+		const bool faithful = (cIdx < 0) && OroThr_ClassMatch(sv);   // live overrides
 		const DWORD nex = sv->GetExhaustCount();
 		for (DWORD i = 0; i < nex && nc < 32; i++) {
 			const double lvl = sv->GetExhaustLevel(i);
@@ -379,14 +411,21 @@ void OroModule::BuildPlumeModel()
 			sv->GetExhaustSpec(i, &es);
 			if (!es.lpos || !es.ldir) continue;
 			const int grp = OroThrusterGroupOf(sv, es.th);
-			if (grp < 0) continue;                          // unclassifiable, not RCS any more
-			if (!g_fx.thr[grp].plumeEnabled) continue;      // this group draws no jet
-			cand[nc].w   = (float)(es.lsize * lvl);
-			cand[nc].idx = i;
-			cand[nc].vs  = s;
-			cand[nc].grp = grp;
-			cand[nc].syn = false;
-			cand[nc].th  = es.th;
+			if (grp < 0) continue;                          // no thruster handle at all
+			// thrIdx matters for LIVE overrides (focus class) and for a cached
+			// class's OWN override blocks alike.
+			const int tIdx = (faithful || cIdx >= 0) ? thrIdxOf(sv, es.th) : -1;
+			// The enable is EFFECTIVE now: an override can silence one jet, or draw
+			// one while its group's pill is off - the layered model's letter.
+			if (!OroThr_EffC(cIdx, grp, tIdx, ORO_FAM_EXH).plumeEnabled) continue;
+			cand[nc].w      = (float)(es.lsize * lvl);
+			cand[nc].idx    = i;
+			cand[nc].vs     = s;
+			cand[nc].grp    = grp;
+			cand[nc].syn    = false;
+			cand[nc].th     = es.th;
+			cand[nc].thrIdx = tIdx;
+			cand[nc].cls    = cIdx;
 			nc++;
 		}
 	}
@@ -400,6 +439,8 @@ void OroModule::BuildPlumeModel()
 	for (int s = 0; s < nStack && nc < 32; s++) {
 		VESSEL* sv = oapiGetVesselInterface(stack[s]);
 		if (!sv) continue;
+		const int  cIdx     = OroThr_CacheFor(sv);
+		const bool faithful = (cIdx < 0) && OroThr_ClassMatch(sv);
 		const DWORD nex = sv->GetExhaustCount();
 		const DWORD nth = sv->GetThrusterCount();
 		for (DWORD t = 0; t < nth && nc < 32; t++) {
@@ -408,8 +449,12 @@ void OroModule::BuildPlumeModel()
 			const double lvl = sv->GetThrusterLevel(th);
 			if (lvl < 0.02) continue;
 			const int grp = OroThrusterGroupOf(sv, th);
-			if (grp < 0) continue;                          // unclassifiable, not RCS any more
-			if (!g_fx.thr[grp].plumeEnabled) continue;
+			if (grp < 0) continue;
+			// This pass IS thruster-indexed, so the effective enable is direct. The
+			// 26(j) admission floor below stays ABSOLUTE - an override does not admit
+			// a vent past it (v1's rule); the panel caption names the state instead.
+			const int tIdx = (faithful || cIdx >= 0) ? (int)t : -1;
+			if (!OroThr_EffC(cIdx, grp, tIdx, ORO_FAM_EXH).plumeEnabled) continue;
 			// Already drawn by the exhaust pass? Then it is not our business.
 			bool hasEx = false;
 			for (DWORD i = 0; i < nex && !hasEx; i++) {
@@ -425,11 +470,13 @@ void OroModule::BuildPlumeModel()
 			                           PLM_SYN_W_MIN, PLM_SYN_W_MAX);
 			cand[nc].w   = (float)(wsyn * PLM_SYN_LW * lvl);   // same weight metric as
 			                                                   // above: lsize x level
-			cand[nc].idx = t;                                  // THRUSTER index now
-			cand[nc].vs  = s;
-			cand[nc].grp = grp;
-			cand[nc].syn = true;
-			cand[nc].th  = th;
+			cand[nc].idx    = t;                               // THRUSTER index now
+			cand[nc].vs     = s;
+			cand[nc].grp    = grp;
+			cand[nc].syn    = true;
+			cand[nc].th     = th;
+			cand[nc].thrIdx = tIdx;
+			cand[nc].cls    = cIdx;
 			nc++;
 		}
 	}
@@ -454,8 +501,13 @@ void OroModule::BuildPlumeModel()
 		// expansion band, which is what lets a vacuum main and a sea-level hover be in
 		// different regimes in the same frame.
 		const int    grp   = cand[p].grp;
-		const OroThrusterFx& T = g_fx.thr[grp];
-		const float  dW    = dWg[grp], bW = bWg[grp];
+		// Phase B: the block this plume answers to - its vessel's OWN class through
+		// the cache, its thruster's override when one owns the exhaust family, the
+		// live group otherwise. A non-live block carries its OWN expansion band, and
+		// the identity test below computes it (the hoisted dWg covers live groups).
+		const OroThrusterFx& T = OroThr_EffC(cand[p].cls, grp, cand[p].thrIdx, ORO_FAM_EXH);
+		float dW = dWg[grp], bW = bWg[grp];
+		if (&T != &g_fx.thr[grp]) bandOf(T, dW, bW);
 		const float  kWidth = clampf(T.plumeWidth, 0.05f, 3.0f);
 		const float  kLen   = clampf(T.plumeLen,   0.05f, 3.0f);
 		const float  kSpace = clampf(T.plumeSpacing, 0.15f, 3.0f);
@@ -490,7 +542,9 @@ void OroModule::BuildPlumeModel()
 		                                                    // divides by wsize below
 
 		PlumeModel& e = plmModel[plmModelN];
-		e.grp = grp;                 // every consumer reads g_fx.thr[e.grp] from here on
+		e.grp    = grp;              // every consumer resolves OroThr_EffC(e.cls, e.grp,
+		e.thrIdx = cand[p].thrIdx;   //   e.thrIdx) from here on (Phase B) - the live
+		e.cls    = cand[p].cls;      //   group when cls and thrIdx are both -1
 
 		// Axis, world space. ldir is the THRUST direction: exhaust streams along
 		// -ldir from the nozzle at lpos - ldir*lofs (the shimmer's construction).
@@ -559,8 +613,14 @@ void OroModule::BuildPlumeModel()
 		// change seeds fresh (no false puff on a camera switch). Decays in REAL
 		// time (the flash-event class of transient - invariant 22d); one float,
 		// always falling toward zero: G10-clean by construction.
+		// ⚠️ NOT FOR RCS (2026-08-29, his catch flying the Atlantis): the puff models
+		// the ~1 s unsteady startup of a big PUMP-FED engine, and that is real - but a
+		// small pressure-fed hypergolic thruster reaches steady flow in tens of
+		// MILLISECONDS, sub-frame. A half-second "focusing" on an RCS jet is big-engine
+		// behaviour played on the wrong hardware, so RCS shows the settled plume from
+		// the first frame. Mains/hovers/retros/user keep their ignition puff.
 		float puff = 0.0f;
-		if (phys) {
+		if (phys && grp != ORO_THR_RCS) {
 			double lvlPrev = lvl;                       // vessel change: no transient
 			float  puffPrev = 0.0f;
 			if (hObj == plmVesPrev) {
@@ -625,13 +685,20 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 	// the throat fire shipped; the rule is swept to both here rather than only where the
 	// evidence pointed. Nothing changes for anyone whose clip is live.
 	const bool clipHidesThroat = depthClipOK && !wetMirrorPass;
-	if (!extGate || !g_fx.masterArmed) return;                   // EXTERNAL view only
+	// EXTERNAL, and since 2026-08-29 the VC too (plumeVC - RCS jets are visible from
+	// the flight deck; the patch-(g) clip cuts the jet at the window frame per pixel)
+	if (!(extGate || plumeVC) || !g_fx.masterArmed) return;
 	// ⚠️ NO GLOBAL PILL TEST HERE ANY MORE (2026-08-16). The pill and the master
 	// strength are PER GROUP, and BuildPlumeModel has already dropped every candidate
 	// whose group is switched off - so a model entry existing at all means its group
 	// wants a jet. Testing the edit buffer here would have made whichever group the
 	// panel happened to be showing decide whether the OTHER groups draw.
-	if (plmModelN <= 0) return;                                  // nothing burning
+	// Phase B: the NOZZLE MARKER rides this poly and must draw with the engines COLD
+	// - finding a jet is its whole job - so the empty-model early-out yields to it.
+	// Excluded from the wet mirror on purpose: a test rig has no business in a
+	// reflection, and the mirrored build is a cost the scaffolding should not add.
+	const bool wantMarker = g_fx.thrMarkOn && g_fx.thrPageLive && mkN > 0 && !wetMirrorPass;
+	if (plmModelN <= 0 && !wantMarker) return;                   // nothing to draw
 
 	// THE RENDER CAMERA (2026-08-15). CONSUMER 1 of the plume model runs in the render
 	// path now: the jet is screen-space geometry, and clbkPreStep does not run while
@@ -670,13 +737,80 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 		plmDkVtx[plmDkVtxN].x = x2; plmDkVtx[plmDkVtxN].y = y2; plmDkVtx[plmDkVtxN].c = c2; plmDkDepth[plmDkVtxN] = d2; plmDkVtxN++;
 	};
 
+	// ---- THE NOZZLE MARKER (Phase B, 2026-08-30) ---------------------------
+	// A pulsing ring + flow tick at each marked nozzle: the selected thruster
+	// bright, or every thruster of the group dim at ALL + MARK. Snapshotted by
+	// SenseMarker (main thread, paused included), projected HERE off the render
+	// camera - pause-correct from birth. X-RAY depth (1.5 m, in front of anything
+	// patch (g) could hide it behind): the marker exists to FIND a jet, and a
+	// far-side nozzle occluded by the hull would defeat the finder. Test-rig
+	// class throughout - nothing persists, and the wet mirror never sees it.
+	if (wantMarker) {
+		for (int m = 0; m < mkN; m++) {
+			const VECTOR3 mroot = mkPos[m] + RenderEpochShift(mkOwn, mkCg);
+			float sx, sy; double sz;
+			if (!ProjPx(cc, mroot, vW, vH, sx, sy, sz)) continue;
+			if (sx < -80.0f || sx > (float)vW + 80.0f ||
+			    sy < -80.0f || sy > (float)vH + 80.0f) continue;
+			const bool  bright = mkBri[m];
+			// One thruster = one heartbeat: the selected thruster's nozzles pulse in
+			// SYNC (they are one device), while ALL-mode's dim rings stagger so a
+			// field of them reads as many markers rather than one strobing sheet.
+			const float pulse  = 0.55f + 0.45f * sinf(t_anim * (bright ? 5.2f : 3.1f)
+			                                          + (bright ? 0.0f : m * 0.7f));
+			const int   av     = (int)((bright ? 235.0f : 90.0f) * pulse);
+			const DWORD col    = ((DWORD)av << 24) | 0x00FFE640u;   // cyan - outside every
+			                                                        //   plume palette
+			const float MDEPTH = 1.5f;
+			float rr = pxAt(sz, mkScale * 0.05);
+			const float rLo = bright ? 11.0f : 7.0f, rHi = bright ? 30.0f : 18.0f;
+			rr = rr < rLo ? rLo : (rr > rHi ? rHi : rr);
+			const float ht = bright ? 2.2f : 1.3f;                  // ring half-thickness [px]
+			const int NSEG = 20;
+			float pix = 0, piy = 0, pox = 0, poy = 0;
+			for (int sg = 0; sg <= NSEG; sg++) {
+				const float aa = (float)sg * (6.2831853f / NSEG);
+				const float ca = cosf(aa), sa = sinf(aa);
+				const float ix = sx + ca * (rr - ht), iy = sy + sa * (rr - ht);
+				const float ox = sx + ca * (rr + ht), oy = sy + sa * (rr + ht);
+				if (sg) {
+					emitTri(pix, piy, col, MDEPTH, pox, poy, col, MDEPTH, ox, oy, col, MDEPTH);
+					emitTri(pix, piy, col, MDEPTH, ox, oy, col, MDEPTH, ix, iy, col, MDEPTH);
+				}
+				pix = ix; piy = iy; pox = ox; poy = oy;
+			}
+			// The FLOW TICK: which way this jet fires. A short bar from the ring edge
+			// along the projected exhaust direction; skipped end-on, where the
+			// projection collapses and there is nothing honest to say (G7's case).
+			float ex, ey; double ez;
+			if (ProjPx(cc, mroot + mkDir[m] * (mkScale * 0.30), vW, vH, ex, ey, ez)) {
+				float dx = ex - sx, dy = ey - sy;
+				const float dl = sqrtf(dx * dx + dy * dy);
+				if (dl > 4.0f) {
+					dx /= dl; dy /= dl;
+					const float t0 = rr + 3.0f;
+					const float t1 = rr + 3.0f + (bright ? 26.0f : 14.0f);
+					const float wpx = bright ? 1.6f : 1.0f;
+					const float px_ = -dy * wpx, py_ = dx * wpx;
+					const float x0 = sx + dx * t0, y0 = sy + dy * t0;
+					const float x1 = sx + dx * t1, y1 = sy + dy * t1;
+					emitTri(x0 - px_, y0 - py_, col, MDEPTH, x0 + px_, y0 + py_, col, MDEPTH,
+					        x1 + px_, y1 + py_, col, MDEPTH);
+					emitTri(x0 - px_, y0 - py_, col, MDEPTH, x1 + px_, y1 + py_, col, MDEPTH,
+					        x1 - px_, y1 - py_, col, MDEPTH);
+				}
+			}
+		}
+	}
+
 	for (int p = 0; p < plmModelN; p++) {
 		const PlumeModel& e = plmModel[p];
-		// THIS PLUME'S OWN GROUP decides every draw knob (2026-08-16). These were all
-		// hoisted out of the loop when one set of numbers served the whole ship; they
-		// are per plume now, which is what lets a hydrolox main and a hypergolic retro
-		// be different colours, with different soot, in the same frame.
-		const OroThrusterFx& T = g_fx.thr[(e.grp >= 0 && e.grp < ORO_THR_N) ? e.grp : 0];
+		// THIS PLUME'S OWN BLOCK decides every draw knob (2026-08-16 per group;
+		// 2026-08-30 per THRUSTER through the override pool, and per VESSEL CLASS
+		// through the cache - Phase B). The resolver is memory-only, so this
+		// render-path read stays legal and LIVE: paused tuning keeps whatever
+		// responsiveness it has today, and a CLEAR landing mid-frame self-heals.
+		const OroThrusterFx& T = OroThr_EffC(e.cls, e.grp, e.thrIdx, ORO_FAM_EXH);
 		int jR, jG, jB, bR, bG, bB;
 		UnpackCR(T.plumeColJet,   jR, jG, jB);   // core + diamond body
 		UnpackCR(T.plumeColBloom, bR, bG, bB);   // the vacuum halo

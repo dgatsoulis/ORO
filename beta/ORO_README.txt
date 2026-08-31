@@ -67,8 +67,9 @@
 
   ALSO NEW:
 
-  - An in-panel HELP window, per tab. Several things you asked for already
-    existed and there was no way to discover them - that is what this answers.
+  - An in-panel HELP window, per page - menus included - which follows you as
+    you navigate. Several things you asked for already existed and there was
+    no way to discover them - that is what this answers.
   - The panel resizes vertically, and there is a REVERT button.
   - Two effects you have never seen: crepuscular GOD RAYS, and the transonic
     VAPOUR CONE.
@@ -102,11 +103,46 @@ Thanks for testing. ORO is a global module that adds two families of effects:
 
 Everything is adjustable live, from one panel, while you fly.
 
-NEW IN THIS BUILD (260823) - THE STORM:
+NEW IN THIS BUILD (260831) - THE THRUSTER MILESTONE:
+  * THE PANEL IS A MENU TREE. Three doors - WORLD / VESSEL / PILOT - then
+    short pages, one subject each, with BACK and a breadcrumb. No more giant
+    scrolling tabs. HELP is per page and an open help window follows you as
+    you navigate; SAVE buttons go AMBER when a page holds unsaved edits.
+  * PER-THRUSTER TUNING. Beside the engine-group button, a thruster selector:
+    any single thruster can carry its own exhaust and particle look on top of
+    its group's (see section 5). A MARK button rings every nozzle of the
+    selection in-world, and CANCEL THRUST now holds exactly what you selected
+    - one RCS jet can be test-fired with the ship pinned in place.
+  * GIMBAL, END TO END. Plume, particles, shimmer and throat fire follow a
+    gimballing engine live - and for vessels that animate their real engine
+    BELLS, the bell glow can now ride the moving bell (a one-line mesh token
+    for authors; see the bell glow section).
+  * BOOSTERS KEEP THEIR LOOK. Vessels in a stack (SRBs, tanks) follow their
+    OWN class's saved tuning even while you fly the orbiter.
+  * RAINDROPS ON THE WINDSCREEN - drops bead, run and streak on the VC glass
+    with real refraction, driven by the storm outside. Vessel authors enable
+    their glass with a one-line RAIN 1 mesh token.
+  * REFLECTIONS THAT INCLUDE YOU. A fourth Launchpad reflection mode, "Full
+    Scene ORO (exp)": vessels reflect THEMSELVES and their payloads (stock
+    Full Scene never could), with multi-probe environment maps and real
+    planar mirrors - and planet glow now respects a closed payload bay
+    (stock lights the inside of closed doors sky-blue). Experimental; the
+    three stock modes are pixel-exact stock. Needs Shadows enabled.
+  * SMOKE THAT KNOWS THE SUN. Diffuse particle streams darken at night, shade
+    directionally (lit side bright, far side smoky), and through dawn take
+    the same colours as your hull - with a Launchpad group to tune it (see
+    section 5's PARTICLE LIGHTING). Stock behaviour is one dropdown away.
+  * COPY STOCK and a particle TEXTURE PICKER - start your particle tuning
+    from the vessel author's own stream definitions, and cycle real contrail
+    textures or drop your own atlas in Textures\ORO\Particles.
+  * TWIN VAPOUR CONES with full placement - position on all three axes plus
+    pitch and yaw per cone.
+
+NEW IN 260823 - THE STORM:
   * RAIN. Summon a storm at the surface: the light collapses to overcast under
     a real two-layer cloud ceiling, streaks fall, drops splash, the ground
-    soaks dark, standing water pools and mirrors the ships. ATMOS tab, fifteen
-    controls, Earth for now.
+    soaks dark, standing water pools and mirrors the ships. The RAIN page
+    (WORLD / WEATHER), Earth for now.
   * RAIN LIGHTNING - flashes inside the deck and real textured BOLTS to the
     ground, each one blinking a real light over the scene and the wet ground.
   * THUNDER. Every flash sends its thunder delayed by its own distance at the
@@ -128,8 +164,9 @@ NEW SINCE THE FIRST PUBLIC FILES (if you tested the PULSE beta, 260810):
     fixed here - three separate causes, all of them the addon handing Orbiter
     something before the new scene existed. If you have been hitting that, it
     was not your machine.
-  * VAPOUR CONE - the transonic shock collar. REENTRY tab. Try TEST on a runway.
-  * GOD RAYS - crepuscular shafts from a low sun. ATMOS tab.
+  * VAPOUR CONES - the transonic shock collar, TWO of them now, independently
+    tunable (VESSEL / REENTRY). Try TEST on a runway.
+  * GOD RAYS - crepuscular shafts from a low sun (WORLD).
   * The patched client no longer floods your Orbiter.log with errors on every
     scenario reload. That one was a stock D3D9Client bug, not an addon bug.
   * The rename, which touches everything you can see: the Launchpad module is
@@ -246,8 +283,8 @@ In the Launchpad, VIDEO tab -> "Advanced" / D3D9 configuration:
 In the Launchpad, VISUAL EFFECTS tab:
 
   Particle streams ........... ON (it is on by default)   REQUIRED for the
-      THRUSTER > PARTICLES tab. With it off, Orbiter refuses to create any
-      particle stream and that whole tab silently does nothing.
+      VESSEL > THRUSTERS > PARTICLES page. With it off, Orbiter refuses to
+      create any particle stream and that whole page silently does nothing.
 
   Ambient light level ........ leave at the stock 20
       Raising it washes out every shadow in the sim, including ORO's.
@@ -279,43 +316,61 @@ Then, from any of them, press CTRL+F4 -> ORO control.
     wrong, hit Ctrl+G - it hands everything back to stock instantly.
   * Take off and fly. Watch the exhaust from an external view (F1) - the plume,
     the shock diamonds at sea level, the soot at the nozzle lip.
-  * THRUSTER > EXHAUST > BELL GLOW: the engine bells heat up and cool down on
-    their own as you throttle.
-  * Go to orbit, then come back in steep. The reentry plasma is on the REENTRY
-    tab and is the biggest thing in the addon.
+  * VESSEL > THRUSTERS > EXHAUST, the BELL GLOW section: the engine bells heat
+    up and cool down on their own as you throttle.
+  * Go to orbit, then come back in steep. The reentry plasma is the PLASMA
+    page (VESSEL > REENTRY) and the biggest thing in the addon.
   * Sit in the virtual cockpit (F8) at a low sun angle and roll - sunlight
-    sweeps across the cabin through the canopy (VC tab).
+    sweeps across the cabin through the canopy (PILOT > VIRTUAL COCKPIT).
 
   Nothing you change is permanent until you press SAVE - see section 6.
 
 
 --------------------------------------------------------------------------------
-5. THE PANEL, TAB BY TAB
+5. THE PANEL, PAGE BY PAGE
 --------------------------------------------------------------------------------
 
+THE PANEL IS A MENU TREE. The main menu has three doors - WORLD (the
+environment), VESSEL (the hull) and PILOT (the human) - with submenus beneath
+and, at the bottom, PAGES that hold exactly one subject's sliders. The line
+under the master strip is your breadcrumb (where you are), with BACK and
+BACK TO MAIN beside it; both sit dim at the main menu because there is nowhere
+back to go. Nothing is ever more than two clicks from anywhere, and every page
+only shows the controls that belong to its subject.
+
 Every effect has a PILL (the round toggle on the left - green is on) and a
-SLIDER. Sliders show their value on the right. The panel scrolls; each tab has
-its own SAVE button explaining what it writes.
+SLIDER. Sliders show their value on the right. Each page scrolls its own
+content.
 
 === ALWAYS VISIBLE (top of the panel) ===
 
   ENABLED / DISABLED   Master arm. Same as Ctrl+G. Kills every effect at once
                        and gives the sim back its stock behaviour.
-  HELP                 Opens the help window for WHICHEVER TAB YOU ARE ON, so
-                       where you are when you press it is the question you are
-                       asking. It never opens twice: press it again on another
-                       tab and the window you already have switches to that
-                       tab's text. Closeable and resizable, and it remembers its
-                       size - but not that it was open, so it never reappears by
-                       itself on a new session. The button lights green while it
-                       is up, which is also how you tell it has opened behind
-                       the sim window rather than not opened at all.
-                       Everything in section 5 below is in there, in more depth.
+  HELP                 Opens the help window for WHICHEVER PAGE YOU ARE ON -
+                       menus included, so pressing it on a menu describes what
+                       is behind each button, and pressing it on a page of
+                       sliders explains every one of them. It never opens
+                       twice: press it again elsewhere and the window you
+                       already have switches to that page's text - and while
+                       it is open it FOLLOWS you as you navigate, so the text
+                       beside you is always about the screen in front of you.
+                       Closeable and resizable, and it remembers its size -
+                       but not that it was open, so it never reappears by
+                       itself on a new session. The button lights green while
+                       it is up, which is also how you tell it has opened
+                       behind the sim window rather than not opened at all.
   SAVE                 Writes ALL settings, in all three scopes (section 6).
 
-Each tab also carries its own SAVE and a REVERT beside it. REVERT re-reads that
-tab's files from disk and throws away everything you have moved since the last
-save - the way back from a tuning session that went wrong.
+Every PAGE of sliders opens with its own SAVE and a REVERT beside it, in a
+row that stays put however far you scroll - the way to save is never off
+screen. REVERT re-reads that page's files from disk and throws away everything
+you have moved since the last save - the way back from a tuning session that
+went wrong.
+
+THE SAVE BUTTONS TURN AMBER while there are unsaved edits in the files they
+would write - the global one for any unsaved edit anywhere, a page's own for
+its files. Green flash = written. Amber gone = safe to quit. Test buttons and
+the other session-only rigs never light it, because they are not saved things.
 
 THE PANEL RESIZES VERTICALLY. Drag its bottom edge or a corner: the width is
 fixed (the sliders and the banner are built around it) but the height is yours,
@@ -331,9 +386,10 @@ file to get the default 800 back.
 was ours, and it is fixed. Orbiter keeps rendering during a window drag.)
 
 
-=== TAB: G-FORCE ===  what high G does to you
+=== PILOT / G-FORCES ===  what high G does to you
+    (the scripted G events live on their own page, PILOT / SCENARIOS)
 
-   SAVE TARGET     Where this tab's settings live. ALL VESSELS keeps them in the
+   SAVE TARGET     Where this page's settings live. ALL VESSELS keeps them in the
                    global file - one pilot flies every ship, which is how ORO has
                    always worked. THIS VESSEL CLASS moves them into the hull's own
                    file, because where the crew SITS is a fact about an airframe.
@@ -400,13 +456,14 @@ SCENARIOS - one-click scripted G events (LAB mode only; they and the physics
                                        only INDUCE G-LOC has a clip.
 
 
-=== TAB: THRUSTER ===  engines. Two sub-tabs.
+=== VESSEL / THRUSTERS ===  engines. Two pages: EXHAUST and PARTICLES.
 
-⚠ FIRST, THE ENGINE GROUP BUTTON in the top strip beside SAVE. Everything on
-this tab - both sub-tabs - edits ONE engine group at a time, and that button
+⚠ FIRST, THE ENGINE GROUP BUTTON, in the fixed row at the top of both pages.
+Everything on either page edits ONE engine group at a time, and that button
 says which. Click it to cycle through the groups this vessel actually has:
-MAIN, HOVER, RETRO, and USER for engines the author put in no standard group.
-RCS is never included. A ship with only main engines has nothing to cycle to.
+MAIN, HOVER, RETRO, USER for engines the author put in no standard group, and
+RCS - all attitude thrusters as one group. A ship with only main engines has
+nothing to cycle to.
   Why: one set of numbers only suits a ship whose engines all burn the same
   thing. The expansion band's high handle is the pressure an engine is RATED
   for, the Jet/Bloom swatches are its exhaust colour, and soot is the difference
@@ -415,13 +472,28 @@ RCS is never included. A ship with only main engines has nothing to cycle to.
   Tune a group, cycle, tune the next. SAVE writes them all, so working on the
   hovers cannot disturb what you did to the mains.
   If you already had a tuned class file, its single set of numbers loads into
-  ALL FOUR groups - nothing is lost and nothing looks different until you cycle
+  EVERY group - nothing is lost and nothing looks different until you cycle
   and change something.
-  STOCK EXHAUST, STOCK PARTICLES and CANCEL THRUST are the exceptions: they
-  apply to the whole vessel, because the client suppresses stock exhaust per
-  SHIP and cancelling thrust acts at the centre of mass.
+  STOCK EXHAUST and STOCK PARTICLES are the exceptions: they apply to the
+  whole vessel, because the client suppresses stock exhaust per SHIP.
 
---- Sub-tab EXHAUST - the parts ORO draws itself ---
+⚠ AND BESIDE IT, THE THRUSTER SELECTOR (Thr: < ALL >) - one step finer. At ALL
+you edit the whole group, as ever. Cycle it to a single thruster and the first
+slider you move gives THAT thruster its own override: it keeps its own look
+from then on, saved with the class, while the rest of the group stays on the
+group's numbers. Exhaust and particles override independently. CLR hands the
+thruster back to its group. The status line under the row always names what
+you are editing and whether it owns an override.
+  MARK toggles a pulsing in-world ring at every nozzle of the selection - with
+  44 RCS jets, "thruster 17" means nothing without one. Rings draw through the
+  hull (deliberately - you are locating, not admiring).
+  Why: some addons group thrusters loosely, or mix propellants in one group.
+  This lets a single odd engine be tuned without forking the whole group.
+  Vessels in a launch stack (boosters, a tank) follow their OWN class's saved
+  tuning even while you fly the orbiter - tune the booster class once, and a
+  fresh launch shows it on every booster with your focus elsewhere.
+
+--- Page EXHAUST - the parts ORO draws itself ---
 
   Exhaust shimmer   Heat haze bending the view behind the plume, in atmosphere.
   Offset (m)        Slides the haze along the plume axis.
@@ -433,6 +505,10 @@ RCS is never included. A ship with only main engines has nothing to cycle to.
     LAB | PHYSICS   PHYSICS lets pressure and throttle drive the shape.
                     LAB pins them so the sliders rule alone. Both are anchored
                     identical at sea level and full throttle.
+    Stock preset    COPY STOCK resets this group's jet to the stock flame:
+                    width/length 1.0 (the plume's base size is already the
+                    vessel's own exhaust definition) with diamonds, bloom,
+                    throat fire and soot off. A clean start before shaping.
     Expansion band  TWO handles on one track: the pressure range this engine is
                     built for. Drag the high handle down and you have a vacuum
                     engine that shudders and pinches at the pad.
@@ -461,20 +537,42 @@ RCS is never included. A ship with only main engines has nothing to cycle to.
                    brighter amber - the caption under this section will tell you
                    if that is what you are looking at.
     Needs a bell mesh for the vessel class; DeltaGlider and DG-S have one.
+    FOR MESH AUTHORS - GIMBALLING BELLS: if a vessel animates its real engine
+    bells with the gimbal, give each bell its own group in the bell mesh and
+    add a line reading GIMBAL to that group's header. The glow then rotates to
+    track the live thrust direction of its engine (matched by position) and
+    rides the moving bell as one piece of metal. A label's first word is the
+    engine family, the rest is yours - "MAIN 1", "MAIN 2" keep mesh editors
+    happy with unique names. Without the token a group stays fixed, which is
+    correct for the many vessels that gimbal the thruster but never move the
+    bell mesh itself.
 
   STOCK EXHAUST   Off = hide Orbiter's own exhaust texture, so you judge ORO's
                   plume alone. This only affects the flame BILLBOARDS. Stock's
                   exhaust PARTICLES have their own pill, on the PARTICLES
-                  sub-tab - they were split deliberately, so that an addon which
+                  page - they were split deliberately, so that an addon which
                   replaces only one of them can be handled.
-  CANCEL THRUST   A test stand: cancels the vessel's thrust so you can run the
-                  engines up on the ground and look at them. Never saved.
+  CANCEL THRUST   A test stand that FOLLOWS THE SELECTION: it nulls the
+                  selected group - or the one selected thruster - each engine
+                  cancelled at its own position, so its push AND its twist die
+                  together. Fire one RCS jet under the hold and the ship does
+                  not move at all, while every other control stays live. Never
+                  saved. The same switch is mirrored on the PARTICLES page -
+                  one rig, two doors.
 
---- Sub-tab PARTICLES - Orbiter's own particle system, under your control ---
+--- Page PARTICLES - Orbiter's own particle system, under your control ---
 
 ORO draws none of these. It hands Orbiter the same settings a vessel author
 sets in code, and lets you move them live. Units are the API's own.
 
+  Stock preset   COPY STOCK loads the vessel author's own stream definition
+                 into the sliders as a starting point - only the streams
+                 belonging to the SELECTED ENGINE GROUP (matched by thrust
+                 direction, per-thruster duplicates folded), so a DeltaGlider's
+                 MAIN offers exactly its contrail and its flame puffs. Press
+                 again to cycle; the status line names which one you got.
+                 Slider top ends stretch automatically when a stock value (a
+                 long booster-smoke lifetime, say) is beyond the preset range.
   Offset (m)     Where the particles are born, along the exhaust. Negative
                  moves the source back toward the nozzle.
   Size (m)       Particle size at birth. Note there is no width or length - a
@@ -486,24 +584,77 @@ sets in code, and lets you move them live. Units are the API's own.
   Growth (m/s)   How fast each particle expands as it ages.
   Atm slowdown   How much the atmosphere brakes them.
   Lighting       EMISSIVE - they glow by themselves (flame).
-                 DIFFUSE  - the sun lights them (smoke, vapour). This is the
-                 single biggest change in the whole tab; try both.
+                 DIFFUSE  - the sun lights them (smoke, vapour). Since this
+                 build DIFFUSE really means it - see PARTICLE LIGHTING below.
   Air fade       FADES IN VACUUM - Orbiter's stock behaviour, where a stream
                  fades out as the air thins. THIS IS THE DEFAULT: exhaust clouds
                  hanging in orbit look wrong, and they are wrong.
                  ALWAYS ON       - emit everywhere, including vacuum.
-                 If you enable this tab in orbit on the default and see nothing,
+                 If you enable this page in orbit on the default and see nothing,
                  that is the fade doing its job - the row's own label says
                  "Air fade - in vacuum" while it is holding emission off, and
                  the caption below says so too.
-  Colour         Tints the particles.
-  STOCK PARTICLES  The vessel author's own exhaust particles. This pill and the
-                 one at the top of the tab are MUTUALLY EXCLUSIVE - stock's or
-                 ORO's, never both. Turning one on turns the other off.
-                 Both off is also fine: no exhaust particles at all.
+  Colour A / B   TWO tints: each particle is randomly born with one or the
+                 other, so white + dark grey gives a mixed smoke no single
+                 colour can. On a file texture a tint REPLACES the file's
+                 colour using its brightness as shading - so white really is
+                 white. Set both the same for a single-colour look.
+  STOCK          Use the texture's own authored colours and ignore both tints.
+                 Stays green while active; the swatches grey out.
+  Texture        The particle's SHAPE. Cycles ORO's synthesized atlas,
+                 Orbiter's own Contrail1 / Contrail1a (the DeltaGlider's wispy
+                 smoke), then any .dds you drop into Textures\ORO\Particles -
+                 the folder is rescanned on every press, no restart needed.
+                 Files must be 2x2 atlases of four puff variants, like
+                 Contrail1.dds (a single centred image renders as corner
+                 wedges); the folder's README explains. A missing file falls
+                 back to the synthesized atlas.
+  STOCK PARTICLES  The vessel author's own exhaust particles. Independent of
+                 ORO's pill at the top of the page: run stock's, ORO's, both
+                 together, or neither - every combination is legal, and SAVE
+                 keeps whichever you set.
+  CANCEL THRUST  The same test-stand switch as the EXHAUST page's - one rig,
+                 two doors, so tuning particles does not mean a page hop.
+
+  PARTICLE LIGHTING  (Launchpad > Video > Advanced > "Particle lighting (ORO)")
+  Stock Orbiter renders DIFFUSE particle streams fully lit at any hour - a
+  smoke trail at midnight glows as if it were noon. The ORO client fixes it:
+  DIFFUSE particles darken on the night side (down to your Launchpad ambient
+  level), cross the terminator per particle so a long trail can be lit at one
+  end and dark at the other, stay lit near the engine flame, and are shaded
+  DIRECTIONALLY - the sun-facing side of a smoke cloud is bright, the far
+  side smoky. Through dawn and dusk the sunlit smoke follows the SAME colour
+  your hull takes (it reads the client's own atmospheric sunlight at each
+  particle's altitude), while the steam by the nozzles stays engine-lit white.
+  EMISSIVE streams are untouched - flame is supposed to glow. The Launchpad
+  dropdown picks the mode:
+    Off (stock, always lit)  bit-exact stock behaviour, everything as before
+    Brightness only          night/terminator darkening + directionality
+    Brightness + colour      the full look (the default)
+  Under the dropdown, four sliders:
+    Shadow strength (diffuse)  how dark the smoke's ground shadow is. 0 = no
+                               shadow, 1 = stock; a low sun can stretch a
+                               launch column's shadow into a black band, and
+                               this is the dial for it.
+    Dawn tint lead / depth / bloom  how far ahead of the hull the smoke's
+                               dawn colour runs, how deep it is, and how hard
+                               the tinted sunlit side blooms. Defaults are the
+                               shipped tuning; they only act near dawn/dusk in
+                               colour mode - daylight is untouched at any
+                               setting.
+
+  A NOTE FOR ADDON AUTHORS: in stock D3D9 the EMISSIVE/DIFFUSE declaration was
+  nearly a no-op - diffuse streams only ever differed by casting ground
+  shadows - so existing addons may carry either declaration without meaning
+  it. Under the ORO client, DIFFUSE now means "sun-lit": declare your streams
+  honestly - EMISSIVE for anything self-luminous (flame, plasma, glowing gas),
+  DIFFUSE for anything that merely reflects light (smoke, vapour, dust,
+  clouds). If your addon assumed the old always-lit behaviour, your users can
+  select Off in the Launchpad to get exactly the stock rendering back.
 
 
-=== TAB: REENTRY ===  the biggest effect in the addon
+=== VESSEL / REENTRY ===  the biggest effect in the addon
+    (three pages: PLASMA, VAPOUR CONES, and FLIGHT AID under VESSEL itself)
 
   Reentry plasma  Master pill and overall strength.
   Plasma heat     A live readout. No vessel publishes a nose radius, so the
@@ -539,30 +690,60 @@ sets in code, and lets you move them live. Units are the API's own.
                     a colour and you get that colour.
     Trail hot/tail  Head and tail colours of the trail.
 
-  VAPOUR CONE - the shroud that forms as you go through Mach 1. Real air holds
+  VAPOUR CONES - the shroud that forms as you go through Mach 1. Real air holds
   water; the flow over the hull expands, the pressure and temperature drop, and
   the water condenses. It is the shock collar you have seen in every fighter
   photograph, and it needs LOW ALTITUDE (the water is in the troposphere) as
   well as the right speed - both are read from the sim, not set by you.
-    TEST            Draws it at a fixed Mach 1.15 with the speed and altitude
+  THERE ARE TWO CONES, each with the identical, completely independent set of
+  controls - colours included - so a hull can carry one collar at the canopy
+  and one at the tail, the way the Concorde photographs show. The single pill
+  arms the effect; each cone's own Opacity is its visibility. Cone 2 ships at
+  zero, so it only exists where you give it some.
+    TEST            Draws them at a fixed Mach 1.15 with the speed and altitude
                     gates bypassed, so you can judge the look from a runway
                     instead of flying an ascent over and over.
-    Strength        Opacity of the shroud. 0 turns it off.
-    Size            Outer radius, in hull sizes. A property of the AIRFRAME.
-    Position        Where it sits along the flight direction. Bipolar, snaps to
-                    zero at centre. Also a property of the airframe - it depends
-                    on the shape of the nose.
-    Mach band       TWO handles: where the cone starts and stops existing.
-                    Default 0.85 - 1.15. Drag them together for a brief flash as
-                    you punch through, apart for a long transonic haze. The
-                    fade-in and fade-out live inside whatever window you set.
-    Flicker (Hz)    How fast it breathes. Opacity and size vary together on one
-                    number, because a stronger condensation event is denser and
-                    bigger at the same moment. 0 freezes it.
-    Cone            Readout: your current Mach and how strong the cone is - or
-                    why it is not showing (subsonic, thin air, vacuum, or
-                    "internal", since it is only drawn in external views).
-    NOTE  The LENGTH is deliberately not a setting. It comes from the Mach
+  Per cone:
+    Opacity         0 = no cone. Up to 1 a translucent shroud; PAST 1 the sheet
+                    fills and densifies until it can hide the hull behind it -
+                    the fuselage-swallowing disc of the airshow photographs.
+    Size x / y      The radii, in hull sizes - x along the wing line, y
+                    vertical. EQUAL VALUES = A CIRCULAR CONE. Airframe facts.
+    Size z          The length, as a fraction of what the Mach angle derives.
+                    1 = the physics; 0 collapses the cone to a flat collar
+                    disc. It scales the derived length rather than replacing
+                    it, so the shroud still stretches back as you accelerate.
+    Streaks         Slim darker filaments running length-wise through the
+                    vapour. The slider is the COUNT - 0 is the clean sheet.
+    Streak churn    How violently they live: jitter, flare and die. 0 freezes
+                    the pattern; 2 runs it doubly fast.
+    Flicker (Hz)    How fast the cone breathes. Opacity and size vary together
+                    on one number, because a stronger condensation event is
+                    denser and bigger at the same moment. 0 freezes it.
+    Vapour/Streaks  Two colour swatches - the vapour body and the filaments.
+                    Defaults are the natural pair: cool white over darker grey.
+    Base fill       The filled disc closing this cone's wide end - what gives
+                    it a back, and at high opacity the face that hides the
+                    hull. Off returns the open shell.
+    Position x/y/z  Where this cone sits, in Orbiter's own axis order: x along
+                    the wing line, y vertical, z along the flight direction.
+                    All bipolar, snapping to zero. z separates the two collars
+                    along the hull; x and y are for vessels whose shock does
+                    not stand on the centreline.
+    Pitch / Yaw     Tilts this cone off the relative wind, up to 30 degrees
+                    either way. Zero (the snap) rides the wind exactly, which
+                    is where physics puts it - the tilt exists for hulls whose
+                    geometry stands the shock off at an angle. No roll: a
+                    surface of revolution has nothing to roll.
+    Mach band       TWO handles: where THIS cone starts and stops existing.
+                    Default 0.85 - 1.15. Drag them together for a brief flash,
+                    apart for a long transonic haze - and give the two cones
+                    DIFFERENT bands to have the collars appear at different
+                    speeds, which is what really happens on a real airframe.
+    Cone            Readout: your current Mach and the strongest visible cone -
+                    or why nothing shows (subsonic, thin air, vacuum, or
+                    "internal", since the cones only draw in external views).
+    NOTE  The LENGTH is deliberately not a raw setting. It comes from the Mach
           angle, so the shroud stretches back on its own as you accelerate.
 
   FLIGHT AID - not an effect. It changes what the VESSEL does.
@@ -586,7 +767,9 @@ sets in code, and lets you move them live. Units are the API's own.
                     readout says "gated" and your current Mach rather than 0.
 
 
-=== TAB: ATMOS ===  the sky
+=== WORLD ===  the sky
+    (each of these is its own page: ECLIPSE, AURORA and GOD RAYS under WORLD,
+     RAIN and LIGHTNING under WORLD / WEATHER)
 
   ECLIPSE - models your EYE, not the light. Dark adaptation is slow opening up
   and fast closing down, which is why coming out of shadow dazzles.
@@ -620,12 +803,13 @@ sets in code, and lets you move them live. Units are the API's own.
                     lower border is nitrogen violet and its top is oxygen red,
                     so two colours cannot render it.
 
-  LIGHTNING - storms in the cloud deck, seen from above.
-    NOTE: ORO HAS TWO LIGHTNING SYSTEMS AND THIS IS THE ORBITAL ONE. It draws
-    storms in a planet's cloud deck as you look down on them, night side only,
-    and it saves PER BODY. The RAIN section's Lightning slider is the other
-    one - the storm you are standing in, with bolts to the ground, day or
-    night, saved globally. They are independent: neither affects the other.
+  LIGHTNING - one page, BOTH of ORO's lightning systems, under two headers.
+    FROM ORBIT draws storms in a planet's cloud deck as you look down on them,
+    night side only, saved PER BODY. IN THE STORM is the rain storm's own
+    lightning - flashes in the deck overhead, bolts to the ground and their
+    thunder, day or night, saved globally, and it needs the RAIN pill (or its
+    Test) on to fire. They are independent: neither affects the other.
+    The FROM ORBIT rows:
     TEST            One fast cell north of you with every gate bypassed, so you
                     can judge it from a runway in daylight.
     Activity        How many storms. 0 = none at this world.
@@ -676,7 +860,13 @@ sets in code, and lets you move them live. Units are the API's own.
   2D panel and glass-cockpit views stay dry by design. This needs Sun glare
   enabled (section 3) - without it the panel readout says "VC: SunGlare off"
   and the VC simply shows no rain rather than rain painted over the cabin.
+
+  The page groups its sliders three ways, in order: THE STORM OUTSIDE,
+  THE WINDSCREEN (drops on the glass), and SOUNDS. The storm's own LIGHTNING -
+  flashes, bolts, thunder and the STRIKE test rig - lives on the LIGHTNING
+  page beside this one, under its IN THE STORM header.
     TEST            The same storm as the pill, without enabling the effect.
+  The storm outside:
     Gloom           How dark and grey the world goes. This is not a screen
                     filter: it collapses the SUN at the source and lifts the
                     ambient, so shadows and the warm cast go with it.
@@ -684,15 +874,6 @@ sets in code, and lets you move them live. Units are the API's own.
                     1/2/3 = ever finer billow detail. Snaps to whole notches.
                     The deck is two real cloud layers at two altitudes, with
                     parallax and hanging masses.
-    Lightning       How often the storm discharges (0 = never, 2 = very
-                    often). Most events light the deck from within; a share
-                    become BOLTS to the ground; a rare giant strikes far out.
-                    Every flash also blinks a real light over the scene.
-                    This is the storm around YOU. The ATMOS tab's separate
-                    LIGHTNING section is for storms seen from ORBIT; the two
-                    are different systems and do not talk to each other.
-    Bolt bloom      The radiance around a bolt's channel. 0 = crisp filament,
-                    2 = storm-photo blaze.
     Density         How many streaks are in the falling sheet.
     Fall speed      How fast they fall.
     Streak length   How long each streak draws.
@@ -730,34 +911,43 @@ sets in code, and lets you move them live. Units are the API's own.
     Swim size/rate  The rain-pocked ripple on that reflection - how far the
                     image warps and how fast it flickers. Size 0 is a still
                     mirror.
-    Rain sound      The storm's sound: three rain loops (patter / steady /
-                    downpour) crossfading as it builds. 1 is the designed mix
-                    against Orbiter's other ambient sounds, 0 is silent. In
-                    the cockpit the storm is muffled and a fourth loop takes
-                    over - drops drumming on the hull. Needs XRSound.dll
-                    (ships with Orbiter 2024).
-    Thunder         Every flash sends its thunder, delayed by ITS OWN distance
-                    at the speed of sound - six to twenty-six seconds after
-                    the light. That wait is the realism, not a bug. Close
-                    bolts crack, in-cloud and distant flashes rumble, the rare
-                    positive giant hits hardest, and inside the cockpit it all
-                    arrives muffled through the hull. Nine real storm
-                    recordings from freesound.org - the authors are credited
-                    in XRSound\ORO\README.txt.
-    Hull drum       Rain drumming on the SKIN of your ship - a fourth loop
-                    that plays only from inside a virtual cockpit. Its own
-                    volume, so you can have the storm without the drumming.
+  The windscreen (virtual cockpit only; needs Sun glare, and a mesh whose
+  window groups carry a RAIN 1 line - the DeltaGlider and XR2 are done, and
+  any vessel can be marked with one line in its mesh, see below):
+    Glass drops     Raindrops ON the cockpit glass. Coverage: how much of the
+                    pane fills with drops at full storm. The window fills
+                    gradually and dries in reverse.
+    Drop size       How big the drops are, as the eye sees them. Runners scale
+                    with it too. 0 is no drops at all.
+    Drop lens       How strongly each drop bends what is behind it - past ~1
+                    the image inside a big drop genuinely inverts, like the
+                    real lens a droplet is. 0 leaves drops that only glisten.
+    Build up (s)    Seconds from a clean canopy to the Glass drops target at
+                    full storm. The fill is the show - drops pop in one by
+                    one and swell as they land.
+    Runners         Loose drops that break away and run across the glass,
+                    leaving a fading wet trail - straight down when parked,
+                    sweeping aft with airspeed. Their speed is not a knob: it
+                    follows gravity plus the real airflow.
+    Runner size     Runner thickness relative to the sitting drops - a ratio,
+                    so Drop size still scales both families together.
+    Drop debug      A development aid; leave it at 0.
     Rain view       Which internal views get the rain. VC ONLY (default),
                     VC + PANEL, or ALL VIEWS. Outside views are always wet.
                     In the VC the rain is cut at the window frame per pixel
                     (needs Sun glare on); in the flat panel views Orbiter
                     paints the panel over it, so nothing extra is needed.
-    Test bolt       STRIKE plants the next of the sixteen lightning bolts
-                    right on your vessel with a repeatable flicker, cycling
-                    1..16. The crack follows the flash by the CAMERA's
-                    distance from the strike: press it beside the ship for
-                    the whole bolt-then-thunder beat, or from kilometres out
-                    for the late, soft boom.
+  Sounds:
+    Rain sound      The storm's sound: three rain loops (patter / steady /
+                    downpour) crossfading as it builds. 1 is the designed mix
+                    against Orbiter's other ambient sounds, 0 is silent. In
+                    the cockpit the storm is muffled and a fourth loop takes
+                    over - drops drumming on the hull. Needs XRSound.dll
+                    (ships with Orbiter 2024). Thunder lives with the bolts,
+                    on the LIGHTNING page.
+    Hull drum       Rain drumming on the SKIN of your ship - a fourth loop
+                    that plays only from inside a virtual cockpit. Its own
+                    volume, so you can have the storm without the drumming.
     Rain            Readout: the storm's build-up and ground wetness, or the
                     honest reason nothing draws - "external only", "Earth
                     only", "above the weather", "VC: SunGlare off".
@@ -779,6 +969,14 @@ sets in code, and lets you move them live. Units are the API's own.
     mesh are ignored; ORO re-reads the file at every session start, so you
     can iterate on it between runs.
 
+    FOR VESSEL AUTHORS - THE WINDSCREEN GLASS TOKEN. The drops on the glass
+    need to know which mesh groups ARE the glass. Any vessel opts in with one
+    line in its own mesh file: put  RAIN 1  on a line of its own directly
+    before a window group's GEOM statement (Orbiter's mesh parser ignores
+    unknown tokens, so the line is invisible to everything else). The
+    DeltaGlider family and the XR2 are already marked. No token, no drops -
+    the rest of the storm is unaffected.
+
     Needs the ORO patched client for the wet ground, storm light, glint and
     reflections (all probe by binding and quietly stand down without it);
     the falling rain and splashes draw on any client. The lightning bolt
@@ -789,9 +987,9 @@ sets in code, and lets you move them live. Units are the API's own.
     travels with any redistribution.
 
 
-=== TAB: VC ===  the cockpit
+=== PILOT / VIRTUAL COCKPIT ===  the cockpit
 
-   SAVE TARGET     The same switch, for this whole tab - the shadow on/off and all
+   SAVE TARGET     The same switch, for this whole page - the shadow on/off and all
                    six cam-shake knobs. Cam-shake is the reason it is here: a big
                    heavy ship should not rattle like a tiny one, and amplitude and
                    frequency describe what a HULL passes to the seat. The cabin box
@@ -834,7 +1032,8 @@ sets in code, and lets you move them live. Units are the API's own.
 --------------------------------------------------------------------------------
 
 Settings are saved in three places, because they answer three different
-questions. Each tab's SAVE button says which files it writes.
+questions. Each page's SAVE button says which files it writes - and turns
+AMBER while those files have unsaved edits.
 
   GLOBAL      Config\ORO.cfg
               What the PILOT is: G tolerance, posture, effect enables, camera
@@ -854,10 +1053,10 @@ Two consequences worth knowing:
   * A vessel class with no file of its own keeps whatever is on screen rather
     than resetting, so an untuned ship inherits your last look.
 
-The REVERT button beside each tab's SAVE re-reads that tab's files, so an hour
-of tuning that went nowhere costs one click rather than a restart. It follows
-the same two rules: a hull with no file of its own keeps what is on screen, a
-world with no file goes back to the built-in defaults.
+The REVERT button beside each page's SAVE re-reads that page's files, so an
+hour of tuning that went nowhere costs one click rather than a restart. It
+follows the same two rules: a hull with no file of its own keeps what is on
+screen, a world with no file goes back to the built-in defaults.
 
 This beta ships tuned files for the DeltaGlider, DG-S, Atlantis and the ISS, and
 for eleven worlds. Other vessels will work but are untuned.

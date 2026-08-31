@@ -238,6 +238,13 @@ namespace {
 		                       //   triangles live in the VESSEL frame (attitude is slow,
 		                       //   so a pre-step rotation is epoch-safe; POSITION is not,
 		                       //   and takes patch k2 in the build)
+		VECTOR3   vAirG;       // the vessel's airspeed vector, GLOBAL frame (2026-08-27):
+		                       //   the sheet's fall vector is rain RELATIVE TO THE VESSEL,
+		                       //   so streaks slant aft and rush at speed - invariant
+		                       //   25(e) reaching the last effect that predated it
+		float     cloudAGL;    // the planet's own cloud-layer altitude above the LOCAL
+		                       //   ground - where the storm deck pins so you can fly
+		                       //   through it (his design, 2026-08-27)
 	};
 	// (WATER ON THE HULL lived here 2026-08-22, for one day: rivulets, drips and pour
 	//  streamers off a dripline grid. Three rounds could not make it read as water -
@@ -281,6 +288,15 @@ namespace {
 	std::vector<VECTOR3> s_shieldTri;  // vessel frame, 3 verts per triangle
 	char s_shieldClass[64] = "";
 
+	// (THE RAIN GLASS discovery lived here for a few hours on 2026-08-26 - a per-class
+	//  RainGlassMesh cfg key, a text parse, and a gcCore::SetRainGlass push. His call
+	//  killed it the same day: "we want this to work for ANY vessel that has a VC mesh
+	//  group with RAIN 1". It does now, with NO ORO involvement at all: the CLIENT is
+	//  the one party told every preloaded mesh's filename (clbkStoreMeshPersistent),
+	//  so the client reads the author's `RAIN 1` tokens itself and instances inherit
+	//  the group list at construction. See RainGlassStoreScan in the client's Mesh.cpp.
+	//  The addon's whole contribution is the DRAWING: the sign test in PSGloom.)
+
 	// --- THE EVENT ENVELOPE ---------------------------------------------------
 	// REAL time, not sim time. Two reasons, and they are the eclipse TEST's reasons: a
 	// storm you trigger is something you are watching rather than something the world is
@@ -291,6 +307,8 @@ namespace {
 	const float RAIN_RISE = 10.0f;   // s, off -> full downpour
 	const float RAIN_FALL = 16.0f;   // s, and it stops faster than the ground dries
 	const float WET_RISE  = 22.0f;   // s, ground soaking up
+	// (GLASS_RISE lived here as a 16 s constant for a few hours on 2026-08-26; the fill
+	//  time is his slider now - g_fx.rainGlassRise, 10..60 s, read in UpdateRain.)
 	const float WET_FALL  = 150.0f;  // s, drying out
 
 } // namespace
@@ -355,6 +373,7 @@ void OroModule::UpdateRain()
 	if (!want) {
 		g_fx.rainI = 0.0f;
 		g_fx.rainWet = 0.0f;
+		g_fx.rainGlassWet = 0.0f;
 	} else {
 		g_fx.rainI = clampf(g_fx.rainI + dt / RAIN_RISE, 0.0f, 1.0f);
 	}
@@ -367,6 +386,20 @@ void OroModule::UpdateRain()
 	// for months. Different thing.
 	if (want && g_fx.rainWet < g_fx.rainI)
 		g_fx.rainWet = clampf(g_fx.rainWet + dt / WET_RISE, 0.0f, g_fx.rainI);
+
+	// THE GLASS FILLS BEHIND THE STORM TOO (2026-08-26, his ask) - rainWet's exact shape
+	// with its own clock, because a canopy collects faster than concrete soaks. The
+	// COVERAGE follows this scalar, so drops pop in one by one (each cell's hash is its
+	// birth order) rather than the whole field arriving with the first gust. Same rules
+	// as the ground: rises toward the event, frozen under pause (no sim step = nothing
+	// accumulates), and the pill snaps it to zero - the A/B rule above.
+	// The clock is HIS SLIDER (Build up, 10..60 s) - a rare case where a time constant
+	// stays a control: how long a windscreen takes to fill is taste, not physics the sim
+	// knows better (the 25(i) rule: the user owns the LOOK's bounds).
+	if (want && g_fx.rainGlassWet < g_fx.rainI) {
+		float gr = g_fx.rainGlassRise; if (gr < 10.0f) gr = 10.0f; if (gr > 60.0f) gr = 60.0f;
+		g_fx.rainGlassWet = clampf(g_fx.rainGlassWet + dt / gr, 0.0f, g_fx.rainI);
+	}
 }
 
 // ============================================================================
@@ -395,6 +428,8 @@ void OroModule::SenseRain()
 	s_gateF   = 0.0f;
 	g_fx.rainWhy[0] = 0;
 	rainIntensityLive = 0.0f;
+	rainGateLive = 0.0f;
+	rainGlassOK = false;
 	if (g_fx.rainI <= 0.002f) return;
 
 	// EXTERNAL, or the VIRTUAL COCKPIT (2026-08-23 - rainVC embeds the depth-clip
@@ -452,6 +487,11 @@ void OroModule::SenseRain()
 		}
 	}
 
+	// (The rain-glass discovery that lived here moved WHOLLY into the client on the
+	//  same day it was written - see the tombstone note at the top of this file. The
+	//  client logs `D3D9: rain glass - N RAIN group(s) in <mesh>` at mesh load, which
+	//  is the line to look for when drops are missing on a hull.)
+
 	VECTOR3 pC; oapiGetGlobalPos(hRef, &pC);
 	VECTOR3 vp; v->GetGlobalPos(vp);
 	// ⚠️ ALTMODE_GROUND, NOT THE NO-ARGUMENT OVERLOAD. GetAltitude() returns altitude
@@ -490,6 +530,18 @@ void OroModule::SenseRain()
 	s_rn.hV        = v->GetHandle();
 	s_rn.vPos      = vp;
 	v->GetRotationMatrix(s_rn.vRot);
+	{
+		VECTOR3 wg = _V(0, 0, 0);
+		v->GetAirspeedVector(FRAME_GLOBAL, wg);
+		s_rn.vAirG = wg;
+		// The deck's ceiling: the planet's own cloud altitude (the lightning's source,
+		// OroLightning.cpp), converted to height above the LOCAL ground and floored so
+		// odd terrain can never pin the deck below its designed 1400 m.
+		const double* pCA = (const double*)oapiGetObjectParam(hRef, OBJPRM_PLANET_CLOUDALT);
+		float cAGL = (float)(((pCA && *pCA > 0.0) ? *pCA : 7000.0)
+		                     + oapiGetSize(hRef) - groundR);
+		s_rn.cloudAGL = (cAGL < 2500.0f) ? 2500.0f : cAGL;
+	}
 	s_rn.dayF      = dayF;
 	s_rn.hRef      = hRef;
 	s_rn.pC        = pC;
@@ -500,7 +552,32 @@ void OroModule::SenseRain()
 	s_rn.wet       = g_fx.rainWet;
 	s_rn.vSize     = v->GetSize();
 	s_gateF        = altF;
+	rainGateLive   = altF;   // the gate alone, for what the storm DEPOSITED (glass drops)
 	s_rnValid      = true;
+
+	// --- THE GLASS (2026-08-26): what pushes a drop sitting on the canopy ---------
+	// SENSING, so it belongs here and it runs every frame, paused included (invariant
+	// 1's law). GRAVITY AND AIRFLOW ARE SUMMED AS FORCES in the VESSEL frame: parked,
+	// the run direction is straight down the glass; at ~20 m/s the two terms are equal;
+	// in flight it is essentially straight aft. A sum rather than a blend means there is
+	// no threshold to tune and no airspeed at which the direction jumps.
+	// ⚠️ Bound to GetAirspeedVector, never to a hull axis - invariant 25(e). A tail-sitter
+	// on hover engines gets drops running over its canopy the way its own air actually
+	// moves, and nothing here had to know that such a vessel exists.
+	rainGlassRot = s_rn.vRot;
+	{
+		VECTOR3 wind = _V(0, 0, 0);
+		v->GetAirspeedVector(FRAME_LOCAL, wind);                 // already vessel frame
+		const VECTOR3 downV = tmul(s_rn.vRot, unit(pC - vp));    // toward the planet centre
+		const VECTOR3 run   = downV * 9.81 - wind * 0.5;
+		const double  rl    = length(run);
+		rainGlassRun    = (rl > 1e-6) ? run / rl : downV;
+		rainGlassRunMag = (float)rl;   // the RUNNERS' speed source: ~9.8 parked (gravity
+		                               //   alone), growing with airspeed - so streaks
+		                               //   crawl on the pad and whip aft in flight, with
+		                               //   no threshold anywhere (invariant 25e)
+		rainGlassOK  = true;
+	}
 
 	// ⚠️ PUBLISH THE INTENSITY ONLY - THE SLIDER IS APPLIED IN THE RENDER PATH.
 	// The first build folded g_fx.rainGloom in here, and here is clbkPreStep, which DOES
@@ -791,18 +868,28 @@ void OroModule::UpdateRainSound()
 		float t = clampf((x - a) / (b - a), 0.0f, 1.0f);
 		return t * t * (3.0f - 2.0f * t);
 	};
-	// THROUGH THE HULL (2026-08-23, his call after the first VC flight): inside,
-	// the three storm loops drop to 45% - volume is the only lever XRSound has
-	// (no runtime filters), and quieter-in-context reads as muffled - while the
-	// FOURTH loop, the HULL TAPS (drops drumming the skin, raingen's "hull"
-	// tier), plays ONLY inside and at full voice: the storm is muffled through
-	// the hull, but the hull itself is what you hear.
+	// THROUGH THE HULL, PROPERLY MUFFLED SINCE 2026-08-27 (his call: a volume cut "is
+	// just as if the volume was slightly turned down. It doesn't have that 'muffle'
+	// effect... the interior of a spacecraft is supposed to be a pressurized cabin").
+	// XRSound has no runtime filter, so the muffle is PRE-BAKED: channels 4-6 are the
+	// same three tiers low-passed by tools/rainmuffle.py, and going inside crossfades
+	// the families through the existing slew. Without the _in files (rainSndInLoaded
+	// false) the old 45% duck of the exterior tiers stands in. The HULL TAPS (ch 3)
+	// stay unfiltered and interior-only: the drops are ON the hull, structure-borne -
+	// inside is exactly where they are bright, and with the storm now genuinely dark
+	// behind them they read more distinct at the same volume, for free.
 	const bool  interior = !extGate;   // e > 0 while internal = the rainVC case
-	const float inGain   = interior ? 0.45f : 1.0f;
-	float w[SND_RAIN_N];
-	w[0] = (1.0f - sstep(0.30f, 0.65f, e)) * inGain;                          // light
-	w[1] = sstep(0.12f, 0.45f, e) * (1.0f - sstep(0.60f, 0.92f, e)) * inGain; // medium
-	w[2] = sstep(0.50f, 0.88f, e) * inGain;                                   // heavy
+	const bool  useIn    = interior && rainSndInLoaded;
+	const float exGain   = useIn ? 0.0f : (interior ? 0.45f : 1.0f);
+	// The _in files are levelled at 62% of the exterior RMS by the tool, so the
+	// runtime factor is nearly neutral - the FILES carry the muffle, this only trims.
+	const float inGain   = useIn ? 0.85f : 0.0f;
+	float tier[3];
+	tier[0] = 1.0f - sstep(0.30f, 0.65f, e);                          // light
+	tier[1] = sstep(0.12f, 0.45f, e) * (1.0f - sstep(0.60f, 0.92f, e)); // medium
+	tier[2] = sstep(0.50f, 0.88f, e);                                   // heavy
+	float w[SND_RAIN_CH];
+	for (int i = 0; i < 3; i++) { w[i] = tier[i] * exGain; w[4 + i] = tier[i] * inGain; }
 	// ⚠️ THE HULL LOOP CARRIES ITS OWN VOLUME (2026-08-25, a tester's ask). It is the
 	// one layer that is about the SHIP rather than the weather - some people want the
 	// storm without the drumming - and folding it into Rain sound meant the whole
@@ -816,7 +903,9 @@ void OroModule::UpdateRainSound()
 	// volume at slider 1, leaving slider headroom up to XRSound's 1.0 cap.
 	const float overall = powf(e, 0.7f) * uv * 0.65f;
 
-	for (int i = 0; i < SND_RAIN_N; i++) {
+	for (int i = 0; i < SND_RAIN_CH; i++) {
+		// channel -> XRSound id: 0-3 are the original set, 4-6 the interior twins
+		const int sid = (i < SND_RAIN_N) ? (SND_RAIN_BASE + i) : (SND_RAIN_IN_BASE + (i - 4));
 		const float tgt = clampf(w[i] * overall, 0.0f, 1.0f);
 		rainSndLvl[i] += (tgt - rainSndLvl[i]) * clampf(dt / 0.35f, 0.0f, 1.0f);
 		if (tgt <= 0.002f && rainSndLvl[i] <= 0.002f) rainSndLvl[i] = 0.0f;
@@ -828,18 +917,18 @@ void OroModule::UpdateRainSound()
 			continue;
 
 		if (!on) {
-			pXRSound->StopWav(SND_RAIN_BASE + i);
+			pXRSound->StopWav(sid);
 			rainSndOn[i] = false;
 			rainSndPushed[i] = 0.0f;
 			continue;
 		}
 		// THE SPLICE (see the header note): a playing module sound cannot change
 		// volume, so restart it at the new volume and put it back where it was.
-		const int pos = rainSndOn[i] ? pXRSound->GetPlayPosition(SND_RAIN_BASE + i) : -1;
-		if (rainSndOn[i]) pXRSound->StopWav(SND_RAIN_BASE + i);
-		rainSndOn[i] = pXRSound->PlayWav(SND_RAIN_BASE + i, true, vol);
+		const int pos = rainSndOn[i] ? pXRSound->GetPlayPosition(sid) : -1;
+		if (rainSndOn[i]) pXRSound->StopWav(sid);
+		rainSndOn[i] = pXRSound->PlayWav(sid, true, vol);
 		if (rainSndOn[i] && pos > 0)
-			pXRSound->SetPlayPosition(SND_RAIN_BASE + i, (unsigned int)pos);
+			pXRSound->SetPlayPosition(sid, (unsigned int)pos);
 		rainSndPushed[i] = vol;
 	}
 	// (A throttled DIAG line lived here for the 2026-08-23 silence hunt - it is what
@@ -888,17 +977,26 @@ void OroModule::UpdateThunder()
 			thunQ[q].vol = 0.0f;                     // stale, or the storm gate closed
 			continue;
 		}
+		// THE FAMILY IS PICKED AT FIRE TIME BY THE CURRENT VIEW (2026-08-27): inside,
+		// the clap plays its rainmuffle.py twin - the CRACK dies in the pressurized
+		// hull, the rumble comes through, which is what thunder indoors actually is.
+		// A clap keeps its family for its whole length (they run seconds; a view
+		// switch mid-boom re-filtering it would be stranger than the mismatch).
+		const bool  inFam = !extGate && thunInLoaded[thunQ[q].file];
+		const bool* fam   = inFam ? thunInLoaded : thunLoaded;
+		const int   base  = inFam ? SND_THUNDER_IN_BASE : SND_THUNDER_BASE;
 		int f = thunQ[q].file;
 		const int cls = f / 3;
 		for (int k = 0; k < 3; k++) {                // prefer a silent sibling
 			const int cand = cls * 3 + ((f % 3) + k) % 3;
-			if (thunLoaded[cand] && !pXRSound->IsWavPlaying(SND_THUNDER_BASE + cand)) { f = cand; break; }
+			if (fam[cand] && !pXRSound->IsWavPlaying(base + cand)) { f = cand; break; }
 		}
 		// through the hull (2026-08-23): thunder penetrates far better than rain
-		// - it is low frequency - but still comes down inside
+		// - it is low frequency - but still comes down inside. With the muffled twin
+		// the FILE carries most of the attenuation, so the duck relaxes 0.60 -> 0.80.
 		float fv = thunQ[q].vol;
-		if (!extGate) fv *= 0.60f;
-		if (thunLoaded[f]) pXRSound->PlayWav(SND_THUNDER_BASE + f, false, clampf(fv, 0.0f, 1.0f));
+		if (!extGate) fv *= inFam ? 0.80f : 0.60f;
+		if (fam[f]) pXRSound->PlayWav(base + f, false, clampf(fv, 0.0f, 1.0f));
 		thunQ[q].vol = 0.0f;
 	}
 
@@ -1137,8 +1235,22 @@ void OroModule::BuildRainGeometry()
 	const float  LAY_A[2]     = { 1.00f, 0.62f };      // scud is translucent
 	const float  LAY_LUM[2]   = { 1.00f, 0.66f };      // ...and shaded by the deck above
 	const float  LAY_SAG[2]   = { 110.0f, 70.0f };     // m of vertical billow relief
-	const float dStorm = I * clampf(g_fx.rainGloom * 0.5f, 0.0f, 1.0f);
-	if (dStorm > 0.01f && (LAY_H[0] - camAGL) > 80.0f) {
+	// THE DECK RISES WITH YOU (2026-08-27, his design). Fixed at 1400 m, the whole
+	// storm roof vanished the moment a climb crossed ~1300 m - one condition, gone in
+	// a frame. Now the ceiling stays ~700 m overhead as you climb, PINS at the
+	// planet's own cloud-layer altitude (where Orbiter draws its cloud sphere), and
+	// you punch THROUGH it there - the deck fading over the last few hundred metres
+	// rather than blinking off. Parked, camAGL+700 < 1400, so nothing about the
+	// approved ground-level look moves. The scud keeps its designed 450 m separation.
+	float deckH0 = camAGL + 700.0f;
+	if (deckH0 < LAY_H[0])        deckH0 = LAY_H[0];
+	if (deckH0 > s_rn.cloudAGL)   deckH0 = s_rn.cloudAGL;
+	const float layH[2]  = { deckH0, deckH0 - (LAY_H[0] - LAY_H[1]) };
+	const float below    = deckH0 - camAGL;
+	float punch = clampf((below - 80.0f) / 400.0f, 0.0f, 1.0f);
+	punch = punch * punch * (3.0f - 2.0f * punch);
+	const float dStorm = I * clampf(g_fx.rainGloom * 0.5f, 0.0f, 1.0f) * punch;
+	if (dStorm > 0.01f && below > 80.0f) {
 		const int   DK_AZ = 48;
 		const float ELEV[13] = { 89.0f, 75.0f, 62.0f, 50.0f, 39.0f, 29.0f,
 		                         21.0f, 14.5f, 9.5f, 6.0f, 3.5f, 2.0f, 1.0f };
@@ -1205,8 +1317,15 @@ void OroModule::BuildRainGeometry()
 
 		const int NLAY = useTex ? 2 : 1;
 		for (int Ld = 0; Ld < NLAY; Ld++) {
-			const float dhL = LAY_H[Ld] - camAGL;    // this layer's height above the CAMERA
+			const float dhL = layH[Ld] - camAGL;     // this layer's height above the CAMERA
+			                                         // (layH: the RISEN deck, not the design
+			                                         // constants - see deckH0 above)
 			if (dhL < 80.0f) continue;               // flown into/above this deck
+			// ... and each SHEET dissolves as the camera reaches it rather than
+			// blinking at the 80 m line - the scud is crossed 450 m before the main
+			// deck, while the punch-through fade above is still nearly full.
+			float layF = clampf((dhL - 80.0f) / 300.0f, 0.0f, 1.0f);
+			layF = layF * layF * (3.0f - 2.0f * layF);
 			// fade the layer as the camera climbs toward it - flying INTO a ceiling pops
 			const float nearF = clampf(dhL / 400.0f, 0.0f, 1.0f);
 
@@ -1289,7 +1408,7 @@ void OroModule::BuildRainGeometry()
 					const int cr = (int)(52.0f * lum + fw * 430.0f);
 					const int cg = (int)(57.0f * lum + fw * 450.0f);
 					const int cb = (int)(66.0f * lum + fw * 490.0f);
-					float aa = 235.0f * dStorm * aEl * nearF * (0.90f + 0.10f * b1) * LAY_A[Ld]
+					float aa = 235.0f * dStorm * aEl * nearF * (0.90f + 0.10f * b1) * LAY_A[Ld] * layF
 					         + fw * 70.0f;      // lit cloud reads denser
 					if (aa > 255.0f) aa = 255.0f;
 					dkc[e2][az] = RCol(cr, cg, cb, (int)aa);
@@ -1301,7 +1420,7 @@ void OroModule::BuildRainGeometry()
 				const VECTOR3 Pz = cc.pos + up * (double)dhL;
 				if (ProjPx(cc, Pz, viewW, viewH, cxz, cyz, pzz)) {
 					const float lumZ = (0.16f + 0.84f * s_rn.dayF) * 0.80f * texBoost * LAY_LUM[Ld];
-					float aaZ = 235.0f * dStorm * nearF * LAY_A[Ld];
+					float aaZ = 235.0f * dStorm * nearF * LAY_A[Ld] * layF;
 					if (aaZ > 255.0f) aaZ = 255.0f;
 					const DWORD czC = RCol((int)(52.0f * lumZ), (int)(57.0f * lumZ),
 					                       (int)(66.0f * lumZ), (int)aaZ);
@@ -1454,8 +1573,43 @@ void OroModule::BuildRainGeometry()
 	const float angR = clampf(g_fx.rainAngle, -15.0f, 15.0f) * 0.0174532925f;
 	// The slant is a WORLD tilt now (about the east axis - the wind blows somewhere),
 	// not a screen skew, so it survives the camera turning.
-	const VECTOR3 fallW = unit(up * (-cosf(angR)) + east * sinf(angR));
+	// ⚠️ AND SINCE 2026-08-27 THE FALL VECTOR IS RELATIVE TO THE VESSEL - invariant
+	// 25(e) reaching the one effect that predated it (his report: "even at full speed
+	// they fall vertically... a big mismatch between what's going on ON the window and
+	// what is happening outside of it"). Rain falls at ~9 m/s terminal velocity
+	// relative to the AIR; what the vessel - and every camera that travels with it -
+	// actually meets is that minus its own airspeed vector. Parked, the subtraction is
+	// zero and nothing about the approved look moves; at 100 m/s the streaks come at
+	// you near-horizontal and RUSH, which is what the VC runners already do, so the
+	// two sides of the glass finally tell one story. Apparent speed and streak length
+	// ride the magnitude (capped - at Mach the honest 30x would be a strobe).
+	const VECTOR3 vFall = (up * (-cosf(angR)) + east * sinf(angR)) * 9.0;
+	const VECTOR3 relV  = vFall - s_rn.vAirG;
+	const double  relM  = length(relV);
+	const VECTOR3 fallW = (relM > 1e-3) ? relV / relM : up * (-1.0);
+	const float   relK  = (float)(relM / 9.0);           // 1.0 parked
+	// ⚠️ COMPRESSED, NOT LINEAR (his report: "100 knots in the rain is like the
+	// lightspeed effect in Star Wars"). Linear pinned the 6x cap by ~55 m/s, because
+	// relative speed is already 5.7x terminal there - the DIRECTION carries the truth
+	// of the physics; the visual aggression has to arrive on a slower curve. Roots
+	// put 100 kn at ~2.6x speed / ~1.8x length and save the caps for near-Mach.
+	const float   spdMul = fminf(powf(fmaxf(relK, 0.01f), 0.40f), 3.0f);
+	const float   lenMul = fminf(powf(fmaxf(relK, 0.01f), 0.25f), 1.7f);
+	// ... and the phase INTEGRATES spdMul instead of multiplying the clock by it -
+	// see rainSheetPh's comment in OroModule.h (his thrust/backwards diagnosis).
+	{
+		const float dtp = (rainSheetPhT >= 0.0f && t > rainSheetPhT) ? (t - rainSheetPhT) : 0.0f;
+		rainSheetPhT = t;
+		rainSheetPh += dtp * spdMul;
+		if (rainSheetPh > 1.0e4f) rainSheetPh -= 1.0e4f;   // bounded; u wraps anyway
+	}
 	const VECTOR3 dC = tmul(cc.rot, fallW);          // fall direction, camera axes
+	// THE VANISHING-POINT MASK, RE-SHAPED BY SPEED (his ask: "gently mask the center").
+	// Parked (spdMul 1) these reproduce the approved 0.50-floor/0.40-radius mask
+	// exactly; as the flow speeds up the masked disc WIDENS and DEEPENS, so the
+	// starburst's focus is a soft clearing rather than a knot of sharp spokes.
+	const float vpR = 0.40f + 0.28f * (spdMul - 1.0f);
+	const float vpF = clampf(0.50f - 0.16f * (spdMul - 1.0f), 0.15f, 0.50f);
 
 	const float W = (float)viewW, H = (float)viewH;
 	const float margin = H * 0.20f + 40.0f;
@@ -1487,9 +1641,11 @@ void OroModule::BuildRainGeometry()
 	int base = 0;
 	for (int L = 0; L < 3; L++) {
 		const int NL = (int)(NTOT * LAY[L].frac);
-		const float slen = H * LAY[L].len * (0.25f + 0.95f * lenK);
+		const float slen = H * LAY[L].len * (0.25f + 0.95f * lenK) * lenMul;
 		const float wpx  = LAY[L].wid;
-		const float spd  = LAY[L].spd * (0.35f + 0.85f * spdK);
+		const float spd  = LAY[L].spd * (0.35f + 0.85f * spdK);   // per-layer rate; the
+		                                                          // physics factor lives
+		                                                          // in rainSheetPh now
 
 		const float travel = 1.30f * H;
 
@@ -1498,7 +1654,7 @@ void OroModule::BuildRainGeometry()
 			// Progress along the flow: a pure function of a hashed phase and the clock,
 			// wrapping at 1. No state, so it survives a pause and cannot drift.
 			const float ph = hashf(i * 5 + 13);
-			float u = ph + t * spd;
+			float u = ph + rainSheetPh * spd;   // integrated phase - never runs backward
 			u -= floorf(u);
 
 			// A fixed screen ANCHOR; the streak slides through it along its local flow
@@ -1525,18 +1681,37 @@ void OroModule::BuildRainGeometry()
 			if (sm < 1e-4f) continue;                 // dead on the vanishing point
 			const float pdx = sfx / sm;               // pixel axes: screen y runs down
 			const float pdy = -sfy / sm;
-			const float fLen = clampf(sm, 0.16f, 1.45f);   // foreshortening
-			// ... and the centre mask he asked for: near the vanishing point the dashes
-			// thin out gently rather than piling into a bright knot.
-			const float vpMask = 0.50f + 0.50f * clampf(sm / 0.40f, 0.0f, 1.0f);
 
 			const float disp = (u - 0.5f) * travel;
 			const float x0 = axp + pdx * disp;
 			const float y0 = ayp + pdy * disp;
+			if (x0 < -margin || x0 > W + margin || y0 < -margin || y0 > H + margin) continue;
+
+			// ⚠️ FORESHORTENING AND THE CENTRE MASK ARE SAMPLED WHERE THE STREAK IS
+			// DRAWN, NOT AT ITS ANCHOR (2026-08-27, his second report). A streak slides
+			// up to +-0.65 H from its anchor along the flow line - and at speed the
+			// flow lines are RADIAL, so full-length full-alpha streaks anchored at the
+			// screen edges slid backwards THROUGH the centre carrying their
+			// edge-sampled properties. The mask only ever caught streaks ANCHORED
+			// there, which is why the starburst's focus stayed full of sharp spokes
+			// however the mask was tuned. Direction stays the anchor's (the dash is
+			// straight along its own flow line); length and mask follow the dash.
+			const float xn2 = ((x0 / W) - 0.5f) * 2.0f * tAp * aspect;
+			const float yn2 = -(((y0 / H) - 0.5f) * 2.0f * tAp);
+			const float sfx2 = (float)(dC.x - xn2 * dC.z) + jx;
+			const float sfy2 = (float)(dC.y - yn2 * dC.z) + jy;
+			const float sm2 = sqrtf(sfx2 * sfx2 + sfy2 * sfy2);
+			const float fLen = clampf(sm2, 0.16f, 1.45f);  // foreshortening
+			// ... and the centre mask he asked for: near the vanishing point the dashes
+			// thin out gently rather than piling into a bright knot. Smoothstepped and
+			// speed-shaped (vpR/vpF above) since 2026-08-27.
+			float vpT = clampf(sm2 / vpR, 0.0f, 1.0f);
+			vpT = vpT * vpT * (3.0f - 2.0f * vpT);
+			const float vpMask = vpF + (1.0f - vpF) * vpT;
+
 			const float sl2 = slen * fLen;
 			const float x1 = x0 - pdx * sl2;
 			const float y1 = y0 - pdy * sl2;
-			if (x0 < -margin || x0 > W + margin || y0 < -margin || y0 > H + margin) continue;
 
 			// THE RAIN SHIELD kill: place this streak's rain at its own depth along
 			// its own ray, move to the VESSEL frame, and look straight up - a roof

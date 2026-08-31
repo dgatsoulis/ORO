@@ -96,6 +96,13 @@ TIERS = {
         seed=404, dur=12.0,
         spectrum=[(30, -34), (80, -26), (200, -24), (500, -27), (1200, -31),
                   (3000, -37), (8000, -46), (16000, -58), (20000, -64)],
+        # ⛔ A "louder, more distinct" rework was tried 2026-08-27 and REVERTED the
+        # same day, his verdict: "much worse than before". It cut the bed to 0.06 and
+        # rendered the tier at rms_db -16.5 - with the bed gone, equal-RMS mastering
+        # poured everything into the taps and the result was harsh. The bed is part
+        # of the sound. A proper rain-sounds pass is parked for later; do not re-try
+        # this shape of change blind. (The master() rms_db parameter it added stays -
+        # inert at the default, useful for that pass.)
         wash=0.18, gust_depth=0.18,
         tick_rate=0.0,  tick_gain=0.0,
         blop_rate=0.0,  blop_gain=0.0,
@@ -232,13 +239,13 @@ def scatter(buf, n_total, rate, dur, gust, gain, maker, rng):
     return count
 
 
-def master(x):
+def master(x, rms_db=TARGET_RMS_DB):
     # Equal-RMS across tiers, then a soft ceiling: linear below the knee, tanh
     # above it, asymptote just under full scale. Shaves only the rare loudest
     # drop peaks - G9's lesson that a HARD clamp flattens texture applies to
     # audio exactly as it did to Gouraud alpha.
     rms = np.sqrt(np.mean(x * x))
-    x = x * (10.0 ** (TARGET_RMS_DB / 20.0) / (rms + 1e-12))
+    x = x * (10.0 ** (rms_db / 20.0) / (rms + 1e-12))
     a = np.abs(x)
     over = a > SOFT_KNEE
     span = 1.0 - SOFT_KNEE - 0.03
@@ -271,7 +278,7 @@ def build_tier(name, p, out_dir):
     ntp = scatter(buf, n, p.get("tap_rate", 0.0), p["dur"], gust,
                   p.get("tap_gain", 0.0), grain_tap, rng)
 
-    buf = master(buf)
+    buf = master(buf, p.get("rms_db", TARGET_RMS_DB))
 
     path = out_dir / f"Rain_{name}.wav"
     write_wav(path, buf, rng)

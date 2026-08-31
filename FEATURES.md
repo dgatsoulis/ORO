@@ -9,12 +9,12 @@ This is the first time the whole thing has been listed in one place. Everything 
 |---|---|
 | Started | 2026-07-25 |
 | Shipped to beta | 2026-08-10 (16 days) |
-| Distinct effects | **28** — 13 physiological, 15 environmental (rain sound + thunder joined the storm) |
-| Live controls | **119** sliders/knobs, **12** colour pickers, 5 tabs + 2 sub-tabs, all thruster settings PER ENGINE GROUP (MAIN / HOVER / RETRO / USER / **RCS**) |
-| Source | ~16,500 lines across 16 C++ files, plus 9 pixel shaders in one HLSL file |
-| Client patches | **21** (a–g, i–u) — every one of them load-bearing |
+| Distinct effects | **29** — 13 physiological, 16 environmental (the windscreen drops joined the storm; the vapour cone is now TWO independent cones) |
+| Live controls | **147** sliders/knobs, **17** colour pickers, organised as a **menu tree** (WORLD / VESSEL / PILOT → 7 menus, 13 pages), all thruster settings PER ENGINE GROUP (MAIN / HOVER / RETRO / USER / **RCS**) — or **PER INDIVIDUAL THRUSTER** via layered overrides |
+| Source | ~21,400 lines across 16 C++ files, plus 9 pixel shaders in one HLSL file |
+| Client patches | **26** (a–y, +k2) — every one of them load-bearing |
 | Worlds with auroras | 12 |
-| Settings scopes | 3 — global / per vessel class / per body (+ a window-geometry file). The G-FORCE and VC tabs' settings can be moved between the first two per hull with a **Save target** switch |
+| Settings scopes | 3 — global / per vessel class / per body (+ a window-geometry file). The G-FORCES and VIRTUAL COCKPIT pages' settings can be moved between the first two per hull with a **Save target** switch |
 
 ---
 
@@ -95,15 +95,28 @@ A complete replacement for Orbiter's two camera-facing billboards. Heat is
 
 21 live tuning sliders, saved per vessel class.
 
-### The vapour cone
+### The vapour cones
 
 Prandtl–Glauert transonic condensation — the shroud that forms as the flow over the hull
 expands through Mach 1, and the one famous aerodynamic visual nothing in Orbiter had.
+**Two of them** since 2026-08-29, fully independent — one collar at the canopy and one at
+the tail, the Concorde photograph — behind one pill, each cone's own opacity being its
+visibility.
 
 - **Its length is not a setting — it is the Mach angle.** `μ = asin(1/M)`: 90° at M 1, a
   flat collar standing across the flight path, tightening as the ship outruns its own
-  pressure waves. You set the outer radius (a fact about a hull); the axial reach falls out.
-  So the shroud visibly *stretches back* as you accelerate, which is the whole effect.
+  pressure waves. Size x and y set the radii (equal = circular, a fact about a hull);
+  Size z scales the *derived* reach rather than replacing it — 0 collapses the cone into
+  the flat collar disc. So the shroud visibly *stretches back* as you accelerate, which
+  is the whole effect.
+- **Opacity can swallow the fuselage.** Up to 1 it is a translucent shroud; past 1 the
+  sheet fills and densifies until the disc hides the hull behind it, the way the airshow
+  photographs do. A **base fill** disc (per cone, its own pill) closes the wide end.
+- **Slim streak filaments**, count on a slider (up to a few dozen), with a churn that
+  makes them jitter, flare and die — colour and density only, never geometry, so the
+  analytic surface that makes it read as a shock front survives.
+- **Two colour picks per cone** — the vapour body and the streaks — so stained or
+  sunset-lit vapour is one swatch away.
 - **It is the one thing ORO draws that is not light.** Condensed water scatters and
   *occludes*, so unlike every other effect in the addon it draws alpha-blended and goes down
   *before* the additive layers — a cloud has to be laid down before light is added over it.
@@ -112,13 +125,35 @@ expands through Mach 1, and the one famous aerodynamic visual nothing in Orbiter
   and a lifting body at 40° AoA gets one canted 40° off its nose — with no special case.
 - **Limb thickening through Beer–Lambert**: edge-on you look through more water, so the rim
   reads dense and the middle stays translucent, saturating on its own instead of clipping.
-- **A two-handle Mach band** (0.5–1.5) sets where it lives, with the fade-in and fade-out as
-  fixed fractions inside the window so tightening it gives a sharp flash rather than a
-  fade that never finishes. Plus a flicker-rate slider; opacity and size breathe on one
-  number, because a stronger condensation event is denser and bigger at the same instant.
+- **A two-handle Mach band per cone** (0.5–1.5) sets where each lives — give the two cones
+  different bands and the collars appear at different speeds, which is what really happens.
+  The fade-in and fade-out are fixed fractions inside the window, so tightening it gives a
+  sharp flash rather than a fade that never finishes. Plus a flicker-rate slider; opacity
+  and size breathe on one number, because a stronger condensation event is denser and
+  bigger at the same instant.
+- **Full placement per cone** — Position x / y / z in Orbiter's own axis convention, plus
+  bipolar Pitch and Yaw (±30°, snapping to zero = riding the relative wind exactly), for
+  hulls whose shock stands off the centreline or at an angle. No roll — a surface of
+  revolution has nothing to roll.
 
 ### The thruster system
 
+- **Per-thruster tuning** — every exhaust and particle setting lives per engine group, and
+  any INDIVIDUAL thruster can carry its own override block on top: cycle the selector to a
+  thruster, move a slider, and that thruster owns its look from then on (a CLEAR button
+  hands it back to the group). Sparse on disk — a class with no overrides is byte-identical
+  to before. A **MARK** toggle draws a pulsing in-world ring at every nozzle so "thruster
+  17 of 44" means something, and **CANCEL THRUST** follows the selection: each held engine
+  is cancelled at its own position, force and torque together, so one RCS jet can be test-
+  fired without the ship moving. Vessels in a stack (boosters, tanks) are resolved against
+  their OWN class's saved tuning even while focus sits elsewhere.
+- **Gimbal tracking, end to end** — the plume, particles, shimmer and throat fire read the
+  live thruster direction every frame, so a gimballing engine's whole exhaust follows the
+  nozzle with no authoring at all. For vessels that animate their real engine BELLS, the
+  bell-glow mesh can opt in per group (a `GIMBAL` token): the glowing shell then rotates
+  about its own derived throat pivot onto the live thrust direction and rides the moving
+  bell as one piece of metal — axis, pivot and engine matching all derived from the
+  geometry, nothing declared but the token itself.
 - **Plume expansion** — pressure-driven, with real physics. One overexpansion number drives
   four curves: shock-cell spacing, diamond contrast, width pinch and separation flicker. The
   regime is framed by a two-handle **expansion band** you set per hull — drag the high handle
@@ -135,8 +170,22 @@ expands through Mach 1, and the one famous aerodynamic visual nothing in Orbiter
 - **Exhaust shimmer** — heat haze behind the plume, sharing one plume model with everything
   above so haze and jet can never disagree.
 - **Exhaust particles** — the full `PARTICLESTREAMSPEC` exposed as live sliders in the API's
-  own units, plus a colour picker (the API has no colour field, so ORO synthesizes the
-  texture), emissive/diffuse lighting and an air-fade switch.
+  own units, plus TWO colour pickers (each particle is randomly born with tint A or B — the
+  atlas quadrants carry them; the API has no colour field, so ORO synthesizes the texture),
+  a STOCK-colours switch, a **texture picker** (Orbiter's own Contrail textures or any 2×2
+  atlas `.dds` dropped in `Textures\ORO\Particles`), emissive/diffuse lighting, an air-fade
+  switch, and **COPY STOCK** — the vessel author's own stream definitions, read back through
+  client patch (y), filtered to the selected engine group and offered as starting points.
+- **Particle sun lighting** (client patch (x)) — stock D3D9 renders DIFFUSE particle streams
+  fully lit at midnight; the ORO client darkens them on the night side, crosses the
+  terminator per particle, keeps smoke flame-lit near the engine, and shades each billboard
+  DIRECTIONALLY — the sun-facing side of a cloud bright, the far side smoky, per particle
+  corner. Through dawn and dusk the sunlit smoke follows the SAME colour the hull takes
+  (the client's own atmospheric extinction, read per particle at its own altitude), one
+  stop ahead and bloomed, while engine-lit steam stays its own colour. Launchpad controls:
+  the three-way mode (Off = bit-exact stock / Brightness only / Brightness + colour), a
+  diffuse ground-shadow strength slider, and three dawn-tint dials (lead / depth / bloom).
+  EMISSIVE streams untouched.
 
 ### Atmosphere and sky
 
@@ -185,6 +234,10 @@ expands through Mach 1, and the one famous aerodynamic visual nothing in Orbiter
   engine plume, each drawn from under the water rather than copied off the picture.
   Hulls get wet too, across every vessel shader path:
   darkened, tightened specular, and a lifecycled **raindrop glint** riding the sky light.
+  And since 08-27 the rain reaches the glass itself: **drops ON the VC windscreen** with
+  real lens refraction, a gradual build-up, and runners that break loose and carve fading
+  trails — any vessel opts in with a one-line `RAIN 1` token in its mesh (patch (h)),
+  and the window frame masks the drops per pixel for free.
   The deck overhead is ORO's own **two-layer textured cloud ceiling** — a main deck and
   a darker scud layer hanging beneath it, with real parallax, vertical relief and no
   repetition — and the storm carries its own **lightning**: most events light a region
@@ -243,11 +296,18 @@ rather than rendering anything.
 
 ## 5. The parts you don't see
 
-- **The control panel** — 500×800, fully owner-drawn, dark, nothing like a stock Orbiter
-  dialog. Five tabs, each scrolling its own content; the thruster tab has two sub-tabs.
-  Hand-drawn scrollbar, live 10 Hz repaint, master arm and SAVE pinned outside the scroll
-  pane so they're always reachable. Ctrl+G is a keyboard panic that kills everything and
-  hands every borrowed thing back.
+- **The control panel** — 525-wide, height-resizable, fully owner-drawn, dark, nothing
+  like a stock Orbiter dialog. Since 2026-08-29 it is a **menu tree**: a main menu of
+  three categories (WORLD / VESSEL / PILOT), submenus beneath, and leaf pages holding
+  exactly one subject's controls — a breadcrumb plus BACK / BACK TO MAIN in a fixed nav
+  row, so nothing is ever more than two clicks from anywhere. Every page scrolls its own
+  content; each leaf's SAVE/REVERT row is *fixed*, so the way to save never scrolls away;
+  the SAVE buttons turn **amber** while unsaved edits exist in the files they write.
+  Master arm, HELP and the global SAVE are pinned above it all. Ctrl+G is a keyboard
+  panic that kills everything and hands every borrowed thing back.
+- **In-panel help, per page** — pressing HELP opens the text for exactly the screen you
+  are on, menus included (a menu's help describes its doors; a page's help explains every
+  slider, pill and swatch on it), and an open help window *follows* you as you navigate.
 - **A custom in-panel colour picker** — because the Windows one froze the sim and then
   slammed one giant timestep on close, throwing landed vessels across the map.
 - **Three settings scopes** — global (what the pilot *is*), per vessel class (what a hull
@@ -283,12 +343,20 @@ addon involved:
   default reentry stream are all silently unsuppressable.
 - Self-shadowing treats a half-transparent, untextured `cockpitglass` as fully opaque —
   visible in exterior views on the stock DeltaGlider.
+- Planet shine has **no occlusion term at all** — Earth glow lights the inside of a
+  closed payload bay (community-reported).
+- The sun self-shadow map is bound in the **main scene only** — every reflection probe
+  and secondary pass renders geometry fully sunlit.
 - The config file died on every Launchpad close.
 
 The rest add capability: backbuffer access, additive Sketchpad blend, per-pixel depth
 clipping, textured Sketchpad triangles, CPU→texture upload, render-epoch camera and body
-anchors, a pre-resolve render slot, VC shadows, and surface weather — wet ground, storm
-light, and a planar mirror that puts the ships in the puddles.
+anchors, a pre-resolve render slot, VC shadows, surface weather — wet ground, storm
+light, and a planar mirror that puts the ships in the puddles — scene depth handed to
+full-frame shaders (the windscreen drops stand on it), and **real reflections**: multi-
+probe environment maps with box projection, planar vessel mirrors with a curvature
+warp, and planet-shine occlusion, all behind a fourth Launchpad reflection mode,
+**"Full Scene ORO (exp)"** — the three stock settings stay pixel-identical stock.
 
 And one that fixes Orbiter's own UI rather than adding anything: **patch (t) makes the menu
 bar and info bars draw LAST**. The core paints the pilot's instruments and the user's chrome

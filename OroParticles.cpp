@@ -110,17 +110,188 @@ namespace {
 		return ab + (cd - ab) * v;
 	}
 
+	// ------------------------------------------------------------------------
+	// FILE TEXTURES (phase 1 of the texture picker, 2026-08-29, his design): the
+	// particle SHAPE can come from a .dds - Orbiter's own Contrail1/Contrail1a, or
+	// anything the user drops in Textures\ORO\Particles. The file's pixels are
+	// TINTED by the swatch colour and uploaded through the SAME patch-(l) path as
+	// the synthesized atlas, so the stream's SURFHANDLE never changes (no lifetime
+	// question, no rebuild-for-texture) and the Colour swatch keeps working: white
+	// = the file exactly as authored. ⚠️ Files must be 2x2 ATLASES (23j) - a single
+	// centred blob renders as corner wedges; the folder README says so.
+	// Own DDS reader on purpose: deterministic, no dependence on lock semantics of
+	// loaded D3D surfaces, and phase 2's thumbnails need exactly this decoder.
+	// DXT1/3/5 + uncompressed 32-bit, top mip only, any size (bilinear to 256).
+	// ------------------------------------------------------------------------
+	static void Dxt1Colours(const BYTE* b, DWORD c[4], bool dxt1)
+	{
+		const WORD c0 = *(const WORD*)b, c1 = *(const WORD*)(b + 2);
+		const int r0 = ((c0 >> 11) & 31) * 255 / 31, g0 = ((c0 >> 5) & 63) * 255 / 63, b0 = (c0 & 31) * 255 / 31;
+		const int r1 = ((c1 >> 11) & 31) * 255 / 31, g1 = ((c1 >> 5) & 63) * 255 / 63, b1 = (c1 & 31) * 255 / 31;
+		c[0] = 0xFF000000u | (r0 << 16) | (g0 << 8) | b0;
+		c[1] = 0xFF000000u | (r1 << 16) | (g1 << 8) | b1;
+		if (!dxt1 || c0 > c1) {
+			c[2] = 0xFF000000u | (((2*r0 + r1) / 3) << 16) | (((2*g0 + g1) / 3) << 8) | ((2*b0 + b1) / 3);
+			c[3] = 0xFF000000u | (((r0 + 2*r1) / 3) << 16) | (((g0 + 2*g1) / 3) << 8) | ((b0 + 2*b1) / 3);
+		} else {
+			c[2] = 0xFF000000u | (((r0 + r1) / 2) << 16) | (((g0 + g1) / 2) << 8) | ((b0 + b1) / 2);
+			c[3] = 0x00000000u;                            // DXT1 3-colour mode: transparent black
+		}
+	}
+
+	// Decode the top mip of a DDS into malloc'd ARGB. Caller frees. False = cannot use.
+	static bool LoadDDSRGBA(const char* path, DWORD** outPix, int* outW, int* outH)
+	{
+		FILE* fp = NULL;
+		if (fopen_s(&fp, path, "rb") || !fp) return false;
+		BYTE hdr[128];
+		if (fread(hdr, 1, 128, fp) != 128 || *(DWORD*)hdr != 0x20534444u) { fclose(fp); return false; }
+		const int   h       = *(int*)(hdr + 12), w = *(int*)(hdr + 16);
+		const DWORD pfFlags = *(DWORD*)(hdr + 80);
+		const DWORD fourCC  = *(DWORD*)(hdr + 84);
+		const DWORD bits    = *(DWORD*)(hdr + 88);
+		if (w < 4 || h < 4 || w > 4096 || h > 4096) { fclose(fp); return false; }
+		DWORD* pix = (DWORD*)malloc((size_t)w * h * 4);
+		if (!pix) { fclose(fp); return false; }
+		bool ok = false;
+		if (pfFlags & 0x4) {                               // DDPF_FOURCC - compressed
+			const bool dxt1 = (fourCC == 0x31545844u);     // 'DXT1'
+			const bool dxt3 = (fourCC == 0x33545844u);     // 'DXT3'
+			const bool dxt5 = (fourCC == 0x35545844u);     // 'DXT5'
+			if (dxt1 || dxt3 || dxt5) {
+				const int bw = (w + 3) / 4, bh = (h + 3) / 4, bsz = dxt1 ? 8 : 16;
+				BYTE* blocks = (BYTE*)malloc((size_t)bw * bh * bsz);
+				if (blocks && fread(blocks, 1, (size_t)bw * bh * bsz, fp) == (size_t)bw * bh * bsz) {
+					for (int by = 0; by < bh; by++) for (int bx = 0; bx < bw; bx++) {
+						const BYTE* blk = blocks + ((size_t)by * bw + bx) * bsz;
+						const BYTE* cb  = dxt1 ? blk : blk + 8;      // colour half
+						DWORD col[4]; Dxt1Colours(cb, col, dxt1);
+						DWORD cidx = *(const DWORD*)(cb + 4);
+						BYTE  a5[8] = {};                            // DXT5 alpha palette
+						if (dxt5) {
+							a5[0] = blk[0]; a5[1] = blk[1];
+							if (a5[0] > a5[1]) for (int k = 0; k < 6; k++) a5[2+k] = (BYTE)(((6-k)*a5[0] + (k+1)*a5[1]) / 7);
+							else { for (int k = 0; k < 4; k++) a5[2+k] = (BYTE)(((4-k)*a5[0] + (k+1)*a5[1]) / 5); a5[6] = 0; a5[7] = 255; }
+						}
+						for (int py = 0; py < 4; py++) for (int px = 0; px < 4; px++) {
+							const int x = bx*4 + px, y = by*4 + py;
+							if (x >= w || y >= h) continue;
+							DWORD c = col[(cidx >> ((py*4 + px)*2)) & 3];
+							if (dxt3) {
+								const int an = py*4 + px;
+								BYTE a = (blk[an >> 1] >> ((an & 1) * 4)) & 0xF; a = (BYTE)(a * 17);
+								c = (c & 0x00FFFFFFu) | ((DWORD)a << 24);
+							} else if (dxt5) {
+								const UINT64 aidx = *(const UINT64*)blk >> 16;   // 48 bits of 3-bit indices
+								BYTE a = a5[(aidx >> ((py*4 + px)*3)) & 7];
+								c = (c & 0x00FFFFFFu) | ((DWORD)a << 24);
+							}
+							pix[(size_t)y * w + x] = c;
+						}
+					}
+					ok = true;
+				}
+				free(blocks);
+			}
+		} else if ((pfFlags & 0x40) && bits == 32) {       // DDPF_RGB, 32-bit A8R8G8B8/X8R8G8B8
+			const DWORD aMask = *(DWORD*)(hdr + 104);
+			if (fread(pix, 4, (size_t)w * h, fp) == (size_t)w * h) {
+				if (!aMask) for (size_t i = 0; i < (size_t)w * h; i++) pix[i] |= 0xFF000000u;
+				ok = true;
+			}
+		}
+		fclose(fp);
+		if (!ok) { free(pix); return false; }
+		*outPix = pix; *outW = w; *outH = h;
+		return true;
+	}
+
+	// The A/B split by DEST quadrant: diagonal pairs (TL+BR = A, TR+BL = B), so both
+	// tints appear in every one of the renderer's eight orientation variants and the
+	// random per-particle quadrant pick delivers the 50/50 mix - the atlas IS the
+	// mechanism, no renderer change.
+	static inline bool QuadIsA(int x, int y)
+	{
+		const int q = (y >= PT_HALF ? 2 : 0) + (x >= PT_HALF ? 1 : 0);
+		return q == 0 || q == 3;
+	}
+
+	// Resolve, decode, resample to 256 and colour into s_ptex. stockCol = the file's
+	// own authored colours; otherwise the tint REPLACES the file's colour using its
+	// LUMINANCE as shading (a multiply can only darken - the 15b lesson - and white
+	// must mean white). False = fall back to the synthesized puffs (and name the
+	// failure once, main thread, so it is loud exactly once rather than per rebuild).
+	static bool BakeFileTex(const char* name, DWORD colA, DWORD colB, bool stockCol)
+	{
+		char path[MAX_PATH];
+		DWORD* pix = NULL; int w = 0, h = 0;
+		sprintf_s(path, "Textures\\ORO\\Particles\\%s.dds", name);
+		if (!LoadDDSRGBA(path, &pix, &w, &h)) {
+			sprintf_s(path, "Textures\\%s.dds", name);      // the stock names live here
+			if (!LoadDDSRGBA(path, &pix, &w, &h)) {
+				static char lastFail[48] = "";
+				if (_stricmp(lastFail, name)) {
+					strcpy_s(lastFail, name);
+					oapiWriteLogV("ORO: particle texture '%s' missing or undecodable - synthesized fallback.", name);
+				}
+				return false;
+			}
+		}
+		for (int y = 0; y < PT_DIM; y++) {
+			const float fy = ((float)y + 0.5f) * h / PT_DIM - 0.5f;
+			int y0 = (int)floorf(fy); float wy = fy - y0;
+			if (y0 < 0) { y0 = 0; wy = 0; } if (y0 > h - 2) { y0 = h - 2; wy = 1; }
+			for (int x = 0; x < PT_DIM; x++) {
+				const float fx = ((float)x + 0.5f) * w / PT_DIM - 0.5f;
+				int x0 = (int)floorf(fx); float wx = fx - x0;
+				if (x0 < 0) { x0 = 0; wx = 0; } if (x0 > w - 2) { x0 = w - 2; wx = 1; }
+				const DWORD p00 = pix[(size_t)y0*w + x0],     p10 = pix[(size_t)y0*w + x0 + 1];
+				const DWORD p01 = pix[(size_t)(y0+1)*w + x0], p11 = pix[(size_t)(y0+1)*w + x0 + 1];
+				float ch[4];
+				for (int c = 0; c < 4; c++) {
+					const int sh = c * 8;
+					const float a = (float)((p00 >> sh) & 0xFF), b = (float)((p10 >> sh) & 0xFF);
+					const float d = (float)((p01 >> sh) & 0xFF), e = (float)((p11 >> sh) & 0xFF);
+					ch[c] = (a + (b - a)*wx) + ((d + (e - d)*wx) - (a + (b - a)*wx)) * wy;
+				}
+				int R, G, B;
+				if (stockCol) {
+					// the file's own authored colours, untouched
+					B = (int)ch[0]; G = (int)ch[1]; R = (int)ch[2];
+				} else {
+					// luminance x this quadrant's tint - white really is white
+					const DWORD col = QuadIsA(x, y) ? colA : colB;
+					const float lum = (0.114f*ch[0] + 0.587f*ch[1] + 0.299f*ch[2]) / 255.0f;
+					R = (int)clampf(lum * (float)( col        & 0xFF), 0.0f, 255.0f);
+					G = (int)clampf(lum * (float)((col >>  8) & 0xFF), 0.0f, 255.0f);
+					B = (int)clampf(lum * (float)((col >> 16) & 0xFF), 0.0f, 255.0f);
+				}
+				const int A = (int)ch[3];
+				s_ptex[(size_t)y * PT_DIM + x] = ((DWORD)A << 24) | ((DWORD)R << 16) | ((DWORD)G << 8) | (DWORD)B;
+			}
+		}
+		free(pix);
+		return true;
+	}
+
 	// FOUR soft puffs, one per quadrant (finding 3). RGB carries the user's tint,
 	// ALPHA the soft ragged mask - which is the only channel the EMISSIVE path
 	// really trades on, and the shape channel for DIFFUSE too.
-	void BakeParticleTex(DWORD colourRef)
+	// Phase 1 texture picker: a non-empty texName routes to the FILE bake above;
+	// failure falls through to the puffs (missing-piece-is-inert). TWO tints since
+	// 2026-08-30 (his design): diagonal quadrant pairs carry colour A and colour B,
+	// and the renderer's random quadrant pick mixes them 50/50 per particle. STOCK
+	// = the texture's own colours (for the puffs that means plain white shading).
+	void BakeParticleTex(DWORD colA, DWORD colB, bool stockCol, const char* texName)
 	{
-		const int tr = (int)( colourRef        & 0xFF);
-		const int tg = (int)((colourRef >>  8) & 0xFF);
-		const int tb = (int)((colourRef >> 16) & 0xFF);
+		if (texName && texName[0] && BakeFileTex(texName, colA, colB, stockCol)) return;
 		for (int q = 0; q < 4; q++) {
 			const int ox = (q & 1) * PT_HALF, oy = (q >> 1) * PT_HALF;
 			const int sd = q * 613 + 7;
+			const DWORD col = (q == 0 || q == 3) ? colA : colB;   // the diagonal A/B split
+			const int tr = stockCol ? 255 : (int)( col        & 0xFF);
+			const int tg = stockCol ? 255 : (int)((col >>  8) & 0xFF);
+			const int tb = stockCol ? 255 : (int)((col >> 16) & 0xFF);
 			for (int y = 0; y < PT_HALF; y++) {
 				for (int x = 0; x < PT_HALF; x++) {
 					const float nx = ((float)x + 0.5f) / (PT_HALF * 0.5f) - 1.0f;
@@ -158,16 +329,42 @@ namespace {
 	struct PrtGrpSig {
 		float  ofs, size, life, rate, speed, spread, growth, slow;
 		bool   diffuse, airfade;
-		DWORD  colour;
+		DWORD  colour, colour2;
+		bool   texstock;
 		bool   on;
+		char   tex[48];       // texture NAME - a change re-bakes at the next rebuild
 	};
 	struct PrtSig {
 		OBJHANDLE hV;
 		int    nStream;
 		PrtGrpSig g[ORO_THR_N];
 		bool   on;
+		DWORD  ovrHash;       // Phase B: the override pool's PARTICLE families, folded
+		                      //   in so an override edit rebuilds on the SAME single
+		                      //   settle clock (26f preserved - one state machine)
+		DWORD  cacheGen;      // ... and the CLASS CACHE's generation: a foreign class
+		                      //   loading, dropping or reloading changes what the
+		                      //   streams should be without touching any live table
 		bool operator!=(const PrtSig& o) const { return memcmp(this, &o, sizeof(PrtSig)) != 0; }
 	};
+
+	// Phase B: the particle block a thruster answers to, plus its override slot when
+	// one owns it (the slot indexes the per-override texture). faithful = the vessel
+	// passed OroThr_ClassMatch; anything else resolves to the group, always.
+	const OroThrusterFx* PrtEffOf(bool faithful, int thrIdx, int gi, int* ovrSlot)
+	{
+		if (ovrSlot) *ovrSlot = -1;
+		if (faithful && thrIdx >= 0) {
+			for (int s = 0; s < ORO_THR_OVR_MAX; s++) {
+				const OroThrOvr& o = g_fx.thrOvr[s];
+				if (o.thrIdx == thrIdx && o.ovrPrt) {
+					if (ovrSlot) *ovrSlot = s;
+					return &o.fx;
+				}
+			}
+		}
+		return &g_fx.thr[(gi >= 0 && gi < ORO_THR_N) ? gi : 0];
+	}
 	PrtSig s_applied = {};
 	bool   s_haveApplied = false;
 
@@ -194,14 +391,11 @@ namespace {
 // ----------------------------------------------------------------------------
 void OroModule::UpdateParticles(double simdt)
 {
-	// THE TWO PILLS ANSWER ONE QUESTION, so they can never both be on: stock's
-	// streams or ours, not both stacked. The dialog enforces it on click, but it must
-	// hold here too - settings arrive from three scopes, and a class cfg written
-	// before the split carries no StockParticlesOn key at all, so it would load as
-	// "stock on" beside a saved "ours on". Ours wins: it is the one the user just
-	// asked for by enabling it. Runs before UpdateStockExhaust, which reads the flag.
-	for (int gi = 0; gi < ORO_THR_N; gi++)
-		if (g_fx.thr[gi].prtEnabled) { g_fx.stockParticles = false; break; }
+	// ⛔ THE MUTUAL EXCLUSION IS GONE (2026-08-29, his ruling): "some users might
+	// want both" - stock's streams and ORO's may fly stacked, and ORO's job is to
+	// save the combination the user set and load it back faithfully. The old rule
+	// here silently rewrote loaded settings on every pre-step, which is exactly how
+	// a saved pill state gets overridden without anyone pressing anything.
 
 	// ⚠ NOT UNTIL THE SCENE HAS DRAWN A FRAME. AddExhaustStream is the one thing ORO
 	// does that hands a LONG-LIVED OBJECT to Orbiter's core and the client's scene:
@@ -220,13 +414,20 @@ void OroModule::UpdateParticles(double simdt)
 	// ---- who should be streaming right now? --------------------------------
 	// The camera-target vessel and everything docked or attached to it - the same
 	// stack BuildPlumeModel walks, so a Shuttle's SRBs get streams too.
+	// ⚠️ THE WALK IS NO LONGER GATED ON THE LIVE PILLS (his SRB report, 2026-08-30):
+	// a CACHED foreign class can want streams while every live pill is off - his
+	// Atlantis_SRB.cfg said USERPrtOn TRUE while the orbiter's class said FALSE -
+	// and gating the walk on the pills was exactly how the boosters fell in the
+	// suppress/replace gap. The pills still decide the CAPTION's wording below.
 	OBJHANDLE stack[STACK_MAX];
 	int nStack = 0;
-	bool want = false;
-	if (g_fx.masterArmed)
-		for (int gi = 0; gi < ORO_THR_N; gi++)
-			if (g_fx.thr[gi].prtEnabled) { want = true; break; }
-	if (want) {
+	bool pillsOn = false;
+	for (int gi = 0; gi < ORO_THR_N && !pillsOn; gi++)
+		if (g_fx.thr[gi].prtEnabled) pillsOn = true;
+	for (int s = 0; s < ORO_THR_OVR_MAX && !pillsOn; s++)
+		if (g_fx.thrOvr[s].thrIdx >= 0 && g_fx.thrOvr[s].ovrPrt &&
+		    g_fx.thrOvr[s].fx.prtEnabled) pillsOn = true;
+	if (g_fx.masterArmed) {
 		OBJHANDLE h = oapiCameraTarget();
 		if (!h || oapiGetObjectType(h) != OBJTP_VESSEL) h = oapiGetFocusObject();
 		if (h && oapiGetObjectType(h) == OBJTP_VESSEL) {
@@ -248,7 +449,7 @@ void OroModule::UpdateParticles(double simdt)
 						addV(sv->GetAttachmentStatus(sv->GetAttachmentHandle(par != 0, a)));
 				}
 			}
-		} else want = false;
+		}
 	}
 
 	// ---- is AIR FADE currently emitting nothing? ---------------------------
@@ -263,8 +464,11 @@ void OroModule::UpdateParticles(double simdt)
 		OBJHANDLE hv = oapiCameraTarget();
 		if (!hv || oapiGetObjectType(hv) != OBJTP_VESSEL) hv = oapiGetFocusObject();
 		VESSEL* vv = (hv && oapiGetObjectType(hv) == OBJTP_VESSEL) ? oapiGetVesselInterface(hv) : NULL;
-		// The readout answers for the group the panel is EDITING.
-		g_fx.prtVacuum = g_fx.thr[g_fx.thrSel].prtAirFade && vv && (vv->GetAtmDensity() < 1e-5);
+		// The readout answers for whatever the panel is EDITING - group or thruster.
+		// The FLAT field is exactly that (the edit buffer holds the selection's
+		// effective values, and SyncOut ran at the top of this pre-step), where
+		// thr[thrSel] would answer for the group even with a thruster selected.
+		g_fx.prtVacuum = g_fx.prtAirFade && vv && (vv->GetAtmDensity() < 1e-5);
 	}
 
 	// ---- the texture (patch l), rebaked only when the colour changes --------
@@ -305,28 +509,74 @@ void OroModule::UpdateParticles(double simdt)
 		G.rate = T.prtRate;    G.speed   = T.prtSpeed;    G.spread = T.prtSpread;
 		G.growth = T.prtGrowth; G.slow   = T.prtSlowdown; G.diffuse = T.prtDiffuse;
 		G.airfade = T.prtAirFade; G.colour = T.prtColour; G.on     = T.prtEnabled;
+		G.colour2 = T.prtColour2; G.texstock = T.prtTexStock;
+		strcpy_s(G.tex, T.prtTexName);     // sig is zero-inited, so memcmp stays honest
 	}
-	sig.on      = want;
-
-	// Count the qualifying thrusters too: a staging event changes the set without
-	// changing any slider, and the streams must follow the hardware.
-	// Counted through the shared classifier, so only thrusters in groups that actually
-	// want particles are counted - a group with its pill off contributes nothing here
-	// and creates nothing below.
-	int nWantStream = 0;
-	if (want) {
-		for (int s = 0; s < nStack; s++) {
-			VESSEL* sv = oapiGetVesselInterface(stack[s]);
-			if (!sv) continue;
-			const DWORD nth = sv->GetThrusterCount();
-			for (DWORD i = 0; i < nth; i++) {
-				const int gi = OroThrusterGroupOf(sv, sv->GetThrusterHandleByIndex(i));
-				if (gi >= 0 && g_fx.thr[gi].prtEnabled) nWantStream++;
-			}
+	// Phase B: hash the override pool's particle families in. Field by field, never a
+	// struct memcpy - the file's own warning about types that merely share names.
+	{
+		DWORD hsh = 2166136261u;
+		auto mix = [&](const void* p, size_t n) {
+			const unsigned char* b = (const unsigned char*)p;
+			for (size_t k = 0; k < n; k++) { hsh ^= b[k]; hsh *= 16777619u; }
+		};
+		for (int s = 0; s < ORO_THR_OVR_MAX; s++) {
+			const OroThrOvr& o = g_fx.thrOvr[s];
+			if (o.thrIdx < 0 || !o.ovrPrt) continue;
+			mix(&o.thrIdx, sizeof(int));
+			mix(&o.fx.prtEnabled,  sizeof(bool));
+			mix(&o.fx.prtOffset,   sizeof(float));
+			mix(&o.fx.prtSize,     sizeof(float));
+			mix(&o.fx.prtLifetime, sizeof(float));
+			mix(&o.fx.prtRate,     sizeof(float));
+			mix(&o.fx.prtSpeed,    sizeof(float));
+			mix(&o.fx.prtSpread,   sizeof(float));
+			mix(&o.fx.prtGrowth,   sizeof(float));
+			mix(&o.fx.prtSlowdown, sizeof(float));
+			mix(&o.fx.prtDiffuse,  sizeof(bool));
+			mix(&o.fx.prtAirFade,  sizeof(bool));
+			mix(&o.fx.prtColour,   sizeof(DWORD));
+			mix(&o.fx.prtColour2,  sizeof(DWORD));
+			mix(&o.fx.prtTexStock, sizeof(bool));
+			mix(o.fx.prtTexName, strlen(o.fx.prtTexName));
 		}
-		if (nWantStream > PRT_MAX_STREAM) nWantStream = PRT_MAX_STREAM;
+		sig.ovrHash = hsh;
 	}
-	sig.nStream = nWantStream;
+
+	// ONE predicate for the count here and the creation loop below - a mismatch
+	// between them churns rebuilds forever. Per VESSEL: its class-cache slot wins
+	// (the vessel's own cfg, groups and its own override blocks), the live tables
+	// otherwise, with live per-thruster overrides only for the focus class.
+	auto effPrt = [](VESSEL* sv, int cacheIdx, bool faithful, DWORD i, int gi,
+	                 int* ovrSlot) -> const OroThrusterFx* {
+		if (ovrSlot) *ovrSlot = -1;
+		if (cacheIdx >= 0)
+			return &OroThr_EffC(cacheIdx, gi, (int)i, ORO_FAM_PRT);
+		return PrtEffOf(faithful, faithful ? (int)i : -1, gi, ovrSlot);
+	};
+
+	// Count the qualifying thrusters: a staging event changes the set without
+	// changing any slider, and the streams must follow the hardware. This walk is
+	// also where foreign classes LOAD lazily (OroThr_CacheFor reads the cfg on
+	// first sight - main thread, once per class per session).
+	int nWantStream = 0;
+	for (int s = 0; s < nStack; s++) {
+		VESSEL* sv = oapiGetVesselInterface(stack[s]);
+		if (!sv) continue;
+		const int  cIdx     = OroThr_CacheFor(sv);
+		const bool faithful = (cIdx < 0) && OroThr_ClassMatch(sv);
+		const DWORD nth = sv->GetThrusterCount();
+		for (DWORD i = 0; i < nth; i++) {
+			const int gi = OroThrusterGroupOf(sv, sv->GetThrusterHandleByIndex(i));
+			if (gi < 0) continue;
+			if (effPrt(sv, cIdx, faithful, i, gi, NULL)->prtEnabled) nWantStream++;
+		}
+	}
+	if (nWantStream > PRT_MAX_STREAM) nWantStream = PRT_MAX_STREAM;
+	const bool want = g_fx.masterArmed && nWantStream > 0;
+	sig.nStream  = nWantStream;
+	sig.on       = want;
+	sig.cacheGen = OroThr_CacheGen();
 
 	if (s_haveApplied && !(sig != s_applied)) {
 		s_havePending = false;
@@ -354,7 +604,8 @@ void OroModule::UpdateParticles(double simdt)
 	s_applied = sig;
 	s_haveApplied = true;
 	if (!want || !nWantStream) {
-		strcpy_s(g_fx.prtInfo, want ? "no thrusters in the enabled group(s)" : "off");
+		strcpy_s(g_fx.prtInfo, pillsOn && g_fx.masterArmed
+		                     ? "no thrusters in the enabled group(s)" : "off");
 		g_fx.prtCount = 0;
 		return;
 	}
@@ -368,7 +619,8 @@ void OroModule::UpdateParticles(double simdt)
 	if (prtTexMode && hPrtTex[0]) {
 		for (int gi = 0; gi < ORO_THR_N; gi++) {
 			if (!hPrtTex[gi]) continue;
-			BakeParticleTex(g_fx.thr[gi].prtColour);
+			BakeParticleTex(g_fx.thr[gi].prtColour, g_fx.thr[gi].prtColour2,
+			                g_fx.thr[gi].prtTexStock, g_fx.thr[gi].prtTexName);
 			if (pCore->UpdateTexture2D(hPrtTex[gi], s_ptex, PT_DIM, PT_DIM)) hTexG[gi] = hPrtTex[gi];
 			else {
 				prtTexMode = false;
@@ -378,16 +630,85 @@ void OroModule::UpdateParticles(double simdt)
 		}
 		hTex = hTexG[0];
 	}
+	// Phase B: a texture per ACTIVE particle override - same reasoning as the group
+	// set (the spec has no colour field, so a per-thruster colour IS a per-thruster
+	// texture). Surfaces are lazily created here at rebuild time, bounded by the
+	// pool, and released with the group set in ReleaseParticleTex.
+	SURFHANDLE hTexOvrS[ORO_THR_OVR_MAX] = {};
+	if (prtTexMode && hPrtTex[0]) {
+		for (int s = 0; s < ORO_THR_OVR_MAX; s++) {
+			const OroThrOvr& o = g_fx.thrOvr[s];
+			if (o.thrIdx < 0 || !o.ovrPrt || !o.fx.prtEnabled) continue;
+			if (!hPrtTexOvr[s])
+				hPrtTexOvr[s] = oapiCreateSurfaceEx(PT_DIM, PT_DIM,
+				                                    OAPISURFACE_TEXTURE | OAPISURFACE_NOMIPMAPS |
+				                                    OAPISURFACE_ALPHA);
+			if (!hPrtTexOvr[s]) continue;
+			BakeParticleTex(o.fx.prtColour, o.fx.prtColour2, o.fx.prtTexStock, o.fx.prtTexName);
+			if (pCore->UpdateTexture2D(hPrtTexOvr[s], s_ptex, PT_DIM, PT_DIM))
+				hTexOvrS[s] = hPrtTexOvr[s];
+		}
+	}
+	// ... and per CACHED CLASS per group, baked lazily for the pairs the creation
+	// loop actually uses - and RE-baked on every rebuild, because the surface
+	// outlives a cache reload and would otherwise keep the old class colours (the
+	// sig's cacheGen forces the rebuild; this makes the rebuild repaint). Falls
+	// back to the live group texture on any failure, never silently to stock.
+	bool cbaked[ORO_THR_CACHE_MAX][ORO_THR_N] = {};
+	auto cacheTex = [&](int ci, int gi) -> SURFHANDLE {
+		if (!prtTexMode || ci < 0 || ci >= ORO_THR_CACHE_MAX) return hTexG[gi];
+		const OroThrusterFx* T = OroThr_CacheGrp(ci, gi);
+		if (!T) return hTexG[gi];
+		if (!cbaked[ci][gi]) {
+			cbaked[ci][gi] = true;
+			if (!hPrtTexC[ci][gi])
+				hPrtTexC[ci][gi] = oapiCreateSurfaceEx(PT_DIM, PT_DIM,
+				                                       OAPISURFACE_TEXTURE | OAPISURFACE_NOMIPMAPS |
+				                                       OAPISURFACE_ALPHA);
+			if (hPrtTexC[ci][gi]) {
+				BakeParticleTex(T->prtColour, T->prtColour2, T->prtTexStock, T->prtTexName);
+				if (!pCore->UpdateTexture2D(hPrtTexC[ci][gi], s_ptex, PT_DIM, PT_DIM)) {
+					oapiDestroySurface(hPrtTexC[ci][gi]);
+					hPrtTexC[ci][gi] = NULL;
+				}
+			}
+		}
+		return hPrtTexC[ci][gi] ? hPrtTexC[ci][gi] : hTexG[gi];
+	};
+	// ... and per CACHED OVERRIDE (his SRB report, round 2: the motor's Contrail4
+	// lives in a THR0 override while the group holds Contrail1a - a share-the-group-
+	// texture bound flew the wrong contrail on its first real use). Same lifecycle,
+	// falling back to the class-group texture on any failure.
+	bool cbakedO[ORO_THR_CACHE_MAX][ORO_THR_OVR_MAX] = {};
+	auto cacheTexOvr = [&](int ci, int cov, int gi) -> SURFHANDLE {
+		if (!prtTexMode || ci < 0 || ci >= ORO_THR_CACHE_MAX ||
+		    cov < 0 || cov >= ORO_THR_OVR_MAX) return cacheTex(ci, gi);
+		const OroThrusterFx* T = OroThr_CacheOvrFx(ci, cov);
+		if (!T) return cacheTex(ci, gi);
+		if (!cbakedO[ci][cov]) {
+			cbakedO[ci][cov] = true;
+			if (!hPrtTexCO[ci][cov])
+				hPrtTexCO[ci][cov] = oapiCreateSurfaceEx(PT_DIM, PT_DIM,
+				                                         OAPISURFACE_TEXTURE | OAPISURFACE_NOMIPMAPS |
+				                                         OAPISURFACE_ALPHA);
+			if (hPrtTexCO[ci][cov]) {
+				BakeParticleTex(T->prtColour, T->prtColour2, T->prtTexStock, T->prtTexName);
+				if (!pCore->UpdateTexture2D(hPrtTexCO[ci][cov], s_ptex, PT_DIM, PT_DIM)) {
+					oapiDestroySurface(hPrtTexCO[ci][cov]);
+					hPrtTexCO[ci][cov] = NULL;
+				}
+			}
+		}
+		return hPrtTexCO[ci][cov] ? hPrtTexCO[ci][cov] : cacheTex(ci, gi);
+	};
 
 	// THE SPEC. These are the author's own fields, straight through - that is the
 	// entire point of the tab.
 	// ONE SPEC PER GROUP, built up front (2026-08-16). The core copies the spec at
 	// construction, so each stream can be handed its own group's numbers and then never
-	// needs to know about groups again.
-	PARTICLESTREAMSPEC pssG[ORO_THR_N] = {};
-	for (int gi = 0; gi < ORO_THR_N; gi++) {
-		const OroThrusterFx& T = g_fx.thr[gi];
-		PARTICLESTREAMSPEC& pss = pssG[gi];
+	// needs to know about groups again. Phase B routes the OVERRIDE specs through the
+	// SAME mapping (the lambda), so the two can never diverge field by field.
+	auto buildPss = [](PARTICLESTREAMSPEC& pss, const OroThrusterFx& T, SURFHANDLE tex) {
 		pss.flags       = 0;
 		pss.srcsize     = (double)T.prtSize;
 		pss.srcrate     = (double)T.prtRate;
@@ -412,8 +733,10 @@ void OroModule::UpdateParticles(double simdt)
 			pss.atmsmap = PARTICLESTREAMSPEC::ATM_FLAT;
 			pss.amin    = 1.0;  pss.amax = 1.0;
 		}
-		pss.tex         = hTexG[gi];
-	}
+		pss.tex         = tex;
+	};
+	PARTICLESTREAMSPEC pssG[ORO_THR_N] = {};
+	for (int gi = 0; gi < ORO_THR_N; gi++) buildPss(pssG[gi], g_fx.thr[gi], hTexG[gi]);
 
 	// ---- create the streams -------------------------------------------------
 	// Patch (o): raise the exemption latch around the whole creation loop. Every
@@ -427,17 +750,24 @@ void OroModule::UpdateParticles(double simdt)
 	for (int s = 0; s < nStack && prtStrN < PRT_MAX_STREAM; s++) {
 		VESSEL* sv = oapiGetVesselInterface(stack[s]);
 		if (!sv) continue;
+		const int  cIdx     = OroThr_CacheFor(sv);     // its own class file, cached
+		const bool faithful = (cIdx < 0) && OroThr_ClassMatch(sv);   // live overrides
 		{
 			// Walk the vessel's thrusters ONCE and classify each, instead of walking
 			// three named groups: that is what admits USER-defined engines (which had
-			// a bell but never a stream) and what keeps RCS out, both from the one
-			// shared definition rather than from a list repeated in four files.
+			// a bell but never a stream), from the one shared definition rather than
+			// from a list repeated in four files.
 			const DWORD n = sv->GetThrusterCount();
 			for (DWORD i = 0; i < n && prtStrN < PRT_MAX_STREAM; i++) {
 				THRUSTER_HANDLE th = sv->GetThrusterHandleByIndex(i);
 				if (!th) continue;
 				const int gi = OroThrusterGroupOf(sv, th);
-				if (gi < 0 || !g_fx.thr[gi].prtEnabled) continue;   // RCS, or group off
+				if (gi < 0) continue;
+				// Phase B: the block THIS thruster answers to - the SAME predicate as
+				// the count above, or the signature would churn.
+				int ovrSlot = -1;
+				const OroThrusterFx* pT = effPrt(sv, cIdx, faithful, i, gi, &ovrSlot);
+				if (!pT->prtEnabled) continue;
 				VECTOR3 pos, dir;
 				sv->GetThrusterRef(th, pos);
 				sv->GetThrusterDir(th, dir);
@@ -449,14 +779,31 @@ void OroModule::UpdateParticles(double simdt)
 				// cannot redefine a stream's position later, which is the other
 				// reason a slider change rebuilds.
 				const VECTOR3 flow = -dir;
-				const VECTOR3 src  = pos + flow * (double)g_fx.thr[gi].prtOffset;
+				const VECTOR3 src  = pos + flow * (double)pT->prtOffset;
+
+				// A non-live block gets its OWN spec through the same mapping AND its
+				// own texture: a cached class bakes per group and per OVERRIDE (the
+				// SRB motor's Contrail4 vs its group's Contrail1a - his report), a
+				// live override uses its per-thruster surface. Group texture as the
+				// honest fallback throughout, never NULL-for-stock by accident.
+				PARTICLESTREAMSPEC pssOvr;
+				PARTICLESTREAMSPEC* pss = &pssG[gi];
+				if (cIdx >= 0) {
+					const int cov = OroThr_CacheOvrSlot(cIdx, (int)i);
+					buildPss(pssOvr, *pT, cov >= 0 ? cacheTexOvr(cIdx, cov, gi)
+					                               : cacheTex(cIdx, gi));
+					pss = &pssOvr;
+				} else if (ovrSlot >= 0) {
+					buildPss(pssOvr, *pT, hTexOvrS[ovrSlot] ? hTexOvrS[ovrSlot] : hTexG[gi]);
+					pss = &pssOvr;
+				}
 
 				PrtStream& e = prtStr[prtStrN];
 				e.hV  = stack[s];
 				e.th  = th;
 				// AddExhaustStream, not AddParticleStream (finding 2): the core drives
 				// the level from the thruster itself, so we own no level pointer.
-				e.h   = sv->AddExhaustStream(th, src, &pssG[gi]);
+				e.h   = sv->AddExhaustStream(th, src, pss);
 				if (!e.h) continue;                // streams disabled in the Launchpad
 				prtStrN++;
 				made++;
@@ -528,6 +875,14 @@ void OroModule::ReleaseParticleTex()
 {
 	for (int gi = 0; gi < ORO_THR_N; gi++)
 		if (hPrtTex[gi]) { oapiDestroySurface(hPrtTex[gi]); hPrtTex[gi] = NULL; }
+	for (int s = 0; s < ORO_THR_OVR_MAX; s++)
+		if (hPrtTexOvr[s]) { oapiDestroySurface(hPrtTexOvr[s]); hPrtTexOvr[s] = NULL; }
+	for (int ci = 0; ci < ORO_THR_CACHE_MAX; ci++)
+		for (int gi = 0; gi < ORO_THR_N; gi++)
+			if (hPrtTexC[ci][gi]) { oapiDestroySurface(hPrtTexC[ci][gi]); hPrtTexC[ci][gi] = NULL; }
+	for (int ci = 0; ci < ORO_THR_CACHE_MAX; ci++)
+		for (int s = 0; s < ORO_THR_OVR_MAX; s++)
+			if (hPrtTexCO[ci][s]) { oapiDestroySurface(hPrtTexCO[ci][s]); hPrtTexCO[ci][s] = NULL; }
 	prtTexMode  = false;
 	prtTexTried = false;
 }

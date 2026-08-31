@@ -1,5 +1,5 @@
 diff --git a/OVP/D3D9Client/D3D9Client.cpp b/OVP/D3D9Client/D3D9Client.cpp
-index f9c5ff7..cff7183 100644
+index f9c5ff7..c4742d0 100644
 --- a/OVP/D3D9Client/D3D9Client.cpp
 +++ b/OVP/D3D9Client/D3D9Client.cpp
 @@ -292,7 +292,10 @@ D3D9Client::D3D9Client (HINSTANCE hInstance) :
@@ -14,7 +14,37 @@ index f9c5ff7..cff7183 100644
  
  {
  }
-@@ -1934,6 +1937,24 @@ void D3D9Client::clbkRender2DPanel (SURFHANDLE *hSurf, MESHHANDLE hMesh, MATRIX3
+@@ -867,6 +870,9 @@ void D3D9Client::clbkCloseSession(bool fastclose)
+ 	SAFE_DELETE(scene);
+ 	LogAlw("============== Deleting Mesh Manager ============");
+ 	SAFE_DELETE(meshmgr);
++	// ORO patch (h) part 2: the rain-glass store dies with the mesh manager - template
++	// handles recycle across sessions, and a stale entry could match the wrong mesh.
++	{ extern void RainGlassClearStore(); RainGlassClearStore(); }
+ 	WriteLog("[Session Closed. Scene deleted.]");
+ 	
+ }
+@@ -1449,6 +1455,19 @@ void D3D9Client::clbkStoreMeshPersistent(MESHHANDLE hMesh, const char *fname)
+ 
+ 	if (hMesh==NULL) return;
+ 
++	// ORO patch (h) part 2: this callback is the ONE place the client is told a mesh's
++	// FILENAME, so it is where the author's `RAIN 1` window declarations are read from
++	// the file. See RainGlassStoreScan in Mesh.cpp; instances inherit at construction.
++	// ⚠️ BEFORE StoreMesh, NOT AFTER: StoreMesh is what CONSTRUCTS the stored template
++	// D3D9Mesh, and its constructor is the map lookup - a scan placed below it fills
++	// the store one call too late, and every instance then inherits an empty list.
++	// That exact bug shipped for one fly round on 2026-08-26: the scan logged its
++	// groups, the store was full, and no pane ever rendered.
++	{
++		extern void RainGlassStoreScan(MESHHANDLE hMesh, const char* fname);
++		if (fname) RainGlassStoreScan(hMesh, fname);
++	}
++
+ 	int idx = meshmgr->StoreMesh(hMesh, fname);
+ }
+ 
+@@ -1934,6 +1953,24 @@ void D3D9Client::clbkRender2DPanel (SURFHANDLE *hSurf, MESHHANDLE hMesh, MATRIX3
  {
  	_TRACE;
  
@@ -39,7 +69,7 @@ index f9c5ff7..cff7183 100644
  	SURFHANDLE surf = NULL;
  	DWORD ngrp = oapiMeshGroupCount(hMesh);
  
-@@ -1981,6 +2002,40 @@ void D3D9Client::clbkRender2DPanel (SURFHANDLE *hSurf, MESHHANDLE hMesh, MATRIX3
+@@ -1981,6 +2018,40 @@ void D3D9Client::clbkRender2DPanel (SURFHANDLE *hSurf, MESHHANDLE hMesh, MATRIX3
  	clbkRender2DPanel (hSurf, hMesh, T, 1.0f, additive);
  }
  
@@ -80,7 +110,7 @@ index f9c5ff7..cff7183 100644
  // =======================================================================
  
  DWORD D3D9Client::clbkGetDeviceColour (BYTE r, BYTE g, BYTE b)
-@@ -2195,8 +2250,18 @@ SURFHANDLE D3D9Client::clbkLoadSurface (const char *fname, DWORD attrib, bool bP
+@@ -2195,8 +2266,18 @@ SURFHANDLE D3D9Client::clbkLoadSurface (const char *fname, DWORD attrib, bool bP
  		}
  		*/
  	}
@@ -101,7 +131,7 @@ index f9c5ff7..cff7183 100644
  }
  
  // ==============================================================
-@@ -2305,6 +2370,9 @@ bool D3D9Client::clbkReleaseSurface(SURFHANDLE surf)
+@@ -2305,6 +2386,9 @@ bool D3D9Client::clbkReleaseSurface(SURFHANDLE surf)
  	{
  		if (SurfaceCatalog.count(SURFACE(surf)))
  		{
@@ -111,7 +141,7 @@ index f9c5ff7..cff7183 100644
  			delete SURFACE(surf);
  			return true;
  		}
-@@ -2761,8 +2829,14 @@ void D3D9Client::MakeRenderProcCall(Sketchpad *pSkp, DWORD id, LPD3DXMATRIX pV,
+@@ -2761,8 +2845,14 @@ void D3D9Client::MakeRenderProcCall(Sketchpad *pSkp, DWORD id, LPD3DXMATRIX pV,
  			pSkp2->LoadDefaults();
  			if (id == RENDERPROC_EXTERIOR || id == RENDERPROC_PLANETARIUM) {
  				pSkp2->SetViewMode(Sketchpad::USER);
@@ -181,11 +211,121 @@ index 7efe1a1..0894398 100644
  }; // class D3D9Client
  
  
+diff --git a/OVP/D3D9Client/D3D9Client.rc b/OVP/D3D9Client/D3D9Client.rc
+index 29c30be..4252460 100644
+--- a/OVP/D3D9Client/D3D9Client.rc
++++ b/OVP/D3D9Client/D3D9Client.rc
+@@ -217,7 +217,7 @@ FONT 8, "Ms Shell Dlg"
+ 
+ 
+ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
+-IDD_D3D9SETUP DIALOGEX 0, 0, 545, 378
++IDD_D3D9SETUP DIALOGEX 0, 0, 545, 420
+ STYLE DS_MODALFRAME | DS_SETFONT | WS_CAPTION | WS_POPUP | WS_SYSMENU
+ CAPTION "D3D9Client Advanced Setup"
+ FONT 8, "MS Sans Serif", 0, 0, 0
+@@ -243,14 +243,14 @@ FONT 8, "MS Sans Serif", 0, 0, 0
+     AUTOCHECKBOX    "Enable cloud normal maps", IDC_CLOUDNORM, 20, 305, 99, 8, 0, WS_EX_LEFT
+     AUTOCHECKBOX    "Enable GDI Overlay", IDC_GDIOVERLAY, 20, 318, 79, 8, 0, WS_EX_LEFT
+     AUTOCHECKBOX    "Enable absolute animation handling", IDC_ABSANIM, 20, 331, 127, 8, 0, WS_EX_LEFT
+-    AUTOCHECKBOX    "Enable terrain flattening", IDC_FLATS, 370, 286, 90, 8, 0, WS_EX_LEFT
++    AUTOCHECKBOX    "Enable terrain flattening", IDC_FLATS, 370, 363, 90, 8, 0, WS_EX_LEFT
+     AUTOCHECKBOX    "Enable advanced texture maps", IDC_NORMALMAPS, 20, 252, 114, 8, 0, WS_EX_LEFT
+     AUTOCHECKBOX    "Enable improved glass shading", IDC_GLASSSHADE, 20, 265, 113, 8, 0, WS_EX_LEFT
+     AUTOCHECKBOX    "Disable near clip plane compatibility mode", IDC_NEARPLANE, 20, 279, 147, 8, 0, WS_EX_LEFT
+     CONTROL         "", IDC_LODBIAS, TRACKBAR_CLASS, WS_TABSTOP | TBS_AUTOTICKS | TBS_TOP, 256, 147, 95, 20, WS_EX_LEFT
+     CONTROL         "", IDC_MICROBIAS, TRACKBAR_CLASS, WS_TABSTOP | TBS_AUTOTICKS | TBS_TOP, 435, 222, 95, 20, WS_EX_LEFT
+-    PUSHBUTTON      "D3D9Client Credits", IDC_CREDITS, 5, 360, 80, 14, BS_FLAT, WS_EX_LEFT
+-    PUSHBUTTON      "Create symbolic links", IDC_SYMBOLIC, 95, 360, 85, 14, BS_FLAT, WS_EX_LEFT
++    PUSHBUTTON      "D3D9Client Credits", IDC_CREDITS, 5, 402, 80, 14, BS_FLAT, WS_EX_LEFT
++    PUSHBUTTON      "Create symbolic links", IDC_SYMBOLIC, 95, 402, 85, 14, BS_FLAT, WS_EX_LEFT
+     COMBOBOX        IDC_FONT, 270, 23, 80, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+     COMBOBOX        IDC_DEBUG, 270, 65, 80, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+     COMBOBOX        IDC_MIPMAPS, 263, 200, 91, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+@@ -268,7 +268,7 @@ FONT 8, "MS Sans Serif", 0, 0, 0
+     COMBOBOX        IDC_ARCHIVE, 85, 60, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+     COMBOBOX        IDC_CAMMODE, 440, 106, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+     COMBOBOX        IDC_ENVFACES, 440, 122, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+-    DEFPUSHBUTTON   "OK", IDOK, 460, 355, 75, 19, 0, WS_EX_LEFT
++    DEFPUSHBUTTON   "OK", IDOK, 460, 397, 75, 19, 0, WS_EX_LEFT
+     GROUPBOX        "Surface texture load options", IDC_STATIC, 5, 5, 175, 75, 0, WS_EX_LEFT
+     GROUPBOX        "SketchPad settings", IDC_STATIC, 190, 5, 170, 40, 0, WS_EX_LEFT
+     LTEXT           "Max. load frequency [Hz]:", IDC_STATIC, 26, 29, 85, 8, SS_LEFT, WS_EX_LEFT
+@@ -304,12 +304,23 @@ FONT 8, "MS Sans Serif", 0, 0, 0
+     LTEXT           "Texture Bias", IDC_STATIC, 201, 153, 40, 8, SS_LEFT, WS_EX_LEFT
+     LTEXT           "Mesh resolution", IDC_STATIC, 200, 172, 50, 8, SS_LEFT, WS_EX_LEFT
+     AUTOCHECKBOX    "Enable debug break", IDC_BREAK, 200, 99, 80, 8, 0, WS_EX_LEFT
+-    AUTOCHECKBOX    "Enable sun glare", IDC_ESUNGLARE, 370, 274, 69, 8, 0, WS_EX_LEFT
+-    AUTOCHECKBOX    "Enable local lights glare", IDC_ELIGHTSGLARE, 370, 299, 90, 8, NOT WS_VISIBLE | WS_DISABLED, WS_EX_LEFT
+-    AUTOCHECKBOX    "Enable dynamic ambient light", IDC_EIRRAD, 370, 262, 107, 8, 0, WS_EX_LEFT
++    AUTOCHECKBOX    "Enable sun glare", IDC_ESUNGLARE, 370, 366, 69, 8, 0, WS_EX_LEFT
++    AUTOCHECKBOX    "Enable local lights glare", IDC_ELIGHTSGLARE, 370, 356, 90, 8, NOT WS_VISIBLE | WS_DISABLED, WS_EX_LEFT
++    AUTOCHECKBOX    "Enable dynamic ambient light", IDC_EIRRAD, 370, 354, 107, 8, 0, WS_EX_LEFT
+     COMBOBOX        IDC_EARTHVISCFG, 85, 212, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+     LTEXT           "Earth visual config", IDC_STATIC, 17, 215, 59, 9, SS_LEFT, WS_EX_LEFT
+-    AUTOCHECKBOX    "Enable shader cache for faster startup", IDC_ESCACHE, 370, 250, 136, 8, 0, WS_EX_LEFT
++    AUTOCHECKBOX    "Enable shader cache for faster startup", IDC_ESCACHE, 370, 342, 136, 8, 0, WS_EX_LEFT
++    GROUPBOX        "Particle lighting (ORO)", IDC_STATIC, 371, 250, 169, 88, 0, WS_EX_LEFT
++    LTEXT           "Diffuse sun light", IDC_STATIC, 381, 265, 55, 8, SS_LEFT, WS_EX_LEFT
++    COMBOBOX        IDC_PRTLIGHT, 440, 262, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
++    LTEXT           "Shadow strength (diffuse)", IDC_STATIC, 381, 281, 82, 8, SS_LEFT, WS_EX_LEFT
++    CONTROL         "", IDC_PRTSHADOW, "msctls_trackbar32", WS_TABSTOP | TBS_HORZ | TBS_BOTH | TBS_NOTICKS, 464, 279, 68, 12, WS_EX_LEFT
++    LTEXT           "Dawn tint lead", IDC_STATIC, 381, 295, 82, 8, SS_LEFT, WS_EX_LEFT
++    CONTROL         "", IDC_PRTLEAD, "msctls_trackbar32", WS_TABSTOP | TBS_HORZ | TBS_BOTH | TBS_NOTICKS, 464, 293, 68, 12, WS_EX_LEFT
++    LTEXT           "Dawn tint depth", IDC_STATIC, 381, 309, 82, 8, SS_LEFT, WS_EX_LEFT
++    CONTROL         "", IDC_PRTSAT, "msctls_trackbar32", WS_TABSTOP | TBS_HORZ | TBS_BOTH | TBS_NOTICKS, 464, 307, 68, 12, WS_EX_LEFT
++    LTEXT           "Dawn tint bloom", IDC_STATIC, 381, 323, 82, 8, SS_LEFT, WS_EX_LEFT
++    CONTROL         "", IDC_PRTBLOOM, "msctls_trackbar32", WS_TABSTOP | TBS_HORZ | TBS_BOTH | TBS_NOTICKS, 464, 321, 68, 12, WS_EX_LEFT
+     AUTOCHECKBOX    "Enable increased atmosphere quality", IDC_EAQUALITY, 20, 344, 131, 8, 0, WS_EX_LEFT
+     COMBOBOX        IDC_MESHRES, 263, 170, 50, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+     COMBOBOX        IDC_TILECOUNT, 263, 185, 50, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+@@ -512,7 +523,7 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
+             VALUE "FileDescription", "Render engine plugin for Orbiter Space Flight Simulator"
+             VALUE "FileVersion", "30.7.0.0"
+             VALUE "InternalName", "D3D9Client"
+-            VALUE "LegalCopyright", "Copyright � 2010 - 2017"
++            VALUE "LegalCopyright", "Copyright � 2010 - 2017"
+             VALUE "OriginalFilename", "D3D9Client.dll"
+             VALUE "ProductName", "D3D9Client"
+             VALUE "ProductVersion", "30.7.0.0"
 diff --git a/OVP/D3D9Client/D3D9Config.cpp b/OVP/D3D9Client/D3D9Config.cpp
-index d867b73..d1709db 100644
+index d867b73..3f64995 100644
 --- a/OVP/D3D9Client/D3D9Config.cpp
 +++ b/OVP/D3D9Client/D3D9Config.cpp
-@@ -219,8 +219,142 @@ bool D3D9Config::ReadParams ()
+@@ -84,6 +84,12 @@ void D3D9Config::Reset ()
+ 	PresentLocation		= 1;
+ 	PlanetTileLoadFlags	= 0x3;
+ 	TerrainShadowing	= 2;
++	ParticleLight		= 2;			// ORO patch (x): brightness + colour by default
++	ParticleShadow		= 1.0;			// ORO patch (x): stock shadow strength by default
++	ParticleTintLead	= 0.10;			// ORO patch (x): the smoke runs ~6 deg of sun ahead of the hull
++	ParticleTintSat		= 1.6;			// ORO patch (x): dawn hue deepened (a grey medium washes tint out)
++	ParticleTintBloom	= 2.34;			// ORO patch (x): tinted overdrive into the bloom
++										// (all three: HIS settled slider positions, 2026-08-30 dawn ascent)
+ 	LabelDisplayFlags	= LABEL_DISPLAY_RECORD | LABEL_DISPLAY_REPLAY;
+ 	CloudMicro			= 1;
+ 	GDIOverlay			= 0;
+@@ -150,13 +156,18 @@ bool D3D9Config::ReadParams ()
+ 	if (oapiReadItem_float (hFile, (char*)"BumpMapAmplitude", d))		BumpAmp = max(0.1, min(10.0, d));
+ 	if (oapiReadItem_float (hFile, (char*)"PlanetGlow", d))			PlanetGlow = max(0.01, min(2.5, d));
+ 	if (oapiReadItem_int   (hFile, (char*)"EnvMapSize", i))			EnvMapSize = max(64, min(512, i));
+-	if (oapiReadItem_int   (hFile, (char*)"EnvMapMode", i))			EnvMapMode = max(0, min(2, i));
++	if (oapiReadItem_int   (hFile, (char*)"EnvMapMode", i))			EnvMapMode = max(0, min(3, i));	// ORO patch (v): 3 = Full Scene ORO (exp); stock's own clamp reads it as 2
+ 	if (oapiReadItem_int   (hFile, (char*)"EnvMapFaces", i))			EnvMapFaces = max(1, min(3, i));
+ 	if (oapiReadItem_int   (hFile, (char*)"ShadowMapMode", i))			ShadowMapMode = max(0, min(3, i));
+ 	if (oapiReadItem_int   (hFile, (char*)"ShadowMapFilter", i))	 	ShadowFilter = max(0, min(5, i));
+ 	if (oapiReadItem_int   (hFile, (char*)"ShadowMapSize", i))			ShadowMapSize = max(512, min(4096, i));
+ 	if (oapiReadItem_int   (hFile, (char*)"EnableGlass", i))			EnableGlass = max(0, min(1, i));
+ 	if (oapiReadItem_int   (hFile, (char*)"TerrainShadowing", i))		TerrainShadowing = max(0, min(2, i));
++	if (oapiReadItem_int   (hFile, (char*)"ParticleLight", i))			ParticleLight = max(0, min(2, i));
++	if (oapiReadItem_float (hFile, (char*)"ParticleShadow", d))			ParticleShadow = max(0.0, min(1.0, d));
++	if (oapiReadItem_float (hFile, (char*)"ParticleTintLead", d))		ParticleTintLead = max(0.0, min(0.2, d));
++	if (oapiReadItem_float (hFile, (char*)"ParticleTintSat", d))		ParticleTintSat = max(1.0, min(4.0, d));
++	if (oapiReadItem_float (hFile, (char*)"ParticleTintBloom", d))		ParticleTintBloom = max(1.0, min(3.0, d));
+ 	if (oapiReadItem_int   (hFile, (char*)"EnableMeshDbg", i))			EnableMeshDbg = max(0, min(1, i));
+ 	if (oapiReadItem_int   (hFile, (char*)"TileMipmaps", i))			TileMipmaps = max(0, min(2, i));
+ 	if (oapiReadItem_int   (hFile, (char*)"TextureMips", i))			TextureMips = max(0, min(1, i));
+@@ -219,8 +230,147 @@ bool D3D9Config::ReadParams ()
  }
  
  
@@ -246,6 +386,11 @@ index d867b73..d1709db 100644
 +	WP_INT("ShadowMapFilter", ShadowFilter);
 +	WP_INT("ShadowMapSize", ShadowMapSize);
 +	WP_INT("TerrainShadowing", TerrainShadowing);
++	WP_INT("ParticleLight", ParticleLight);
++	WP_FLT("ParticleShadow", ParticleShadow);
++	WP_FLT("ParticleTintLead", ParticleTintLead);
++	WP_FLT("ParticleTintSat", ParticleTintSat);
++	WP_FLT("ParticleTintBloom", ParticleTintBloom);
 +	WP_INT("EnableGlass", EnableGlass);
 +	WP_INT("EnableMeshDbg", EnableMeshDbg);
 +	WP_INT("TileMipmaps", TileMipmaps);
@@ -328,17 +473,64 @@ index d867b73..d1709db 100644
  	FILEHANDLE hFile = oapiOpenFile (cfgfile, FILE_OUT, ROOT);
  
  	oapiWriteItem_int   (hFile, (char*)"EnableDX12Wrapper", Enable9On12);
-@@ -303,4 +437,5 @@ void D3D9Config::WriteParams ()
+@@ -248,6 +398,11 @@ void D3D9Config::WriteParams ()
+ 	oapiWriteItem_int   (hFile, (char*)"ShadowMapFilter", ShadowFilter);
+ 	oapiWriteItem_int   (hFile, (char*)"ShadowMapSize", ShadowMapSize);
+ 	oapiWriteItem_int   (hFile, (char*)"TerrainShadowing", TerrainShadowing);
++	oapiWriteItem_int   (hFile, (char*)"ParticleLight", ParticleLight);
++	oapiWriteItem_float (hFile, (char*)"ParticleShadow", ParticleShadow);
++	oapiWriteItem_float (hFile, (char*)"ParticleTintLead", ParticleTintLead);
++	oapiWriteItem_float (hFile, (char*)"ParticleTintSat", ParticleTintSat);
++	oapiWriteItem_float (hFile, (char*)"ParticleTintBloom", ParticleTintBloom);
+ 	oapiWriteItem_int   (hFile, (char*)"EnableGlass", EnableGlass);
+ 	oapiWriteItem_int   (hFile, (char*)"EnableMeshDbg", EnableMeshDbg);
+ 	oapiWriteItem_int   (hFile, (char*)"TileMipmaps", TileMipmaps);
+@@ -303,4 +458,5 @@ void D3D9Config::WriteParams ()
  	oapiWriteItem_string(hFile, (char*)"EarthAtmoCfg", (char *)AtmoCfg["Earth"].c_str());
  
  	oapiCloseFile (hFile, FILE_OUT);
 +#endif
  }
+diff --git a/OVP/D3D9Client/D3D9Config.h b/OVP/D3D9Client/D3D9Config.h
+index c23be7f..6b5fd93 100644
+--- a/OVP/D3D9Client/D3D9Config.h
++++ b/OVP/D3D9Client/D3D9Config.h
+@@ -63,7 +63,7 @@ public:
+ 	int LightConfig;				///< Light emitter configuration
+ 	int NVPerfHUD;					///< ??? (0,1)
+ 	int EnvMapSize;					///< Environment map size (64...512)
+-	int EnvMapMode;					///< Environment map mode (0=disabled, 1=planet only, 2=full scene)
++	int EnvMapMode;					///< Environment map mode (0=disabled, 1=planet only, 2=full scene, 3=full scene ORO exp - patch (v))
+ 	int EnvMapFaces;				///< Number of environment map faces render per frame (1..6, default=1)
+ 	int EnableGlass;				///< Enable improved glass shading (Fresnel reflection)
+ 	int EnableMeshDbg;				///< Enable mesh debugger
+@@ -71,6 +71,11 @@ public:
+ 	int ShadowFilter;				///< Shadow Mapping Filter
+ 	int ShadowMapSize;				///< Shadow Map size
+ 	int TerrainShadowing;			///< Terrain Shadowing mode (0=None, 1=Stencil, 2=Projected, default=1)
++	int ParticleLight;				///< ORO patch (x): DIFFUSE particle sun lighting (0=Off/stock always-lit, 1=Brightness only, 2=Brightness+colour, default=2)
++	double ParticleShadow;			///< ORO patch (x): DIFFUSE particle ground-shadow strength 0..1 (0=no shadow, 1=stock, default=1)
++	double ParticleTintLead;		///< ORO patch (x): dawn-hue lead in sin-elevation, 0..0.20 (the smoke reads the sun this much HIGHER than it is, default=0.10)
++	double ParticleTintSat;			///< ORO patch (x): dawn-hue depth 1..4 (1 = the hull's own hue, default=1.6)
++	double ParticleTintBloom;		///< ORO patch (x): sunlit tinted overdrive 1..3 (brightens + blooms the tinted sun term, 1 = off, default=2.34)
+ 	int CustomCamMode;				///< Custom Camera Mode
+ 	int TileMipmaps;				///< Enable surface tile mipmaps
+ 	int ShaderDebug;				///< Shader Debug Logging enable flag (0=disabled, 1=enabled)
 diff --git a/OVP/D3D9Client/D3D9Effect.cpp b/OVP/D3D9Client/D3D9Effect.cpp
-index 8c40c0f..0717601 100644
+index 8c40c0f..e7f2b36 100644
 --- a/OVP/D3D9Client/D3D9Effect.cpp
 +++ b/OVP/D3D9Client/D3D9Effect.cpp
-@@ -92,6 +92,16 @@ D3DXHANDLE D3D9Effect::eFogColor = 0;	// Fog color input
+@@ -75,6 +75,9 @@ D3DXHANDLE D3D9Effect::eTex3 = 0;		// Tertiary texture
+ D3DXHANDLE D3D9Effect::eSpecMap = 0;
+ D3DXHANDLE D3D9Effect::eEmisMap = 0;
+ D3DXHANDLE D3D9Effect::eEnvMapA = 0;
++D3DXHANDLE D3D9Effect::eEnvBoxC = 0, D3D9Effect::eEnvBoxX = 0, D3D9Effect::eEnvBoxY = 0, D3D9Effect::eEnvBoxZ = 0, D3D9Effect::eEnvPrbP = 0;	// ORO patch (v)
++D3DXHANDLE D3D9Effect::ePlnMap = 0, D3D9Effect::ePlnCtl = 0, D3D9Effect::ePlnEq = 0;	// ORO patch (v) part 2
++D3DXHANDLE D3D9Effect::ePShnMap = 0, D3D9Effect::ePShnLVP = 0, D3D9Effect::ePShnSHD = 0;	// ORO patch (w)
+ D3DXHANDLE D3D9Effect::eEnvMapB = 0;
+ D3DXHANDLE D3D9Effect::eReflMap = 0;
+ D3DXHANDLE D3D9Effect::eRghnMap = 0;
+@@ -92,6 +95,16 @@ D3DXHANDLE D3D9Effect::eFogColor = 0;	// Fog color input
  D3DXHANDLE D3D9Effect::eTexOff = 0;		// Surface tile texture offsets
  D3DXHANDLE D3D9Effect::eTime = 0;		// FLOAT Simulation elapsed time
  D3DXHANDLE D3D9Effect::eMix = 0;		// FLOAT Auxiliary factor/multiplier
@@ -355,7 +547,7 @@ index 8c40c0f..0717601 100644
  D3DXHANDLE D3D9Effect::eFogDensity = 0;	// 
  D3DXHANDLE D3D9Effect::ePointScale = 0;
  D3DXHANDLE D3D9Effect::eSHD = 0;
-@@ -445,6 +455,16 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
+@@ -445,6 +458,16 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
  	eEast		  = FX->GetParameterByName(0,"gEast");
  	ePointScale   = FX->GetParameterByName(0,"gPointScale");
  	eMix		  = FX->GetParameterByName(0,"gMix");
@@ -372,8 +564,26 @@ index 8c40c0f..0717601 100644
  	eTime		  = FX->GetParameterByName(0,"gTime");
  	eMtrlAlpha	  = FX->GetParameterByName(0,"gMtrlAlpha");
  	eGlowConst    = FX->GetParameterByName(0,"gGlowConst");
+@@ -469,6 +492,17 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
+ 	eSpecMap	  = FX->GetParameterByName(0,"gSpecMap");
+ 	eEmisMap	  = FX->GetParameterByName(0,"gEmisMap");
+ 	eEnvMapA	  = FX->GetParameterByName(0,"gEnvMapA");
++	eEnvBoxC	  = FX->GetParameterByName(0,"gEnvBoxC");	// ORO patch (v)
++	eEnvBoxX	  = FX->GetParameterByName(0,"gEnvBoxX");
++	eEnvBoxY	  = FX->GetParameterByName(0,"gEnvBoxY");
++	eEnvBoxZ	  = FX->GetParameterByName(0,"gEnvBoxZ");
++	eEnvPrbP	  = FX->GetParameterByName(0,"gEnvPrbP");
++	ePlnMap		  = FX->GetParameterByName(0,"gPlnMap");	// ORO patch (v) part 2
++	ePlnCtl		  = FX->GetParameterByName(0,"gPlnCtl");
++	ePlnEq		  = FX->GetParameterByName(0,"gPlnEq");
++	ePShnMap	  = FX->GetParameterByName(0,"gPShnMap");	// ORO patch (w)
++	ePShnLVP	  = FX->GetParameterByName(0,"gPShnLVP");
++	ePShnSHD	  = FX->GetParameterByName(0,"gPShnSHD");
+ 	eEnvMapB	  = FX->GetParameterByName(0,"gEnvMapB");
+ 	eReflMap	  = FX->GetParameterByName(0,"gReflMap");
+ 	eRghnMap	  = FX->GetParameterByName(0,"gRghnMap");
 diff --git a/OVP/D3D9Client/D3D9Effect.h b/OVP/D3D9Client/D3D9Effect.h
-index c9213f3..fce43d6 100644
+index c9213f3..a5cc394 100644
 --- a/OVP/D3D9Client/D3D9Effect.h
 +++ b/OVP/D3D9Client/D3D9Effect.h
 @@ -142,6 +142,16 @@ public:
@@ -393,6 +603,16 @@ index c9213f3..fce43d6 100644
  	static D3DXHANDLE   eColor;        ///< Auxiliary color input
  	static D3DXHANDLE   eFogColor;     ///< Fog color input
  	static D3DXHANDLE   eTexOff;       ///< Surface tile texture offsets
+@@ -172,6 +182,9 @@ public:
+ 	static D3DXHANDLE	eSpecMap;
+ 	static D3DXHANDLE	eEmisMap;
+ 	static D3DXHANDLE	eEnvMapA;
++	static D3DXHANDLE	eEnvBoxC, eEnvBoxX, eEnvBoxY, eEnvBoxZ, eEnvPrbP;	// ORO patch (v)
++	static D3DXHANDLE	ePlnMap, ePlnCtl, ePlnEq;	// ORO patch (v) part 2: planar mirror
++	static D3DXHANDLE	ePShnMap, ePShnLVP, ePShnSHD;	// ORO patch (w): planet-shine shadows
+ 	static D3DXHANDLE	eEnvMapB;
+ 	static D3DXHANDLE	eReflMap;
+ 	static D3DXHANDLE	eMetlMap;
 diff --git a/OVP/D3D9Client/D3D9Pad.cpp b/OVP/D3D9Client/D3D9Pad.cpp
 index e166409..1c68321 100644
 --- a/OVP/D3D9Client/D3D9Pad.cpp
@@ -738,11 +958,725 @@ index 0f9904d..2011f36 100644
  DWORD BuildDate()
  {
  	const char *months[] = { "???","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+diff --git a/OVP/D3D9Client/D3D9Util.h b/OVP/D3D9Client/D3D9Util.h
+index 8dba830..64d8255 100644
+--- a/OVP/D3D9Client/D3D9Util.h
++++ b/OVP/D3D9Client/D3D9Util.h
+@@ -568,6 +568,23 @@ inline float D3DVAL (double x)
+ 
+ int fgets2(char *buf, int cmax, FILE *file, DWORD param=0);
+ 
++// ORO TEMP DIAGNOSTIC (hang trace): open-append-close per line, so every line
++// survives a hang or a kill. Remove after the exp-mode load hang is found.
++inline void OroHangTrace(const char* fmt, ...)
++{
++	static int n = 0;
++	if (n >= 4000) return;
++	n++;
++	FILE* f = NULL;
++	if (fopen_s(&f, "ORO_hang_trace.log", "a") != 0 || !f) return;
++	va_list ap; va_start(ap, fmt);
++	vfprintf(f, fmt, ap);
++	va_end(ap);
++	fprintf(f, "\n");
++	fclose(f);
++}
++
++
+ float D3DXVec3Angle(D3DXVECTOR3 a, D3DXVECTOR3 b);
+ D3DXVECTOR3 Perpendicular(D3DXVECTOR3 *a);
+ 
+diff --git a/OVP/D3D9Client/MaterialMgr.cpp b/OVP/D3D9Client/MaterialMgr.cpp
+index d04e93f..c2fbf71 100644
+--- a/OVP/D3D9Client/MaterialMgr.cpp
++++ b/OVP/D3D9Client/MaterialMgr.cpp
+@@ -9,6 +9,7 @@
+ #include "D3D9Surface.h"
+ #include "OapiExtension.h"
+ #include "vVessel.h"
++#include "D3D9Config.h"	// ORO patch (v): EnvMapMode gates the experimental file
+ 
+ 
+ 
+@@ -19,9 +20,17 @@ MatMgr::MatMgr(class vObject *v, class D3D9Client *_gc)
+ 	gc = _gc;
+ 	vObj = v;
+ 
+-	pCamera = new ENVCAMREC[1];
++	// ORO patch (v): allocate all probe slots up front; only camera 0 exists until a
++	// config declares more (nCameras tracks the highest index used + 1).
++	pCamera = new ENVCAMREC[MAX_ENVCAM];
++	nCameras = 1;
+ 
+-	ResetCamera(0);
++	for (DWORD i = 0; i < MAX_ENVCAM; i++) ResetCamera(i);
++
++	// ORO patch (v) part 2: the planar-mirror slots
++	pPlane = new ENVPLNREC[MAX_ENVPLN];
++	nPlanes = 0;
++	for (DWORD i = 0; i < MAX_ENVPLN; i++) ResetPlane(i);
+ 
+ 	Shaders.push_back(SHADER("PBR-Old",SHADER_NULL));
+ 	Shaders.push_back(SHADER("Metalness", SHADER_METALNESS));
+@@ -35,10 +44,18 @@ MatMgr::~MatMgr()
+ 	MeshConfig.clear();
+ 
+ 	if (pCamera) {
+-		if (pCamera[0].pOmitAttc) delete[] pCamera[0].pOmitAttc;
+-		if (pCamera[0].pOmitDock) delete[] pCamera[0].pOmitDock;
++		for (DWORD i = 0; i < MAX_ENVCAM; i++) {   // ORO patch (v): every slot
++			if (pCamera[i].pOmitAttc) delete[] pCamera[i].pOmitAttc;
++			if (pCamera[i].pOmitDock) delete[] pCamera[i].pOmitDock;
++			if (pCamera[i].pGrpRng)   delete[] pCamera[i].pGrpRng;
++		}
+ 		delete[] pCamera;
+ 	}
++	if (pPlane) {
++		for (DWORD i = 0; i < MAX_ENVPLN; i++)
++			if (pPlane[i].pGrpRng) delete[] pPlane[i].pGrpRng;
++		delete[] pPlane;
++	}
+ }
+ 
+ 
+@@ -46,7 +63,8 @@ MatMgr::~MatMgr()
+ //
+ ENVCAMREC * MatMgr::GetCamera(DWORD idx)
+ {
+-	return &pCamera[0];
++	// ORO patch (v): the index is honoured now (it used to pin to 0).
++	return &pCamera[(idx < MAX_ENVCAM) ? idx : 0];
+ }
+ 
+ 
+@@ -54,7 +72,37 @@ ENVCAMREC * MatMgr::GetCamera(DWORD idx)
+ //
+ DWORD MatMgr::CameraCount()
+ {
+-	return 1;
++	return nCameras;   // ORO patch (v): was a hardcoded 1
++}
++
++
++// ===========================================================================================
++//
++ENVPLNREC * MatMgr::GetPlane(DWORD idx)
++{
++	return &pPlane[(idx < MAX_ENVPLN) ? idx : 0];   // ORO patch (v) part 2
++}
++
++
++// ===========================================================================================
++//
++DWORD MatMgr::PlaneCount()
++{
++	return nPlanes;
++}
++
++
++// ===========================================================================================
++//
++void MatMgr::ResetPlane(DWORD idx)
++{
++	pPlane[idx].lPos = D3DXVECTOR3(0, 0, 0);
++	pPlane[idx].lNrm = D3DXVECTOR3(0, 1, 0);
++	pPlane[idx].refMesh = -1;
++	pPlane[idx].refGrp = -1;
++	pPlane[idx].nGrpRng = 0;
++	pPlane[idx].pGrpRng = NULL;
++	pPlane[idx].rDist = 5.0f;
+ }
+ 
+ 
+@@ -69,6 +117,11 @@ void MatMgr::ResetCamera(DWORD idx)
+ 	pCamera[idx].flags = ENVCAM_OMIT_ATTC;
+ 	pCamera[idx].pOmitAttc = NULL;
+ 	pCamera[idx].pOmitDock = NULL;
++	pCamera[idx].nGrpRng = 0;      // ORO patch (v)
++	pCamera[idx].pGrpRng = NULL;
++	pCamera[idx].bBox = false;
++	pCamera[idx].bxC = D3DXVECTOR3(0, 0, 0);
++	pCamera[idx].bxE = D3DXVECTOR3(0, 0, 0);
+ }
+ 	
+ 
+@@ -394,68 +447,206 @@ bool MatMgr::SaveConfiguration()
+ 
+ // ===========================================================================================
+ //
++// ORO patch (v): reflections read TWO files. <class>_ecam.cfg is the file stock
++// D3D9 also opens - parsed with STOCK grammar and stock semantics in EVERY mode,
++// so its content means exactly what it always meant, on either client.
++// <class>_ecam_oro.cfg is the EXPERIMENTAL sidecar (indexed probes, GROUPS, BOX,
++// planar mirrors): stock never builds that filename, so nothing in it can reach
++// a stock client - and this client reads it only in "Full Scene ORO (exp)".
+ bool MatMgr::LoadCameraConfig()
+ {
+ 	_TRACE;
+ 
+-	char cbuf[256];
+ 	char path[256];
+ 	char classname[256];
+ 
+ 	OBJHANDLE hObj = vObj->GetObjectA();
+ 
+-	if (oapiGetObjectType(hObj)!=OBJTP_VESSEL) return false; 
++	if (oapiGetObjectType(hObj)!=OBJTP_VESSEL) return false;
+ 
+ 	const char *cfgdir = OapiExtension::GetConfigDir();
+-	
++
+ 	VESSEL *vessel = oapiGetVesselInterface(hObj);
+ 	strcpy_s(classname, 256, vessel->GetClassNameA());
+ 	parse_vessel_classname(classname);
+ 
+-	AutoFile file;
++	OroHangTrace("lcc enter %s mode=%d", classname, Config->EnvMapMode);
++	bool bAny = false;
+ 
+ 	sprintf_s(path, 256, "%sGC\\%s_ecam.cfg", cfgdir, classname);
+-	fopen_s(&file.pFile, path, "r");	
+-	
+-	if (file.IsInvalid()) return true;
++	if (ParseCameraFile(path, vessel, false)) bAny = true;
++
++	if (Config->EnvMapMode >= 3) {
++		sprintf_s(path, 256, "%sGC\\%s_ecam_oro.cfg", cfgdir, classname);
++		if (ParseCameraFile(path, vessel, true)) bAny = true;
++	}
++
++	OroHangTrace("lcc exit %s cams=%u planes=%u", classname, nCameras, nPlanes);
++	// ORO patch (v): the breadcrumb that separates "config never parsed" from
++	// every failure downstream of it.
++	if (bAny) {
++		DWORD ranges = 0;
++		for (DWORD i = 0; i < nCameras; i++) ranges += pCamera[i].nGrpRng;
++		oapiWriteLogV("D3D9: env cameras (%s): %u probe(s), %u group range(s), %u plane(s)%s.",
++		              classname, nCameras, ranges, nPlanes,
++		              (Config->EnvMapMode >= 3) ? " [exp]" : "");
++	}
++
++	return true;
++}
++
++// bExt=false: STOCK grammar, stock semantics byte for byte (BEGIN_CAMERA forces
++// camera 0 and clears its flags; ORO keywords fall to "Invalid Line" exactly as
++// stock would say). bExt=true: the ORO grammar on top - indexed cameras, GROUPS,
++// BOX, and the planar-mirror blocks.
++bool MatMgr::ParseCameraFile(const char* path, class VESSEL* vessel, bool bExt)
++{
++	char cbuf[256];
++
++	AutoFile file;
++
++	fopen_s(&file.pFile, path, "r");
++
++	if (file.IsInvalid()) return false;
+ 
+ 	LogAlw("Reading a camera configuration file for a vessel %s (%s)", vessel->GetName(), vessel->GetClassNameA());
+-	
++	OroHangTrace("parse enter %s ext=%d", path, (int)bExt);
++	int traceLn = 0;
++
+ 	DWORD iattc = 0;
+ 	DWORD idock = 0;
++	DWORD igrp  = 0;    // ORO patch (v): group-range pairs accumulated for this camera
+ 	DWORD camera = 0;
++	int   plane  = -1;   // ORO patch (v) part 2: >= 0 while inside a PLANE block
++	WORD  grplist[128];
+ 
+ 	BYTE attclist[256];
+ 	BYTE docklist[256];
+ 
+ 	while(fgets2(cbuf, 256, file.pFile, 0x08)>=0) 
+ 	{	
++		if ((++traceLn % 500) == 0) OroHangTrace("parse SPINNING? %s line %d", path, traceLn);
+ 		float a, b, c;
+ 		DWORD id;
++		// ORO patch (v): fgets2 cuts ';' comments and returns the EMPTY remainder as a
++		// valid line - skip it, or every comment/blank line spams "Invalid Line"
++		if (!cbuf[0]) continue;
+ 
+ 		// --------------------------------------------------------------------------------------------
+ 		if (!strncmp(cbuf, "END_CAMERA", 10)) {
+ 
+ 			if (iattc) pCamera[camera].pOmitAttc = new BYTE[iattc];
+ 			if (idock) pCamera[camera].pOmitDock = new BYTE[idock];
+-			
+-			if (iattc) memcpy(pCamera[camera].pOmitAttc, attclist, iattc); 
+-			if (idock) memcpy(pCamera[camera].pOmitDock, docklist, idock); 
+-			
++
++			if (iattc) memcpy(pCamera[camera].pOmitAttc, attclist, iattc);
++			if (idock) memcpy(pCamera[camera].pOmitDock, docklist, idock);
++
+ 			pCamera[camera].nAttc = WORD(iattc);
+ 			pCamera[camera].nDock = WORD(idock);
+-			
++
++			// ORO patch (v): the group ranges that sample this probe
++			if (igrp) {
++				pCamera[camera].pGrpRng = new WORD[igrp];
++				memcpy(pCamera[camera].pGrpRng, grplist, igrp * sizeof(WORD));
++			}
++			pCamera[camera].nGrpRng = WORD(igrp / 2);
++
+ 			continue;
+ 		}
+-		
++
+ 		// --------------------------------------------------------------------------------------------
+ 		if (!strncmp(cbuf, "BEGIN_CAMERA", 12)) {
+ 			if (sscanf_s(cbuf, "BEGIN_CAMERA %u", &camera)!=1) LogErr("Invalid Line in (%s): %s", path, cbuf);
+-			camera = 0; // For now just one camera
++			if (!bExt) camera = 0; // For now just one camera  (STOCK semantics, verbatim)
++			else {
++				// ORO patch (v): the index is real here ("For now just one camera"
++				// un-parked). Clamped - out of range used to write PAST the array.
++				if (camera >= MAX_ENVCAM) { LogErr("BEGIN_CAMERA %u out of range in (%s)", camera, path); camera = MAX_ENVCAM - 1; }
++				plane = -1;   // a camera block ends any plane block
++				// per-block accumulators reset HERE - with one camera they happened to
++				// start at zero; with several, a second block inherits the first's.
++				iattc = 0; idock = 0; igrp = 0;
++			}
++			if (camera + 1 > nCameras) nCameras = camera + 1;
+ 			pCamera[camera].flags = 0; // Clear default flags
+ 			continue;
+ 		}
+ 
++		// --------------------------------------------------------------------------------------------
++		// ORO patch (v): "BOX cx cy cz hx hy hz" - the proxy volume (vessel-local centre
++		// + half-extents) for box-projected sampling of this probe. Without it the probe
++		// samples by raw direction, exactly as before - and a probe placed INSIDE the
++		// geometry it reflects then paints that geometry magnified, which is the
++		// artifact the box exists to cure.
++		if (bExt && !strncmp(cbuf, "BOX", 3)) {
++			float hx, hy, hz;
++			if (sscanf_s(cbuf, "BOX %g %g %g %g %g %g", &a, &b, &c, &hx, &hy, &hz) != 6) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
++			pCamera[camera].bxC = D3DXVECTOR3(a, b, c);
++			pCamera[camera].bxE = D3DXVECTOR3(hx, hy, hz);
++			pCamera[camera].bBox = true;
++			continue;
++		}
++
++		// --------------------------------------------------------------------------------------------
++		// ORO patch (v): "GROUPS a b" - mesh groups a..b (inclusive) sample this probe.
++		// Repeatable; applies to every mesh of the vessel (single-mesh hulls in practice).
++		if (bExt && !strncmp(cbuf, "GROUPS", 6)) {
++			DWORD ga, gb;
++			if (sscanf_s(cbuf, "GROUPS %u %u", &ga, &gb) != 2) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
++			if (igrp + 2 <= 128) { grplist[igrp++] = WORD(ga); grplist[igrp++] = WORD(gb); }
++			continue;
++		}
++
++		// --------------------------------------------------------------------------------------------
++		// ORO patch (v) part 2: PLANAR REFLECTION surfaces. BEGIN_PLANE n / POS x y z /
++		// NRM x y z / GRPREF mesh group / GROUPS a b / END_PLANE. POS and NRM are in the
++		// mesh BASE pose; when GRPREF names an animated group, the plane rides that
++		// group's transform - an opening bay door carries its mirror with it.
++		if (bExt && !strncmp(cbuf, "BEGIN_PLANE", 11)) {
++			DWORD pidx = 0;
++			if (sscanf_s(cbuf, "BEGIN_PLANE %u", &pidx) != 1) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
++			if (pidx >= MAX_ENVPLN) { LogErr("BEGIN_PLANE %u out of range in (%s)", pidx, path); pidx = MAX_ENVPLN - 1; }
++			plane = int(pidx);
++			if (pidx + 1 > nPlanes) nPlanes = pidx + 1;
++			igrp = 0;
++			continue;
++		}
++		if (bExt && !strncmp(cbuf, "END_PLANE", 9)) {
++			if (plane >= 0 && igrp) {
++				pPlane[plane].pGrpRng = new WORD[igrp];
++				memcpy(pPlane[plane].pGrpRng, grplist, igrp * sizeof(WORD));
++				pPlane[plane].nGrpRng = WORD(igrp / 2);
++			}
++			plane = -1; igrp = 0;
++			continue;
++		}
++		if (plane >= 0 && !strncmp(cbuf, "POS", 3)) {
++			if (sscanf_s(cbuf, "POS %g %g %g", &a, &b, &c) != 3) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
++			pPlane[plane].lPos = D3DXVECTOR3(a, b, c);
++			continue;
++		}
++		if (plane >= 0 && !strncmp(cbuf, "NRM", 3)) {
++			if (sscanf_s(cbuf, "NRM %g %g %g", &a, &b, &c) != 3) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
++			D3DXVECTOR3 n(a, b, c);
++			D3DXVec3Normalize(&n, &n);
++			pPlane[plane].lNrm = n;
++			continue;
++		}
++		if (plane >= 0 && !strncmp(cbuf, "RDIST", 5)) {
++			if (sscanf_s(cbuf, "RDIST %g", &a) != 1) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
++			// 0 = the FLAT mirror verbatim (the pixel's own screen position - the
++			// pre-warp behaviour, kept as an exact A/B); positive floors at 0.5 m
++			pPlane[plane].rDist = (a <= 0.01f) ? 0.0f : max(0.5f, a);
++			continue;
++		}
++		if (plane >= 0 && !strncmp(cbuf, "GRPREF", 6)) {
++			DWORD rm, rg;
++			if (sscanf_s(cbuf, "GRPREF %u %u", &rm, &rg) != 2) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
++			pPlane[plane].refMesh = int(rm);
++			pPlane[plane].refGrp  = int(rg);
++			continue;
++		}
++
+ 		// --------------------------------------------------------------------------------------------
+ 		if (!strncmp(cbuf, "LPOS", 4)) {
+ 			if (sscanf_s(cbuf, "LPOS %g %g %g", &a, &b, &c)!=3) LogErr("Invalid Line in (%s): %s", path, cbuf);
+@@ -505,6 +696,7 @@ bool MatMgr::LoadCameraConfig()
+ 		if (cbuf[0]!=';') LogErr("Invalid Line in (%s): %s", path, cbuf);
+ 	}
+ 
++	OroHangTrace("parse exit %s lines=%d", path, traceLn);
+ 	return true;
+ }
+ 
+diff --git a/OVP/D3D9Client/MaterialMgr.h b/OVP/D3D9Client/MaterialMgr.h
+index 0c24536..8bc531b 100644
+--- a/OVP/D3D9Client/MaterialMgr.h
++++ b/OVP/D3D9Client/MaterialMgr.h
+@@ -20,6 +20,15 @@
+ #define ENVCAM_OMIT_DOCKS		0x0002
+ #define ENVCAM_FOCUS			0x0004
+ 
++// ORO patch (v) 2026: MULTIPLE reflection probes per vessel. The data model always
++// allowed for them (BEGIN_CAMERA takes an index, GetCamera takes an index) but the
++// implementation was parked at one - "For now just one camera". Un-parked: up to
++// MAX_ENVCAM probes, each with its own position, flags and omit lists, and a list of
++// MESH GROUP ranges that sample it (GROUPS a b in the camera block). Groups not
++// claimed by any camera keep probe 0, so a config with no camera blocks renders
++// exactly as before.
++#define MAX_ENVCAM				4
++
+ 
+ /**
+  * \brief Storage structure to keep environmental camera information.
+@@ -28,12 +37,38 @@ struct ENVCAMREC {
+ 	D3DXVECTOR3		lPos;			///< Camera local position
+ 	float			near_clip;		///< Near clip-plane distance
+ 	DWORD			flags;			///< Camera flags
++	WORD			nGrpRng;		///< ORO patch (v): number of group ranges below
++	WORD *			pGrpRng;		///< ORO patch (v): (first,last) mesh-group index
++									///  pairs that sample THIS probe (all meshes)
++	bool			bBox;			///< ORO patch (v): box-projected sampling on
++	D3DXVECTOR3		bxC;			///< ... proxy box centre, vessel-local [m]
++	D3DXVECTOR3		bxE;			///< ... proxy box half-extents, vessel-local [m]
+ 	WORD			nAttc;			///< Number of attachments points in a list
+ 	WORD			nDock;			///< Number of docking ports in a list
+ 	BYTE *			pOmitAttc;		///< Omit attachments
+ 	BYTE *			pOmitDock;		///< Omit vessels in docking ports
+ };
+ 
++// ORO patch (v) part 2: a PLANAR REFLECTION surface. Where a probe approximates,
++// a mirrored-camera render is EXACT - correct parallax, scale and motion for the
++// plane it mirrors about - and the flat near-mirrors that expose probe parallax
++// (the shuttle's radiators and door inner faces) are exactly planar. Declared in
++// the _ecam file (BEGIN_PLANE/POS/NRM/GRPREF/GROUPS/END_PLANE); POS/NRM are in the
++// mesh's BASE pose and ride the reference group's animation transform, so an
++// opening door carries its mirror with it.
++#define MAX_ENVPLN	2
++
++struct ENVPLNREC {
++	D3DXVECTOR3		lPos;			///< a point on the plane, base-pose local [m]
++	D3DXVECTOR3		lNrm;			///< plane normal, base-pose local (reflective side)
++	int				refMesh;		///< mesh of the animation reference group (-1 = static)
++	int				refGrp;			///< ... and the group whose transform carries the plane
++	WORD			nGrpRng;		///< group ranges that sample this plane
++	WORD *			pGrpRng;		///< (first,last) pairs, as the camera ranges
++	float			rDist;			///< assumed reflected-geometry distance [m] for the
++									///  CURVATURE warp (RDIST; only matters off-plane)
++};
++
+ /**
+  * \brief Management of custom configurations for vessel materials
+  */
+@@ -55,16 +90,21 @@ public:
+ 	bool			SaveConfiguration();
+ 	bool			LoadConfiguration(bool bAppend=false);
+ 	bool			LoadCameraConfig();
++	bool			ParseCameraFile(const char* path, class VESSEL* vessel, bool bExt);
+ 	bool			HasMesh(const char *name);
+ 	void			ResetCamera(DWORD idx);
+ 
+ 	ENVCAMREC *		GetCamera(DWORD idx);
+ 	DWORD			CameraCount();
++	ENVPLNREC *		GetPlane(DWORD idx);		// ORO patch (v) part 2
++	DWORD			PlaneCount();
++	void			ResetPlane(DWORD idx);
+ 
+ private:
+ 
+ 	vObject			*vObj;
+ 	D3D9Client		*gc;
++	DWORD			nCameras;	///< ORO patch (v): highest camera index used + 1
+ 	//DWORD			nRec;	///< Number of records
+ 	//DWORD			mRec;	///< Allocated records
+ 
+@@ -84,6 +124,8 @@ private:
+ 	std::list<SHADER> Shaders;
+ 
+ 	ENVCAMREC *pCamera;
++	ENVPLNREC *pPlane;		// ORO patch (v) part 2: MAX_ENVPLN slots
++	DWORD		nPlanes;
+ };
+ 
+ #endif
 diff --git a/OVP/D3D9Client/Mesh.cpp b/OVP/D3D9Client/Mesh.cpp
-index decef76..3b29b77 100644
+index decef76..0bfd6ff 100644
 --- a/OVP/D3D9Client/Mesh.cpp
 +++ b/OVP/D3D9Client/Mesh.cpp
-@@ -2632,6 +2632,13 @@ void D3D9Mesh::RenderBaseTile(const LPD3DXMATRIX pW)
+@@ -16,6 +16,8 @@
+ #include "D3D9Config.h"
+ #include "DebugControls.h"
+ #include "VectorHelpers.h"
++#include "OapiExtension.h"	// ORO patch (h) part 2: GetMeshDir for the RAIN scan
++#include <map>				// ORO patch (h) part 2: the rain-glass store
+ 
+ #pragma warning(push)
+ #pragma warning(disable : 4838)
+@@ -176,6 +178,150 @@ void MeshBuffer::Map(LPDIRECT3DDEVICE9 pDev)
+ // Mesh Implementation
+ // ======================================================================================
+ //
++// ===========================================================================================
++// ORO patch (h) part 2 - THE RAIN-GLASS STORE (2026-08-26, his design: "we want this to
++// work for ANY vessel that has a VC mesh group with RAIN 1").
++//
++// The author marks window groups in the MESH FILE with a `RAIN 1` line in the group's
++// option block (before its GEOM). The core's group parser SKIPS unknown tokens (verified
++// in Orbiter's Mesh.cpp: the token loop has no else branch) and stores nothing - so the
++// line is safe in any mesh, invisible to stock Orbiter and to the vessel, and someone
++// who can see the FILE has to read it. That someone is the client, because the client is
++// the one who is TOLD THE FILENAME: Orbiter::LoadMeshGlobal calls
++// clbkStoreMeshPersistent(hMesh, fname) with the resource name, and the full path is
++// MeshDir + fname + ".msh", both of which the client already has (OapiExtension).
++//
++// The scan is two-stage so that the 99% of meshes with no RAIN token cost one streaming
++// pass and no line parsing: a chunked search for the literal "RAIN" first (UPPERCASE
++// REQUIRED - that is the documented convention), then, only on a hit, a line walk that
++// counts GEOM blocks (group index = GEOMs passed) and records the groups whose pending
++// `RAIN 1` preceded them. Results keyed by TEMPLATE HANDLE; instances inherit at
++// construction, so re-instantiation (AddMesh rebuilds the list) costs nothing.
++// Meshes never preloaded (per-instance oapiLoadMesh copies) have no filename to scan and
++// simply get no rain - the documented limitation, and VC meshes are preloaded by
++// convention. Cleared with the mesh manager at session close: template handles recycle.
++// ===========================================================================================
++static std::map<MESHHANDLE, std::vector<WORD> > g_rainGlassStore;
++
++// ORO patch (v): the per-probe box-projection table - see Mesh.h.
++D3D9Mesh::ENVPRB D3D9Mesh::sEnvPrb[4] = {};
++int D3D9Mesh::sEnvPrbN = 0;
++
++void D3D9Mesh::SetEnvProbes(const ENVPRB* p, int n)
++{
++	sEnvPrbN = (n < 0) ? 0 : ((n > 4) ? 4 : n);
++	for (int i = 0; i < sEnvPrbN; i++) sEnvPrb[i] = p[i];
++}
++
++// Push one probe's box parameters (or the disable state) into the effect. Called
++// beside every cube bind, so the uniforms can never be stale from another vessel.
++static void PushEnvBox(const D3D9Mesh::ENVPRB* p)
++{
++	static const D3DXVECTOR4 off(0, 0, 0, 0);
++	if (p && p->C.w > 0.5f) {
++		D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxC, &p->C);
++		D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxX, &p->X);
++		D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxY, &p->Y);
++		D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxZ, &p->Z);
++		D3D9Effect::FX->SetVector(D3D9Effect::eEnvPrbP, &p->P);
++	}
++	else D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxC, &off);
++}
++
++// ORO patch (v) part 2: the planar-mirror targets - see Mesh.h.
++LPDIRECT3DTEXTURE9 D3D9Mesh::sPlnTex[2] = {};
++D3DXVECTOR4 D3D9Mesh::sPlnEq[2] = {};
++float D3D9Mesh::sPlnDist[2] = {};
++int D3D9Mesh::sPlnN = 0;
++
++void D3D9Mesh::SetRflPlanes(LPDIRECT3DTEXTURE9* t, const D3DXVECTOR4* eq, const float* dist, int n)
++{
++	sPlnN = (n < 0) ? 0 : ((n > 2) ? 2 : n);
++	for (int i = 0; i < 2; i++) {
++		sPlnTex[i]  = (t && i < sPlnN) ? t[i] : NULL;
++		sPlnEq[i]   = (eq && i < sPlnN) ? eq[i] : D3DXVECTOR4(0, 0, 0, 0);
++		sPlnDist[i] = (dist && i < sPlnN) ? dist[i] : 5.0f;
++	}
++}
++
++// Bind one plane's mirrored-scene RT (or the disable state). gPlnCtl.z is the
++// enable; .xy is 1/screen so VPOS becomes a texture coordinate in the shader.
++static void PushRflPlane(int idx1)
++{
++	static const D3DXVECTOR4 off(0, 0, 0, 0);
++	const int i = idx1 - 1;
++	if (idx1 > 0 && i < D3D9Mesh::sPlnN && D3D9Mesh::sPlnTex[i]) {
++		// the plane equation + RDIST feed the shader's CURVATURE warp (PBR.fx)
++		D3D9Effect::FX->SetVector(D3D9Effect::ePlnEq, &D3D9Mesh::sPlnEq[i]);
++		D3DXVECTOR4 ctl(1.0f / (float)max(1, (int)D3D9Effect::gc->GetScene()->ViewW()),
++		                1.0f / (float)max(1, (int)D3D9Effect::gc->GetScene()->ViewH()), 1.0f,
++		                D3D9Mesh::sPlnDist[i]);
++		D3D9Effect::FX->SetTexture(D3D9Effect::ePlnMap, D3D9Mesh::sPlnTex[i]);
++		D3D9Effect::FX->SetVector(D3D9Effect::ePlnCtl, &ctl);
++	}
++	else D3D9Effect::FX->SetVector(D3D9Effect::ePlnCtl, &off);
++}
++
++void RainGlassClearStore()
++{
++	g_rainGlassStore.clear();
++}
++
++void RainGlassStoreScan(MESHHANDLE hMesh, const char *fname)
++{
++	if (!hMesh || !fname || !fname[0]) return;
++
++	char path[MAX_PATH];
++	sprintf_s(path, "%s\\%s.msh", OapiExtension::GetMeshDir(), fname);
++	FILE *f = NULL;
++	if (fopen_s(&f, path, "rb") != 0 || !f) return;
++
++	// Stage 1: is the literal token anywhere in the file? Chunked, with a 3-byte carry
++	// so a token straddling a chunk boundary cannot hide.
++	bool found = false;
++	{
++		char buf[65536 + 4]; size_t carry = 0, n;
++		while (!found && (n = fread(buf + carry, 1, sizeof(buf) - carry - 1, f)) > 0) {
++			buf[carry + n] = 0;
++			if (strstr(buf, "RAIN")) { found = true; break; }
++			const size_t tot = carry + n;
++			carry = (tot >= 3) ? 3 : tot;
++			memmove(buf, buf + tot - carry, carry);
++		}
++	}
++	if (!found) { fclose(f); return; }
++
++	// Stage 2: the precise walk. Vertex/index lines start with digits or a sign, so the
++	// two token tests cannot misfire inside geometry data.
++	fseek(f, 0, SEEK_SET);
++	std::vector<WORD> grps;
++	char line[256]; int geom = 0; bool pend = false;
++	while (fgets(line, sizeof(line), f)) {
++		if (strncmp(line, "RAIN", 4) == 0) {
++			int on = 0;
++			pend = (sscanf_s(line + 4, "%d", &on) == 1 && on != 0);
++		}
++		else if (_strnicmp(line, "GEOM", 4) == 0) {
++			if (pend && geom <= 0xFFFF) grps.push_back((WORD)geom);
++			pend = false; geom++;
++		}
++	}
++	fclose(f);
++
++	if (!grps.empty()) {
++		g_rainGlassStore[hMesh] = grps;
++		// Into Orbiter.log deliberately - it is the log the addon's users are read from.
++		oapiWriteLogV("D3D9: rain glass - %d RAIN group(s) in %s.", (int)grps.size(), fname);
++	}
++	else g_rainGlassStore.erase(hMesh);   // a re-store after the author removed the tokens
++}
++
++static const std::vector<WORD>* RainGlassLookup(MESHHANDLE hMesh)
++{
++	std::map<MESHHANDLE, std::vector<WORD> >::const_iterator it = g_rainGlassStore.find(hMesh);
++	return (it == g_rainGlassStore.end()) ? NULL : &it->second;
++}
++
+ void D3D9Mesh::Null(const char *meshName /* = NULL */)
+ {
+ 	nGrp = 0;
+@@ -232,6 +378,10 @@ D3D9Mesh::D3D9Mesh(MESHHANDLE hMesh, bool asTemplate, D3DXVECTOR3 *reorig, float
+ 	Null();
+ 	LoadMeshFromHandle(hMesh, reorig, scale);
+ 	bIsTemplate = asTemplate;
++	// ORO patch (h) part 2: a template handle that was scanned at store time carries
++	// its authored rain-glass groups; a per-instance copy handle misses and gets none.
++	const std::vector<WORD>* rg = RainGlassLookup(hMesh);
++	if (rg) rainGrp = *rg;
+ 	MeshCatalog.insert(this);
+ 	if (pBuf) pBuf->Map(pDev);
+ }
+@@ -328,6 +478,14 @@ D3D9Mesh::D3D9Mesh(MESHHANDLE hMesh, const D3D9Mesh &hTemp)
+ 	if (nGrp == 0) return;
+ 
+ 	strcpy_s(name, ARRAYSIZE(name), hTemp.name);
++	// ORO patch (h) part 2: instances take the rain-glass list from the STORE by the
++	// template handle they were given, falling back to whatever the stored mesh
++	// carries. The store is the ground truth; the fallback only matters if some path
++	// ever constructs instances without a scanned template.
++	{
++		const std::vector<WORD>* rg = RainGlassLookup(hMesh);
++		rainGrp = rg ? *rg : hTemp.rainGrp;
++	}
+ 
+ 	// Use Template's Vertex Data directly, no need for a local copy unless locally modified. 
+ 	pBuf = hTemp.pBuf;
+@@ -1598,6 +1756,9 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
+ 
+ 
+ 	if (nEnv >= 1 && pEnv[0]) FX->SetTexture(eEnvMapA, pEnv[0]);
++	int curEnvCam = 0;   // ORO patch (v): which probe is bound right now
++	PushEnvBox((sEnvPrbN > 0) ? &sEnvPrb[0] : NULL);   // never stale from another vessel
++	int curPln = -1;     // ORO patch (v) part 2: which planar RT is bound (-1 = push pending)
+ 
+ 
+ 	UINT numPasses = 0;
+@@ -1609,6 +1770,27 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
+ 
+ 	for (DWORD g=0; g<nGrp; g++) {
+ 
++		// ORO patch (v): a group assigned to another reflection probe swaps the cube
++		// before its draw. Missing/unrendered probes fall back to 0, so a config that
++		// declares cameras before their groups exist degrades to today's look, never
++		// to a black reflection. One SetTexture only when the assignment CHANGES -
++		// groups sharing a probe cost nothing.
++		if (nEnv > 1) {
++			int want = Grp[g].EnvCam;
++			if (want >= nEnv || !pEnv[want]) want = 0;
++			if (want != curEnvCam && pEnv[want]) {
++				FX->SetTexture(eEnvMapA, pEnv[want]);
++				PushEnvBox((want < sEnvPrbN) ? &sEnvPrb[want] : NULL);   // ORO patch (v)
++				curEnvCam = want;
++			}
++		}
++		// ORO patch (v) part 2: the PLANAR mirror, per group - exact where declared,
++		// silently absent everywhere else (sPlnN is 0 for vessels without planes and
++		// on every non-main pass, so the enable can never leak).
++		{
++			const int wp = (sPlnN > 0) ? (int)Grp[g].RflPlane : 0;
++			if (wp != curPln) { PushRflPlane(wp); curPln = wp; }
++		}
+ 
+ 		bool bHUD = (Grp[g].MFDScreenId == 0x100);
+ 
+@@ -2056,6 +2238,9 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
+ 	FX->SetValue(eLights, Locals, sizeof(LightStruct) * Config->MaxLights());
+ 
+ 	if (nEnv >= 1 && pEnv[0]) FX->SetTexture(eEnvMapA, pEnv[0]);
++	int curEnvCam = 0;   // ORO patch (v): as in Render() - the simplified path too
++	PushEnvBox((sEnvPrbN > 0) ? &sEnvPrb[0] : NULL);
++	PushRflPlane(0);     // ORO patch (v) part 2: no planar mirrors on this path
+ 
+ 	bool bRefl = true;
+ 	WORD CurrentShader = 0xFFFF;
+@@ -2068,6 +2253,17 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
+ 	//
+ 	for (DWORD g = 0; g<nGrp; g++) {
+ 
++		// ORO patch (v): per-group probe swap - see Render() for the rules
++		if (nEnv > 1) {
++			int want = Grp[g].EnvCam;
++			if (want >= nEnv || !pEnv[want]) want = 0;
++			if (want != curEnvCam && pEnv[want]) {
++				FX->SetTexture(eEnvMapA, pEnv[want]);
++				PushEnvBox((want < sEnvPrbN) ? &sEnvPrb[want] : NULL);   // ORO patch (v)
++				curEnvCam = want;
++			}
++		}
++
+ 		// Check skip conditions --------------------------------------------
+ 		//
+ 		DWORD ti = Grp[g].TexIdx;
+@@ -2632,6 +2828,13 @@ void D3D9Mesh::RenderBaseTile(const LPD3DXMATRIX pW)
  
  
  	FX->SetTechnique(eBaseTile);
@@ -756,11 +1690,26 @@ index decef76..3b29b77 100644
  	FX->SetVector(eColor, ptr(D3DXVECTOR4(0, 0, 0, 0)));
  	FX->SetMatrix(eGT, gc->GetIdentity());
  	FX->SetMatrix(eW, pW);
-@@ -2777,7 +2784,49 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
+@@ -2775,9 +2978,88 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
+ 
+ 	for (DWORD g = 0; g < nGrp; g++)
  	{
- 		if (Grp[g].UsrFlag & 0x2) continue;
- 		if (Grp[g].UsrFlag & 0x1) continue;
+-		if (Grp[g].UsrFlag & 0x2) continue;
+-		if (Grp[g].UsrFlag & 0x1) continue;
 -		
++		// ORO patch (h) part 2: the rain-glass membership test runs BEFORE the two
++		// UsrFlag skips, because authored glass routinely carries 0x1 (no-shadow) -
++		// the stock DeltaGlider's VC canopy does - and a declared group that exits on
++		// that line never reaches the declaration that was made specifically about it.
++		// Shadow-map behaviour is untouched: bRainGlass is only ever true at opt == 1.
++		bool bRainGlass = false;
++		if (opt == 1 && !rainGrp.empty())
++			for (size_t k = 0; k < rainGrp.size(); k++) if (rainGrp[k] == g) { bRainGlass = true; break; }
++
++		if (!bRainGlass) {
++			if (Grp[g].UsrFlag & 0x2) continue;
++			if (Grp[g].UsrFlag & 0x1) continue;
++		}
 +
 +		// --- ORO patch (f), part 2: TRANSPARENT MATERIALS MUST NOT CAST OPAQUE SHADOWS
 +		// A group escapes the shadow map today only by carrying UsrFlag 0x1 (no-shadow)
@@ -801,17 +1750,498 @@ index decef76..3b29b77 100644
 +		// clearly not opaque does not block. If anything it is MORE obviously right
 +		// here, because depth is a visibility question and shadowing is only one
 +		// consumer of it.
-+		if (Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
++		//
++		// --- ORO patch (h) part 2: AUTHORED WINDOW GLASS ------------------------------
++		// A group in this mesh's rainGrp list - filled at construction from the store
++		// that clbkStoreMeshPersistent's scan built, ultimately from the author's
++		// `RAIN 1` token in the mesh file (see RainGlassStoreScan at the top of this
++		// file). In THIS pass only (opt == 1, the normal/depth buffer - never the
++		// shadow map, where glass must go on not casting), such a group is rendered
++		// DESPITE its transparency, and NormalDepth_PS writes its camera distance
++		// NEGATED. That one sign carries the whole feature: a full-frame effect shader
++		// (via patch (h)'s SetIPISceneDepth) reads `d < 0` as "authored window here",
++		// while every existing consumer of GBUF_DEPTH.a - the Sketchpad depth clip
++		// (patch g), the sun/local-light visibility kernel (Glare.hlsl) - guards with
++		// `d > 0.1` and sees a negative exactly as it sees the 0 behind unflagged
++		// glass today: nothing drawn. Occlusion is inherited from the pass's own
++		// z-buffer: interior structure nearer than the window (a seat back, the canopy
++		// frame, a helmet) writes nearer POSITIVE depth and wins, so the mask is holed
++		// per pixel with no further machinery. NOT a mesh UsrFlag, deliberately:
++		// vessels rewrite their own group flags at runtime; the list is per-instance
++		// state inherited from the template, untouchable from vessel code.
++		// The one accepted loss: whatever lay BEHIND a declared pane no longer has its
++		// depth in the buffer (the pane's own value replaces it), so patch (g) geometry
++		// is no longer cut against, e.g., your own nose seen through the windscreen.
++		// (bRainGlass is computed at the TOP of the loop - it must precede the UsrFlag
++		// skips, see the note there.)
++		if (!bRainGlass &&
++		    Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
 +		    && Mtrl[Grp[g].MtrlIdx].Diffuse.w < 0.9f) continue;
 +
++		MeshShader::ps_bools.bRainGlass = bRainGlass;
  		MeshShader::ps_bools.bOIT = (Grp[g].UsrFlag & 0x20) != 0;
  
  		if (MeshShader::ps_bools.bOIT) {
+diff --git a/OVP/D3D9Client/Mesh.h b/OVP/D3D9Client/Mesh.h
+index c199f9e..0b56969 100644
+--- a/OVP/D3D9Client/Mesh.h
++++ b/OVP/D3D9Client/Mesh.h
+@@ -87,6 +87,12 @@ public:
+ 
+ 	static struct PSBools {
+ 		BOOL bOIT;		// Enable order independent transparency
++		BOOL bRainGlass;	// ORO patch (h) part 2: this group is AUTHORED WINDOW GLASS
++							// (mesh FLAG 0x1000) - the normal/depth pass writes its
++							// camera distance NEGATED, so a full-frame shader can tell
++							// "window" from "interior" per pixel. Every existing
++							// consumer of GBUF_DEPTH.a guards with `d > 0.1`, so a
++							// negative value reads as "nothing drawn" to all of them.
+ 	} ps_bools;
+ 
+ 
+@@ -185,6 +191,12 @@ public:
+ 		bool  bDualSided;
+ 		bool  bDeleted;			// This entry is deleted by DelGroup()
+ 		bool  bRendered;
++		BYTE  RflPlane;			// ORO patch (v) part 2: 0 = none, 1..2 = planar mirror
++								// index + 1 - groups drawing the EXACT mirrored-scene RT
++		BYTE  EnvCam;			// ORO patch (v): which reflection probe this group
++								// samples (0 = the classic single probe). Set from the
++								// GC config's camera GROUPS ranges; zero-init in every
++								// ctor path (memset or memcpy-from-memset origin).
+ 		D3DXMATRIX  Transform;	// Group specific transformation matrix
+ 		D9BBox BBox;
+ 		DWORD TexIdxEx[MAXTEX];
+@@ -231,6 +243,30 @@ public:
+ 	const GROUPREC * GetGroup(DWORD idx) const;
+ 	void            SetMFDScreenId(DWORD idx, WORD id);
+ 	void			SetDualSided(DWORD idx, bool bState) { Grp[idx].bDualSided = bState; }
++	// ORO patch (v): assign a group to a reflection probe (see GROUPREC::EnvCam)
++	void			SetGroupEnvCam(DWORD idx, BYTE cam) { if (idx < nGrp) Grp[idx].EnvCam = cam; }
++	void			SetGroupRflPlane(DWORD idx, BYTE p) { if (idx < nGrp) Grp[idx].RflPlane = p; }
++
++	// ORO patch (v): the per-probe BOX-PROJECTION parameters for the vessel whose
++	// meshes are about to render - camera-centred world space, filled by
++	// vVessel::Render each call (the MeshShader::ps_bools static pattern; the render
++	// is single-threaded, so per-vessel refill is race-free by construction). C.w = 0
++	// means the probe has no box and samples by raw direction.
++	struct ENVPRB { D3DXVECTOR4 C, X, Y, Z, P; };
++	static ENVPRB	sEnvPrb[4];
++	static int		sEnvPrbN;
++	static void		SetEnvProbes(const ENVPRB* p, int n);
++
++	// ORO patch (v) part 2: the PLANAR mirror targets for the vessel being rendered -
++	// filled by vVessel::Render beside the probe table, cleared (n = 0) for every
++	// vessel without planes and on every non-main pass, so a mirrored RT can never be
++	// sampled while it is being written or leak onto another hull.
++	static LPDIRECT3DTEXTURE9 sPlnTex[2];
++	static D3DXVECTOR4 sPlnEq[2];	// plane equation (N, d), camera-centred world
++	static float	sPlnDist[2];	// RDIST - assumed reflected-geometry distance [m]
++	static int		sPlnN;
++	static void		SetRflPlanes(LPDIRECT3DTEXTURE9* t, const D3DXVECTOR4* eq, const float* dist, int n);
++
+ 
+ 	/**
+ 	 * \brief Returns number of material specifications.
+@@ -332,6 +368,13 @@ public:
+ 
+ private:
+ 
++	// ORO patch (h) part 2: this mesh's rain-glass GROUP indices - the groups the
++	// author marked `RAIN 1` in the mesh file. Filled at construction: the template
++	// ctor looks the TEMPLATE HANDLE up in the store that clbkStoreMeshPersistent's
++	// scan filled (Mesh.cpp, RainGlassStoreScan), and the instance-from-template ctor
++	// inherits the stored mesh's copy. Empty for every mesh with no RAIN tokens, and
++	// for meshes never preloaded (oapiLoadMesh copies have no filename to scan).
++	std::vector<WORD> rainGrp;
+ 
+ 	void			UpdateTangentSpace(NMVERTEX *pVrt, WORD *pIdx, DWORD nVtx, DWORD nFace, bool bTextured);
+ 	void			ProcessInherit();
 diff --git a/OVP/D3D9Client/Particle.cpp b/OVP/D3D9Client/Particle.cpp
-index 6bc93d1..681a8d1 100644
+index 6bc93d1..f8abb1c 100644
 --- a/OVP/D3D9Client/Particle.cpp
 +++ b/OVP/D3D9Client/Particle.cpp
-@@ -545,6 +545,9 @@ void D3D9ParticleStream::RenderEmissive(LPDIRECT3DDEVICE9 dev)
+@@ -12,6 +12,7 @@
+ #include "Scene.h"
+ #include "D3D9Surface.h"
+ #include "D3D9Config.h"
++#include "VPlanet.h"        // ORO patch (x): SunLightColor - the hull's own dawn tint
+ #include <stdio.h>
+ 
+ static bool needsetup = true;
+@@ -246,6 +247,37 @@ void D3D9ParticleStream::Timejump()
+ 	t0 = oapiGetSimTime();
+ }
+ 
++// ORO patch (y): rebuild the PARTICLESTREAMSPEC this stream was constructed from.
++// Everything SetSpecs derived inverts exactly; lifetime comes back out of ipht2
++// (SetParticleHalflife stores 0.5/lifetime) and amax out of afac. tex is reported
++// NULL - the texture handle is client-private and the consumer picks its own.
++void D3D9ParticleStream::OroGetSpec(PARTICLESTREAMSPEC* out, VECTOR3* outPos, VECTOR3* outDir) const
++{
++	if (outPos) *outPos = pos ? *pos : _V(0,0,0);
++	if (outDir) *outDir = dir ? *dir : _V(0,0,0);
++	if (!out) return;
++	memset(out, 0, sizeof(PARTICLESTREAMSPEC));
++	out->srcsize     = size0;
++	out->srcrate     = pdensity;
++	out->v0          = speed;
++	out->srcspread   = vrand;
++	out->lifetime    = (ipht2 > 0.0) ? 0.5 / ipht2 : 0.0;
++	out->growthrate  = alpha;
++	out->atmslowdown = beta;
++	out->ltype       = diffuse ? PARTICLESTREAMSPEC::DIFFUSE : PARTICLESTREAMSPEC::EMISSIVE;
++	out->levelmap    = lmap;
++	out->lmin        = lmin;
++	out->lmax        = lmax;
++	out->atmsmap     = amap;
++	out->amin        = amin;
++	switch (amap) {
++		case PARTICLESTREAMSPEC::ATM_PLIN: out->amax = (afac != 0.0) ? amin + 1.0/afac      : amin; break;
++		case PARTICLESTREAMSPEC::ATM_PLOG: out->amax = (afac != 0.0) ? amin * exp(1.0/afac) : amin; break;
++		default:                           out->amax = 1.0; break;
++	}
++	out->tex = NULL;
++}
++
+ void D3D9ParticleStream::SetDParticleCoords(const VECTOR3 &ppos, double scale, NTVERTEX *vtx)
+ {
+ 	VECTOR3 cdir = ppos;
+@@ -416,6 +448,89 @@ void D3D9ParticleStream::Render(LPDIRECT3DDEVICE9 dev)
+ 	else         RenderEmissive(dev);
+ }
+ 
++// ------------------------------------------------------------------------------------
++// ORO patch (x): lighting for DIFFUSE particle streams.
++// Stock disabled the shader's sun term (Particle.fx hardcodes light = 1.0 with the
++// original N.L commented out), so smoke rendered fully daylight-lit on the night side
++// of a planet. Lighting a translucent billboard is a question about POSITION, not
++// orientation - "does sunlight reach this particle?" - so the value is computed on the
++// CPU per particle and carried to the shader in the normal channel, which the shader
++// no longer reads as a normal. A fully sunlit particle evaluates to exactly 1.0, so
++// the daytime look is bit-identical to stock. EMISSIVE streams are untouched.
++// ------------------------------------------------------------------------------------
++static const double ORO_PRT_TWILIGHT_LO = -0.0175;	// sin(-1 deg): fully dark this far below the (altitude-depressed) horizon
++static const double ORO_PRT_TWILIGHT_HI =  0.0872;	// sin(+5 deg): full daylight above this sun elevation
++static const double ORO_PRT_FLAME_REACH = 10.0;		// the engine flame fully lights smoke within this many src-sizes (inverse-square beyond)
++// The sunrise/sunset TINT: the sun share warms toward gold where the light crossed a
++// long air path, dim and confined the way dawn-launch photography shows it.
++// ⚠️ A first version sampled vPlanet::GetObjectAtmoParams at the stream's head and
++// tail and lerped the normalized hue by age; one flight killed it - the tail
++// anchor's low sun normalized to SATURATED red at FULL sun-share brightness and the
++// linear age lerp smeared that band across half the trail ("a large reddish band").
++// A rising sun is red AND dim, and the band is an altitude slice, not an age
++// fraction. ⚠️ A second version keyed the tint to the VISIBILITY coordinate
++// (sinel - sinhrz); the STS-108 reference killed that too - at altitude the
++// depressed horizon makes a low sun VISIBLE, it does not make its light WHITE, so
++// the whole sunlit column stays gold while the sun is low. The tint therefore keys
++// on the TRUE sun elevation (the air path), and only the visibility keeps the
++// horizon-dip term. Airless worlds get no tint at all: the reddening IS atmospheric
++// extinction.
++static const double ORO_PRT_TINT_LO  = 0.0;			// sin(0 deg): the deepest tint at/below the TRUE horizon
++static const double ORO_PRT_TINT_HI  = 0.156;		// sin(+9 deg): pure white at/above this TRUE sun elevation
++// THREE tint stops since 2026-08-30 (his ask): the first direct rays cross the
++// longest air path and are the REDDEST, turning GOLD as the sun climbs, then white.
++// Red channel stays 1 throughout; the stops are g/b pairs. ⚠️ The g:b RATIO is the
++// hue: ~2:1 read as SALMON on his STS-108 comparison; warm needs g >= 3x b.
++static const double ORO_PRT_TINT_MID = 0.40;		// band fraction where the GOLD stop peaks
++static const double ORO_PRT_TINT_RG  = 0.30;		// green at the RED stop (dawn's first light)
++static const double ORO_PRT_TINT_RB  = 0.10;		// blue at the RED stop
++static const double ORO_PRT_TINT_G   = 0.62;		// green at the GOLD stop (flown 2026-08-29)
++static const double ORO_PRT_TINT_B   = 0.18;		// blue at the GOLD stop
++// ⚠️ An altitude term (grazing rays cross thinner air aloft) and a 0.6 strength
++// softener were BOTH built and REVERTED on his next flight (2026-08-30): "I actually
++// prefer the previous setting. This looks like it goes straight to yellow." The full
++// three-stop bands below are the flown-and-kept look; the taste dial is the
++// Launchpad's Particle lighting mode (Config->ParticleLight), not a saturation knob.
++//
++// DIRECTIONAL SPRITE SHADING (patch (x) stage 2, 2026-08-30 - his reference photo:
++// the contrail is visibly lit FROM A SIDE, while a single per-particle scalar lights
++// every puff from nowhere in particular). In Orbiter's streams the column's visible
++// width IS the sprite's width (srcspread is small; the width comes from growthrate),
++// so shading one side of each billboard is shading one side of the column. Each
++// corner gets a pseudo-normal - the front hemisphere of a sphere bulging at the
++// camera - and a WRAP lambert (a condensation cloud scatters; a hard terminator
++// across a puff reads as a painted ball). The gradient rides the existing per-vertex
++// light channel, so the rasterizer interpolates it across the quad and this stays a
++// DLL-only change - Particle.fx is untouched.
++// TWO-LIGHT SPLIT: only the SUN term takes the gradient; the ambient floor and the
++// engine flame stay omnidirectional, and in colour mode over an atmosphere the
++// ambient gets a mild COOL cast - a daytime shadow side is SKY-lit, not black.
++// Airless worlds keep a neutral ambient: no blue sky fills the shadows there.
++// Mode 0 stays bit-exact stock. The older note's "fully sunlit evaluates to exactly
++// 1.0" is now true per PARTICLE and deliberately no longer per PIXEL: modes 1/2
++// shade the face, which is the entire point.
++static const double ORO_PRT_DIR_WRAP = 0.60;	// wrap width: 0 = hard lambert, larger = flatter
++static const double ORO_PRT_DIR_ZC   = 0.80;	// view component of the corner pseudo-normal
++                                            	//   (how strongly the hemisphere bulges at you)
++static const double ORO_PRT_AMB_R    = 0.92;	// the cool sky cast on the ambient term
++static const double ORO_PRT_AMB_G    = 0.97;	//   (colour mode + atmosphere only)
++static const double ORO_PRT_AMB_B    = 1.05;
++// ROUND 5 (2026-08-30, his verdicts on the hull-matched tint): the smoke runs a
++// stop AHEAD of the hull (evaluate the hue at a slightly higher sun elevation, so
++// when the hull turns rose the column is already orange), the hue is DEEPENED
++// (a translucent grey column washes a tint out), and where the hue is deep the
++// sun term OVERDRIVES past 1.0 into the fp16 chain - the diffuse pixel shader
++// multiplies the light through unclamped, so the Light glow post-process blooms
++// it: his "slight bloom". All three scale with tint depth, so neutral daylight
++// and the flame-lit engine steam are touched by exactly nothing.
++// ROUND 6: all three are LAUNCHPAD SLIDERS now (his ask - tune without a
++// recompile): Config->ParticleTintLead (0..0.20 sin-el), Config->ParticleTintSat
++// (1..4), Config->ParticleTintBloom (1..3). Read per call below. Defaults are
++// HIS settled positions from the dawn-ascent tuning (0.10 / 1.6 / 2.34,
++// 2026-08-30 - "Now THAT is what I'm talking about"); round 5's first guesses
++// were 0.05 / 1.6 / 1.30, too shy on lead and bloom because the tinted phase
++// coincides with the dim phase of the twilight ramp.
++
+ void D3D9ParticleStream::RenderDiffuse(LPDIRECT3DDEVICE9 dev)
+ {
+ 	static D3DMATERIAL9 smokemat = { // emissive material for engine exhaust
+@@ -433,7 +548,46 @@ void D3D9ParticleStream::RenderDiffuse(LPDIRECT3DDEVICE9 dev)
+ 
+ 	VECTOR3 camera_gpos = pGC->GetScene()->GetCameraGPos();
+ 
+-	CalcNormals(plast->pos - camera_gpos, dvtx);
++	// ORO patch (x): CalcNormals retired - the normal channel now carries the lighting
++	// value (see below) and the shader no longer reads a normal from it.
++	// CalcNormals(plast->pos - camera_gpos, dvtx);
++
++	// ORO patch (x): per-frame lighting context. The planet is the camera's proxy body
++	// (particles are only ever watched from nearby); sun-at-the-global-origin is the
++	// same approximation RenderGroundShadow below has always used. The ambient floor is
++	// the user's Launchpad ambient, scaled exactly as vVessel::ModLighting scales it,
++	// so night smoke settles at the same floor the night hull does. The engine flame
++	// lights nearby smoke by DISTANCE FROM THE SOURCE (the newest particle) - reference:
++	// night-launch photography; a slow climber keeps its ground cloud lit because the
++	// cloud stays near the flame, and engine shutdown kills the glow through level.
++	OBJHANDLE hPln = oapiCameraProxyGbody();
++	if (hPln && oapiGetObjectType(hPln) == OBJTP_STAR) hPln = NULL;	// camera in deep space: no occluder, stay lit
++	VECTOR3 pp = _V(0,0,0); double Rp = 1.0;
++	if (hPln) { oapiGetGlobalPos(hPln, &pp); Rp = oapiGetSize(hPln); }
++	// ORO patch (x) round 4: the planet VISUAL, for SunLightColor - the same
++	// extinction curve that tints the HULL through a dawn. NULL = the fallback band.
++	vPlanet* vPl = NULL;
++	if (hPln) {
++		vObject* vo = pGC->GetScene()->GetVisObject(hPln);
++		if (vo && vo->Type() == OBJTP_PLANET) vPl = (vPlanet*)vo;
++	}
++	double amb = 0.0039 * (double)(*(DWORD*)pGC->GetConfigParam(CFGPRM_AMBIENTLEVEL));
++	if (amb > 1.0) amb = 1.0;
++	double lvl = level ? *level : 0.0;
++	VECTOR3 srcpos = plast->pos;
++	double flameR = ORO_PRT_FLAME_REACH * size0;
++	if (flameR < 1.0) flameR = 1.0;
++
++	// ORO patch (x): the Launchpad's "Particle lighting" mode (his design, 2026-08-30):
++	// 0 = Off, bit-exact stock (diffuse stays fully lit, flame and all skipped);
++	// 1 = Brightness only; 2 = Brightness + colour. The sunrise/sunset tint also
++	// applies only where there is AIR to redden the light.
++	const int  plm    = Config->ParticleLight;
++	const bool hasAtm = (hPln && plm >= 2 && oapiGetPlanetAtmConstants(hPln) != NULL);
++	// ORO patch (x) round 6: the three dawn-tint dials, now Launchpad sliders
++	const double tintLead = Config->ParticleTintLead;
++	const double tintSat  = Config->ParticleTintSat;
++	const double tintOver = Config->ParticleTintBloom;
+ 
+ 	HR(dev->SetVertexDeclaration(pNTVertexDecl));
+ 	HR(FX->SetTechnique(eDiffuseTech));
+@@ -451,12 +605,189 @@ void D3D9ParticleStream::RenderDiffuse(LPDIRECT3DDEVICE9 dev)
+ 		u = tu + p->texidx;
+ 		v = tv + p->texidx;
+ 
+-		for (j = 0; j < 4; j++, vtx++) {
+-			vtx->nx = dvtx[j].nx;
+-			vtx->ny = dvtx[j].ny;
+-			vtx->nz = dvtx[j].nz;
+-			vtx->tu = u[j];
+-			vtx->tv = v[j];
++		// ORO patch (x): sun visibility at THIS particle - per particle, so a long
++		// trail can straddle the terminator (lit head, dark tail). The horizon the sun
++		// sets behind dips with altitude, which is what keeps an orbital trail lit past
++		// the ground terminator and darkens it at the correct shadow entry. Round 2:
++		// the sun SHARE warms toward amber over the bottom of the same twilight ramp
++		// (thin band, already-dimmed light - see the tunables note); the ambient floor
++		// and the engine flame stay white.
++		float lR = 1.0f, lG = 1.0f, lB = 1.0f;
++		// stage 2 (the two-light split + per-corner gradient - see below): the sun
++		// term and the ambient/flame terms kept apart so only the sun can be given
++		// a direction. grad stays false where no sunlight reaches the particle.
++		bool    grad = false;
++		double  ambR = 0.0, ambG = 0.0, ambB = 0.0;
++		double  dirR = 0.0, dirG = 0.0, dirB = 0.0;
++		double  flame = 0.0;
++		double  dOv = 0.0;			// round 5: sunlit bloom excess factor (0 at white)
++		VECTOR3 sd = _V(0, 0, 1);
++		if (hPln && plm > 0) {
++			VECTOR3 rp = p->pos - pp;
++			double r  = length(rp);     if (r  < 1.0) r  = 1.0;
++			double rs = length(p->pos); if (rs < 1.0) rs = 1.0;
++			double sinel  = -dotp(rp, p->pos) / (r * rs);			// sin of sun elevation (sun at the origin)
++			double q      = 1.0 - (Rp*Rp)/(r*r);
++			double sinhrz = (q > 0.0) ? -sqrt(q) : 0.0;				// sin of the depressed horizon at this altitude
++			double t = (sinel - sinhrz - ORO_PRT_TWILIGHT_LO) / (ORO_PRT_TWILIGHT_HI - ORO_PRT_TWILIGHT_LO);
++			if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
++			double sunsh = (t*t*(3.0 - 2.0*t)) * (1.0 - amb);		// the sun's share over the ambient floor
++			double hr = 1.0, hg = 1.0, hb = 1.0;					// tint: the sun's hue at this particle
++			if (hasAtm && vPl) {
++				// THE HULL'S OWN DAWN (round 4, 2026-08-30 - his four-shot ascent:
++				// hull rose -> blood-orange -> gold -> cream while the smoke stayed
++				// grey, and his spec: "follow the same convention as the spacecraft
++				// body"). SunLightColor is the exact extinction curve that
++				// GetObjectAtmoParams feeds the vessel's sunlight, evaluated with
++				// two numbers this loop already has (sun elevation + altitude), so
++				// hull and smoke read the SAME sun by construction - at every
++				// altitude slice of a long trail, which the hand-tuned band could
++				// never do. Normalized by its max component, as the hull's cap
++				// effectively does in every sunlit regime; the MAGNITUDE stays with
++				// the twilight ramp above, which is what keeps the first Color
++				// experiment's "saturated red at full brightness" dead.
++				// ⚠️ HIS CLARIFICATION, load-bearing: the tint lives in the SUN term
++				// ONLY. Near the engines the FLAME adds white light over it, so the
++				// steam by the nozzles keeps its own colour and hands over to the
++				// sunlit hue downstream, through the smoothed flame tail.
++				double altp = r - Rp; if (altp < 0.0) altp = 0.0;
++				// round 5: the hue is read a little AHEAD of the hull (his "shift the
++				// spectrum to the right" - when the hull turns rose the column already
++				// shows orange), and DEEPENED around white - a thin grey medium washes
++				// a tint out, so the hull's own hue always reads paler on the smoke
++				// than on the skin it matches. Deepening around 1.0 leaves the max
++				// channel alone, so the normalization's meaning survives.
++				FVECTOR3 sc = vPl->SunLightColor((float)(-(sinel + tintLead)), (float)altp);
++				float mx = sc.MaxRGB();
++				if (mx > 1e-6f) {
++					sc = sc / mx;
++					hr = 1.0 + tintSat * ((double)sc.r - 1.0); if (hr < 0.0) hr = 0.0;
++					hg = 1.0 + tintSat * ((double)sc.g - 1.0); if (hg < 0.0) hg = 0.0;
++					hb = 1.0 + tintSat * ((double)sc.b - 1.0); if (hb < 0.0) hb = 0.0;
++				}
++			}
++			else if (hasAtm && sinel < ORO_PRT_TINT_HI) {
++				// The hand-tuned three-stop band survives as the FALLBACK, for a
++				// proxy body with no planet visual to ask.
++				// TRUE elevation, not the visibility coordinate - see the tunables
++				// note: a dipped horizon makes a low sun visible, not white. Three
++				// stops (red -> gold -> white), both segments smoothstepped and flat
++				// at the joint, so the run has no visible seam.
++				double tc = (sinel - ORO_PRT_TINT_LO) / (ORO_PRT_TINT_HI - ORO_PRT_TINT_LO);
++				if (tc < 0.0) tc = 0.0;
++				if (tc < ORO_PRT_TINT_MID) {						// red -> gold
++					double s = tc / ORO_PRT_TINT_MID;
++					s = s * s * (3.0 - 2.0 * s);
++					hg = ORO_PRT_TINT_RG + (ORO_PRT_TINT_G - ORO_PRT_TINT_RG) * s;
++					hb = ORO_PRT_TINT_RB + (ORO_PRT_TINT_B - ORO_PRT_TINT_RB) * s;
++				} else {											// gold -> white
++					double s = (tc - ORO_PRT_TINT_MID) / (1.0 - ORO_PRT_TINT_MID);
++					s = s * s * (3.0 - 2.0 * s);
++					hg = ORO_PRT_TINT_G + (1.0 - ORO_PRT_TINT_G) * s;
++					hb = ORO_PRT_TINT_B + (1.0 - ORO_PRT_TINT_B) * s;
++				}
++			}
++			// STAGE 2 - the two-light split (see the tunables note above): the sun
++			// term takes the per-corner gradient below, the ambient floor and the
++			// engine flame stay omnidirectional. In colour mode over an atmosphere
++			// the ambient goes mildly cool - the daytime shadow side is SKY-lit.
++			ambR = amb; ambG = amb; ambB = amb;
++			if (hasAtm) {
++				ambR *= ORO_PRT_AMB_R;
++				ambG *= ORO_PRT_AMB_G;
++				ambB *= ORO_PRT_AMB_B;
++				if (ambB > 1.0) ambB = 1.0;
++			}
++			dirR = sunsh * hr; dirG = sunsh * hg; dirB = sunsh * hb;
++			{
++				// round 5, the "slight bloom" (his ask): where the hue is DEEP the
++				// sun term is allowed past the 1.0 ceiling (up to the Dawn tint
++				// bloom slider's factor), into the fp16 chain - the diffuse pixel
++				// shader multiplies the light through unclamped, so the Light glow
++				// post-process blooms it. Scaled by tint DEPTH: white daylight
++				// overdrives by exactly nothing, so the approved daytime look and
++				// the engine steam are untouched. Note the excess rides the SUN
++				// term, which the twilight ramp holds low exactly when the hue is
++				// deep - which is why the slider has real headroom (x3).
++				double tintAmt = 1.0 - (hg < hb ? hg : hb);
++				if (tintAmt < 0.0) tintAmt = 0.0; else if (tintAmt > 1.0) tintAmt = 1.0;
++				dOv = (tintOver - 1.0) * tintAmt;
++			}
++			if (lvl > 0.0) {
++				// SMOOTHED 2026-08-30 (his round: "from the white lit smoke to the
++				// orange one in a very short, almost instant cutoff"). Full within
++				// the reach as ever; beyond it a LORENTZIAN tail measured from the
++				// reach's edge - value AND slope continuous at the boundary, and
++				// still half strength one reach further out, where the truncated
++				// inverse-square had already fallen to a quarter. Near-engine white
++				// and the far tail are unchanged; the night glow carries a little
++				// further, which is the same transition seen in the dark.
++				double d  = length(p->pos - srcpos);
++				double dd = d - flameR; if (dd < 0.0) dd = 0.0;
++				flame = lvl * (flameR * flameR) / (flameR * flameR + dd * dd);
++			}
++			if (sunsh > 0.0005) {
++				// direction TOWARD the sun (sun at the origin - RenderGroundShadow's
++				// own convention, the same one the visibility above already uses)
++				double rsl = length(p->pos); if (rsl < 1.0) rsl = 1.0;
++				sd = p->pos * (-1.0 / rsl);
++				grad = true;
++			}
++			// the flat (per-particle) value - the no-sun path, and the fallback.
++			// The flame ADDS now instead of max-lifting (the other half of the same
++			// smoothing): light adds, and the hard max had a kink exactly where the
++			// flame handed over to the sun - which IS the cutoff he reported. Full
++			// daylight is untouched: the sum clamps at 1 exactly as the max did.
++			double liR = ambR + dirR + flame;
++			double liG = ambG + dirG + flame;
++			double liB = ambB + dirB + flame;
++			// round 5: the WHITE terms keep their old 1.0 ceiling - daylight and the
++			// engine steam bit-identical - and only the sun term's tinted EXCESS
++			// rides above it, into the bloom (see the dOv note).
++			lR = (float)((liR < 1.0 ? liR : 1.0) + dirR * dOv);
++			lG = (float)((liG < 1.0 ? liG : 1.0) + dirG * dOv);
++			lB = (float)((liB < 1.0 ? liB : 1.0) + dirB * dOv);
++		}
++
++		if (grad) {
++			// PER-CORNER shading: pseudo-normal = corner offset + a view bulge (the
++			// billboard as the front hemisphere of a sphere), wrap lambert against
++			// the sun. The corners were just written by SetDParticleCoords, so the
++			// offsets come straight off the vertices - orientation-proof: whatever
++			// the atlas rotation did, the geometry knows where each corner IS.
++			const VECTOR3 cpos = p->pos - camera_gpos;
++			const double  cl   = length(cpos);
++			const VECTOR3 vc   = (cl > 1.0) ? cpos * (-1.0 / cl) : _V(0, 0, -1);
++			for (j = 0; j < 4; j++, vtx++) {
++				const VECTOR3 offs = _V((double)vtx->x - cpos.x,
++				                        (double)vtx->y - cpos.y,
++				                        (double)vtx->z - cpos.z);
++				const double ol = length(offs);
++				VECTOR3 nj = vc;
++				if (ol > 1e-6) nj = unit(offs * (1.0 / ol) + vc * ORO_PRT_DIR_ZC);
++				double L = (dotp(nj, sd) + ORO_PRT_DIR_WRAP) / (1.0 + ORO_PRT_DIR_WRAP);
++				if (L < 0.0) L = 0.0; else if (L > 1.0) L = 1.0;
++				double cR = ambR + dirR * L + flame;	// the flame ADDS, omnidirectional
++				double cG = ambG + dirG * L + flame;	//   (see the flat path's note)
++				double cB = ambB + dirB * L + flame;
++				// ORO patch (x): lighting RGB, not a normal - Particle.fx reads
++				// nrmL.xyz per vertex. Round 5: white terms clamp at 1.0 as ever;
++				// the tinted sun excess rides above, into the bloom (the flat
++				// path's note) - per corner, so the lit side blooms hardest.
++				vtx->nx = (float)((cR < 1.0 ? cR : 1.0) + dirR * L * dOv);
++				vtx->ny = (float)((cG < 1.0 ? cG : 1.0) + dirG * L * dOv);
++				vtx->nz = (float)((cB < 1.0 ? cB : 1.0) + dirB * L * dOv);
++				vtx->tu = u[j];
++				vtx->tv = v[j];
++			}
++		} else {
++			for (j = 0; j < 4; j++, vtx++) {
++				vtx->nx = lR;	// ORO patch (x): lighting RGB, not a normal - Particle.fx reads nrmL.xyz
++				vtx->ny = lG;
++				vtx->nz = lB;
++				vtx->tu = u[j];
++				vtx->tv = v[j];
++			}
+ 		}
+ 
+ 		if (++n == stride || n+i0 == np) {
+@@ -545,6 +876,9 @@ void D3D9ParticleStream::RenderEmissive(LPDIRECT3DDEVICE9 dev)
  
  // =======================================================================
  
@@ -821,7 +2251,7 @@ index 6bc93d1..681a8d1 100644
  ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
  	const double *srclevel, const VECTOR3 *thref, const VECTOR3 *thdir,
  	PARTICLESTREAMSPEC *pss)
-@@ -552,6 +555,7 @@ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
+@@ -552,6 +886,7 @@ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
  {
  	Attach (hV, thref, thdir, srclevel);
  	hPlanet = 0;
@@ -829,7 +2259,7 @@ index 6bc93d1..681a8d1 100644
  }
  
  ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
-@@ -561,8 +565,20 @@ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
+@@ -561,8 +896,20 @@ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
  {
  	Attach (hV, ref, _dir, srclevel);
  	hPlanet = 0;
@@ -850,7 +2280,7 @@ index 6bc93d1..681a8d1 100644
  void ExhaustStream::Update ()
  {
  	D3D9ParticleStream::Update();
-@@ -635,7 +651,8 @@ void ExhaustStream::Update ()
+@@ -635,7 +982,8 @@ void ExhaustStream::Update ()
  		}
  	}
  
@@ -860,7 +2290,29 @@ index 6bc93d1..681a8d1 100644
  		if (simt > t0+interval) {
  			VECTOR3 vp, vv;
  			MATRIX3 vR;
-@@ -779,6 +796,13 @@ void ReentryStream::SetMaterial (D3DCOLORVALUE &col)
+@@ -683,6 +1031,12 @@ void ExhaustStream::RenderGroundShadow (LPDIRECT3DDEVICE9 dev, LPDIRECT3DTEXTURE
+ {
+ 	if (!diffuse || !hPlanet || !pfirst) return;
+ 	if (Config->TerrainShadowing == 0) return;
++	// ORO patch (x): the Launchpad's diffuse-particle shadow strength (his ask,
++	// 2026-08-30 - a low sun stretched a smoke column's shadow into a near-black
++	// band across the ground). Scales the shadow alpha INCLUDING its 0.1 floor;
++	// 1 = stock exactly, 0 = no shadow drawn at all.
++	const double shdK = Config->ParticleShadow;
++	if (shdK < 0.005) return;
+ 
+ 	ParticleSpec *p = pfirst;
+ 
+@@ -745,7 +1099,7 @@ void ExhaustStream::RenderGroundShadow (LPDIRECT3DDEVICE9 dev, LPDIRECT3DTEXTURE
+ 			vtx->tv = v[j];
+ 		}
+ 		if (++n == stride || n+i0 == np) {
+-			alpha = (float)max (0.1, 0.60 * p->alpha0*(1.0-(oapiGetSimTime()-p->t0)*ipht2));
++			alpha = (float)(shdK * max (0.1, 0.60 * p->alpha0*(1.0-(oapiGetSimTime()-p->t0)*ipht2)));
+ 			if (alpha>0.01f) {
+ 				HR(FX->SetFloat(eMix, alpha));
+ 				HR(FX->CommitChanges());
+@@ -779,6 +1133,13 @@ void ReentryStream::SetMaterial (D3DCOLORVALUE &col)
  	col.b = 0.5f;
  }
  
@@ -874,7 +2326,7 @@ index 6bc93d1..681a8d1 100644
  void ReentryStream::Update ()
  {
  	D3D9ParticleStream::Update ();
-@@ -816,7 +840,9 @@ void ReentryStream::Update ()
+@@ -816,7 +1177,9 @@ void ReentryStream::Update ()
  		}
  	}
  
@@ -886,11 +2338,35 @@ index 6bc93d1..681a8d1 100644
  			VECTOR3 vp, vv, av;
  			vessel->GetGlobalPos (vp);
 diff --git a/OVP/D3D9Client/Particle.h b/OVP/D3D9Client/Particle.h
-index 959af8d..b14de2f 100644
+index 959af8d..c4aef17 100644
 --- a/OVP/D3D9Client/Particle.h
 +++ b/OVP/D3D9Client/Particle.h
-@@ -140,6 +140,13 @@ public:
+@@ -80,6 +80,17 @@ public:
  
+ 	ParticleSpec * GetPlast() const { return plast; }
+ 
++	// ORO patch (y): stream-spec readback for gcCore::GetExhaustStreamSpec. The core
++	// COPIES a PARTICLESTREAMSPEC at construction and exposes no getter, so the client
++	// is the only place a vessel's stock stream definition can be read back from. The
++	// base class answers "not a stock exhaust"; ExhaustStream overrides with its
++	// vessel identity + the patch-(o) latch (an ORO replacement stream is not stock).
++	virtual bool OroIsStockExhaust(OBJHANDLE hV) const { return false; }
++	// outPos/outDir (optional): the stream's attach point and THRUST direction, both
++	// VESSEL-frame - they are pointers into the vessel's own thruster storage, which
++	// is what lets a consumer classify a stream by engine group.
++	void OroGetSpec(PARTICLESTREAMSPEC* out, VECTOR3* outPos, VECTOR3* outDir) const;
++
+ protected:
+ 
+ 	void SetSpecs (PARTICLESTREAMSPEC *pss);
+@@ -138,8 +149,19 @@ public:
+ 	void RenderGroundShadow (LPDIRECT3DDEVICE9 dev, LPDIRECT3DTEXTURE9 &prevtex);
+ 	void Update ();
+ 
++	// ORO patch (y): stock = belongs to this vessel AND not created under the
++	// patch-(o) exemption latch.
++	bool OroIsStockExhaust(OBJHANDLE hV) const { return hRef == hV && !bExempt; }
++
  private:
  	OBJHANDLE hPlanet;
 +	// ORO patch (o): this stream belongs to an addon that is suppressing the
@@ -904,7 +2380,7 @@ index 959af8d..b14de2f 100644
  
  class ReentryStream: public D3D9ParticleStream {
 diff --git a/OVP/D3D9Client/Scene.cpp b/OVP/D3D9Client/Scene.cpp
-index ebed069..67dacd7 100644
+index ebed069..0dab323 100644
 --- a/OVP/D3D9Client/Scene.cpp
 +++ b/OVP/D3D9Client/Scene.cpp
 @@ -29,6 +29,10 @@
@@ -918,13 +2394,23 @@ index ebed069..67dacd7 100644
  static D3DXMATRIX ident;
  
  const double LABEL_DISTLIMIT = 0.6;
-@@ -80,6 +84,13 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+@@ -80,6 +84,23 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
  	pOffscreenTarget = NULL;
  	pLocalCompute = NULL;
  	pRenderGlares = NULL;
 +	ptWetRefl = NULL;
 +	psWetRefl = NULL;
 +	psWetReflDS = NULL;
++	ptRflPln[0] = ptRflPln[1] = NULL;	// ORO patch (v) part 2
++	ptPShn = NULL; psPShn = NULL;		// ORO patch (w)
++	ptSunCpy = NULL; psSunCpy = NULL; sunCpyLive = false;
++	memset(&sunCpy, 0, sizeof(sunCpy));
++	memset(&pshn, 0, sizeof(pshn));
++	psRflPln[0] = psRflPln[1] = NULL;
++	pRflPlnVes = NULL;
++	nRflPlnLive = 0;
++	rflPlnEq[0] = rflPlnEq[1] = D3DXVECTOR4(0, 0, 0, 0);
++	rflPlnDist[0] = rflPlnDist[1] = 5.0f;
 +	bWetReflLive = false;
 +	bMirrorCam = false;			// ORO patch (u): only true inside the wet-mirror render proc
 +	mirrorCamPos = _V(0, 0, 0);
@@ -932,7 +2418,7 @@ index ebed069..67dacd7 100644
  	pCreateGlare = NULL;
  	viewH = h;
  	viewW = w;
-@@ -181,6 +192,15 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+@@ -181,6 +202,23 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
  
  	CreateSunGlare();
  
@@ -944,11 +2430,19 @@ index ebed069..67dacd7 100644
 +	HR(pDevice->CreateTexture(viewW / 2, viewH / 2, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &ptWetRefl, NULL));
 +	if (ptWetRefl) HR(ptWetRefl->GetSurfaceLevel(0, &psWetRefl));
 +	HR(pDevice->CreateDepthStencilSurface(viewW / 2, viewH / 2, D3DFMT_D24X8, D3DMULTISAMPLE_NONE, 0, true, &psWetReflDS, NULL));
++	// ORO patch (v) part 2: the VESSEL planar-mirror targets - same size, same format,
++	// same reasoning; the pass that fills them is gated on a vessel DECLARING planes,
++	// so nobody pays a frame cost without asking for one. They share the wet mirror's
++	// depth-stencil: the passes run strictly one after another and each clears it.
++	for (int i = 0; i < 2; i++) {
++		HR(pDevice->CreateTexture(viewW / 2, viewH / 2, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &ptRflPln[i], NULL));
++		if (ptRflPln[i]) HR(ptRflPln[i]->GetSurfaceLevel(0, &psRflPln[i]));
++	}
 +
  
  	// ------------------------------------------------------------------------------
  	// Initialize a shaders for local lights visibility checks and rendering 
-@@ -245,6 +265,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
+@@ -245,6 +283,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
  		HR(pDevice->CreateDepthStencilSurface(viewW, viewH, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &pDepthNormalDS, NULL));
  		HR(D3DXCreateTexture(pDevice, viewW, viewH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &ptgBuffer[GBUF_DEPTH]));
  	}
@@ -959,7 +2453,7 @@ index ebed069..67dacd7 100644
  
  
  	// Initialize post processing effects --------------------------------------------------------------------------------------------------
-@@ -328,6 +352,7 @@ Scene::~Scene ()
+@@ -328,6 +370,7 @@ Scene::~Scene ()
  	pDevice->SetRenderTarget(2, NULL);
  	pDevice->SetRenderTarget(3, NULL);
  
@@ -967,17 +2461,39 @@ index ebed069..67dacd7 100644
  	for (int i = 0; i < ARRAYSIZE(psgBuffer); i++) SAFE_RELEASE(psgBuffer[i]);
  	for (int i = 0; i < ARRAYSIZE(ptgBuffer); i++) SAFE_RELEASE(ptgBuffer[i]);
  	for (int i = 0; i < ARRAYSIZE(pTextures); i++) SAFE_RELEASE(pTextures[i]);
-@@ -349,6 +374,9 @@ Scene::~Scene ()
+@@ -349,6 +392,10 @@ Scene::~Scene ()
  	SAFE_RELEASE(pIrradTemp2);
  	SAFE_RELEASE(pIrradTemp3);
  	SAFE_RELEASE(pDepthNormalDS);
 +	SAFE_RELEASE(psWetRefl);
 +	SAFE_RELEASE(ptWetRefl);
 +	SAFE_RELEASE(psWetReflDS);
++	for (int i = 0; i < 2; i++) { SAFE_RELEASE(psRflPln[i]); SAFE_RELEASE(ptRflPln[i]); }	// ORO patch (v) part 2
  	SAFE_RELEASE(pLocalResults);
  	SAFE_RELEASE(pLocalResultsSL);
  	SAFE_RELEASE(pSunTex);
-@@ -1246,12 +1274,47 @@ void Scene::RenderMainScene()
+@@ -357,6 +404,11 @@ Scene::~Scene ()
+ 	SAFE_RELEASE(pSunGlareAtm);
+ 
+ 	for (int i = 0; i < ARRAYSIZE(psShmDS); i++) SAFE_RELEASE(psShmDS[i]);
++	SAFE_RELEASE(psPShn);	// ORO patch (w)
++	SAFE_RELEASE(ptPShn);
++	SAFE_RELEASE(psSunCpy);
++	SAFE_RELEASE(ptSunCpy);
++	sunCpyLive = false;
+ 	for (int i = 0; i < ARRAYSIZE(ptShmRT); i++) SAFE_RELEASE(ptShmRT[i]);
+ 	for (int i = 0; i < ARRAYSIZE(psShmRT); i++) SAFE_RELEASE(psShmRT[i]);
+ 	for (int i = 0; i < ARRAYSIZE(pBlrTemp); i++) SAFE_RELEASE(pBlrTemp[i]);
+@@ -1235,6 +1287,8 @@ void Scene::RecallDefaultState()
+ 
+ // ===========================================================================================
+ //
++static void OroGatherAssembly(Scene* scn, vVessel* vRoot, std::list<vVessel*>& out);	// ORO patch (w), defined below
++
+ void Scene::RenderMainScene()
+ {
+ 	_TRACE;
+@@ -1246,12 +1300,47 @@ void Scene::RenderMainScene()
  
  	if (!UpdateCamVis()) {
  		if (SUCCEEDED(gc->BeginScene())) {
@@ -1026,7 +2542,95 @@ index ebed069..67dacd7 100644
  
  	// Update Vessel Animations
  	//
-@@ -1436,6 +1499,269 @@ void Scene::RenderMainScene()
+@@ -1326,12 +1415,77 @@ void Scene::RenderMainScene()
+ 	// Render Environmental Map For the Vessels
+ 	// -------------------------------------------------------------------------------------------------------
+ 
++	// -------------------------------------------------------------------------------------------------------
++	// ORO patch (w): PLANET-SHINE SHADOWS. Stock adds Earth glow to every planet-facing
++	// surface with NO occlusion term of any kind, so a closed payload bay glows sky-blue
++	// (reported on the stock client; the sun term gets ComputeShadow, the glow term gets
++	// nothing). In "Full Scene ORO (exp)" only: render the focus vessel's attachment
++	// assembly into a depth map along the PLANET direction - RenderShadowMap reused
++	// wholesale - then copy the result out and RESTORE the sun's struct; the sun's own
++	// pass (much later) repaints the borrowed LOD target. The glow sites in PBR.fx /
++	// Metalness.fx attenuate by this map for assembly members. The pass sits HERE -
++	// before the env-cube turn and both mirror passes - so every reflection of the
++	// assembly consumes THIS frame's map: a mirror must not create light, and a
++	// mirrored bay lit by unshadowed glow inside a dark real bay did exactly that.
++	//
++	pshnSet.clear();
++	if (Config->EnvMapMode >= 3 && Config->ShadowMapMode >= 1 && psShmRT[0] && vFocus && vFocus->IsActive() && Camera.hObj_proxy)
++	{
++		std::list<vVessel*> assy;
++		OroGatherAssembly(this, vFocus, assy);
++		if (!assy.empty())
++		{
++			// merged bounding sphere of the assembly
++			D3DXVECTOR3 c = assy.front()->GetBoundingSpherePosDX();
++			float r = assy.front()->GetBoundingSphereRadius();
++			for (auto* vv : assy) {
++				D3DXVECTOR3 d = vv->GetBoundingSpherePosDX() - c;
++				float dist = D3DXVec3Length(&d);
++				float rr = vv->GetBoundingSphereRadius();
++				if (dist + rr > r) {
++					float nr = (r + dist + rr) * 0.5f;
++					if (dist > 1e-4f) c += d * ((nr - r) / dist);
++					r = nr;
++				}
++			}
++			// light direction: the way planet shine travels, planet centre -> assembly
++			VECTOR3 gp; oapiGetGlobalPos(Camera.hObj_proxy, &gp);
++			VECTOR3 gcam = GetCameraGPos();
++			D3DXVECTOR3 pp(float(gp.x - gcam.x), float(gp.y - gcam.y), float(gp.z - gcam.z));
++			D3DXVECTOR3 ld = c - pp;
++			D3DXVec3Normalize(&ld, &ld);
++
++			SmapRenderList.clear();
++			for (auto* vv : assy) SmapRenderList.push_back(vv);
++
++			SHADOWMAPPARAM save = smap;
++			int lod = RenderShadowMap(c, ld, r, false, true);
++			if (lod >= 0 && EnsurePShnTarget())
++			{
++				HR(pDevice->StretchRect(psShmRT[lod], NULL, psPShn, NULL, D3DTEXF_POINT));
++				pshn = smap;
++				pshn.pShadowMap = ptPShn;
++				for (auto* vv : assy) pshnSet.insert(vv);
++				// logs on every CHANGE of the assembly size - the first frame runs before
++				// all visuals exist (they are created over successive frames), so a one-shot
++				// would report the transient and never the steady state
++				static int logPShnN = -1;
++				if ((int)pshnSet.size() != logPShnN) {
++					logPShnN = (int)pshnSet.size();
++					oapiWriteLogV("D3D9: planet-shine shadows LIVE (%d vessel(s) in assembly)", logPShnN);
++				}
++			}
++			smap = save;
++		}
++	}
++
++
+ 	if (dwTurn == RENDERTURN_ENVCAM) {
+ 
+ 		if (Config->EnvMapMode) {
+ 			DWORD flags = 0;
+ 			if (Config->EnvMapMode == 1) flags |= 0x01;
+-			if (Config->EnvMapMode == 2) flags |= (0x03 | 0x20);
++			if (Config->EnvMapMode >= 2) flags |= (0x03 | 0x20);	// ORO patch (v): mode 3 = full scene + exp
+ 
+ 			if (vobjEnv == NULL) vobjEnv = vobjFirst;
+ 
+@@ -1358,7 +1512,7 @@ void Scene::RenderMainScene()
+ 		if (Config->EnvMapMode && Config->bIrradiance) {
+ 			DWORD flags = 0;
+ 			if (Config->EnvMapMode == 1) flags |= 0x01;
+-			if (Config->EnvMapMode == 2) flags |= (0x03 | 0x20);
++			if (Config->EnvMapMode >= 2) flags |= (0x03 | 0x20);	// ORO patch (v): mode 3 = full scene + exp
+ 
+ 			if (vobjIrd == NULL) vobjIrd = vobjFirst;
+ 
+@@ -1436,6 +1590,347 @@ void Scene::RenderMainScene()
  
  
  	// -------------------------------------------------------------------------------------------------------
@@ -1293,10 +2897,104 @@ index ebed069..67dacd7 100644
 +		}
 +	}
 +
++	// -------------------------------------------------------------------------------------------------------
++	// ORO patch (v) part 2: VESSEL PLANAR MIRRORS - the EXACT reflection for the flat
++	// near-mirror surfaces that expose probe parallax (the shuttle's radiators and
++	// door inner faces). For each plane the FOCUS vessel declares (_ecam BEGIN_PLANE),
++	// render the vessel list - SELF INCLUDED, which is the whole point - through a
++	// camera mirrored about the plane, into a half-res target; PBR groups assigned to
++	// the plane sample it at their own screen position, the wet-ground mirror's exact
++	// contract. Distant environment stays with the probes (probe parallax error
++	// vanishes at infinity), so the two techniques cover each other's blind spots.
++	// The CLIP PLANE removes geometry BEHIND the mirror - the vessel's own far half -
++	// which a ground-plane mirror never had to worry about; with shaders active D3D9
++	// clip planes live in CLIP SPACE (inverse-transpose of the VP).
++	// -------------------------------------------------------------------------------------------------------
++	OroHangTrace("mainscene reached planar gate");
++	nRflPlnLive = 0; pRflPlnVes = NULL;
++	if (Config->EnvMapMode >= 3 && vFocus && vFocus->IsActive() && vFocus->CamDist() < 1500.0 && psWetReflDS)
++	{
++		const DWORD npl = min(vFocus->RflPlaneCount(), (DWORD)2);
++		for (DWORD ip = 0; ip < npl; ip++)
++		{
++			if (!psRflPln[ip]) continue;
++			OroHangTrace("planar plane %u begin", ip);
++			D3DXVECTOR3 pw, nw; float rd = 5.0f;
++			if (!vFocus->GetRflPlane(ip, &pw, &nw, &rd)) continue;
++			// the camera (this space's ORIGIN) must sit on the reflective side, with
++			// half a metre of margin so a grazing eye cannot z-fight the plane
++			const float d0 = -D3DXVec3Dot(&nw, &pw);
++			if (d0 < 0.5f) continue;
++
++			D3DXPLANE plane(nw.x, nw.y, nw.z, d0);
++			// the same equation feeds the shader's curvature warp (gPlnEq)
++			rflPlnEq[ip] = D3DXVECTOR4(nw.x, nw.y, nw.z, d0);
++			rflPlnDist[ip] = rd;
++			D3DXMATRIX mRefl, mVP1, mFlipX;
++			D3DXMATRIX mSave = Camera.mProjView;
++			D3DXMatrixReflect(&mRefl, &plane);
++			D3DXMatrixMultiply(&mVP1, &mRefl, &mSave);
++			// the wet mirror's double-flip: a second mirror in clip space keeps every
++			// group's own culling legal; the sampler undoes the X flip (PBR.fx)
++			D3DXMatrixIdentity(&mFlipX); mFlipX._11 = -1.0f;
++			D3DXMatrixMultiply(&Camera.mProjView, &mVP1, &mFlipX);
++			D3D9Effect::SetViewProjMatrix(&Camera.mProjView);
++
++			D3DXMATRIX mI; D3DXMatrixInverse(&mI, NULL, &Camera.mProjView);
++			D3DXMatrixTranspose(&mI, &mI);
++			D3DXPLANE cp; D3DXPlaneTransform(&cp, &plane, &mI);
++
++			// the RT must not be bound as a sampler while it is the target
++			if (D3D9Effect::ePlnMap) D3D9Effect::FX->SetTexture(D3D9Effect::ePlnMap, NULL);
++
++			BeginPass(RENDERPASS_CUSTOMCAM);
++			gc->PushRenderTarget(psRflPln[ip], psWetReflDS, RENDERPASS_CUSTOMCAM);
++			RecallDefaultState();
++			HR(pDevice->SetClipPlane(0, (const float*)&cp));
++			HR(pDevice->SetRenderState(D3DRS_CLIPPLANEENABLE, 1));
++			HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0L));
++			for (auto* vVes : RenderList)
++				if (vVes->CamDist() < 1500.0) vVes->Render(pDevice, false);
++			HR(pDevice->SetRenderState(D3DRS_CLIPPLANEENABLE, 0));
++			gc->PopRenderTargets();
++			PopPass();
++
++			Camera.mProjView = mSave;
++			D3D9Effect::SetViewProjMatrix(&Camera.mProjView);
++
++			OroHangTrace("planar plane %u done", ip);
++			nRflPlnLive |= (1 << ip);
++		}
++		if (nRflPlnLive) pRflPlnVes = vFocus;
++
++		static int logPln = 0;
++		if (nRflPlnLive && logPln == 0) {
++			oapiWriteLogV("D3D9: planar mirror pass LIVE (%d of %d plane(s), mask 0x%X)",
++				(nRflPlnLive & 1) + ((nRflPlnLive >> 1) & 1), (int)npl, nRflPlnLive);
++			logPln = 1;
++		}
++	}
++
  	// Start Main Scene Rendering
  	// -------------------------------------------------------------------------------------------------------
  
-@@ -1956,6 +2282,60 @@ void Scene::RenderMainScene()
+@@ -1796,6 +2291,15 @@ void Scene::RenderMainScene()
+ 
+ 			pShdMap = ptShmRT[shadow_lod];
+ 
++			// ORO patch (w) part 2: copy the FOCUS sun map for next frame's secondary
++			// passes (probe cubes, mirrors) - see Scene.h. Exp mode only.
++			if (Config->EnvMapMode >= 3 && EnsureSunCpyTarget()) {
++				HR(pDevice->StretchRect(psShmRT[shadow_lod], NULL, psSunCpy, NULL, D3DTEXF_POINT));
++				sunCpy = smap;
++				sunCpy.pShadowMap = ptSunCpy;
++				sunCpyLive = true;
++			}
++
+ 			auto it = RenderList.begin();
+ 
+ 			while (it != RenderList.end()) {
+@@ -1956,6 +2460,60 @@ void Scene::RenderMainScene()
  
  	if (oapiCameraInternal() && vFocus) {
  
@@ -1357,7 +3055,7 @@ index ebed069..67dacd7 100644
  		// switch cockpit lights on, external-only lights off
  		//
  		if (bLocalLight) {
-@@ -1975,7 +2355,25 @@ void Scene::RenderMainScene()
+@@ -1975,7 +2533,25 @@ void Scene::RenderMainScene()
  		if (znear>1.0)  znear=1.0;
  		OBJHANDLE hFocus = oapiGetFocusObject();
  		SetCameraFrustumLimits(znear, oapiGetSize(hFocus)*2.0);
@@ -1383,7 +3081,7 @@ index ebed069..67dacd7 100644
  	}
  
  	pDevice->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
-@@ -1984,9 +2382,24 @@ void Scene::RenderMainScene()
+@@ -1984,9 +2560,24 @@ void Scene::RenderMainScene()
  	// End Of Main Scene Rendering ---------------------------------------------
  	//
  
@@ -1410,7 +3108,7 @@ index ebed069..67dacd7 100644
  
  
  
-@@ -2118,12 +2531,17 @@ void Scene::RenderMainScene()
+@@ -2118,12 +2709,17 @@ void Scene::RenderMainScene()
  		gc->MakeRenderProcCall(pSketch, RENDERPROC_HUD_1ST, NULL, NULL);
  		pSketch->EndDrawing(); // SKETCHPAD_2D_OVERLAY
  	}
@@ -1428,7 +3126,77 @@ index ebed069..67dacd7 100644
  
  
  	// Enable Freeze mode after the main scene is complete
-@@ -2958,6 +3376,19 @@ void Scene::RenderVesselShadows (OBJHANDLE hPlanet, float depth) const
+@@ -2463,6 +3059,69 @@ D3DXCOLOR Scene::GetSunDiffColor()
+ 
+ 
+ 
++// ===========================================================================================
++//
++// ===========================================================================================
++// ORO patch (w): the focus vessel's ATTACHMENT ASSEMBLY - climb to the root of the
++// attachment tree, then collect every visual below it. Berthed payloads ride their
++// carrier's planet-shine shadow map this way, and focusing the payload instead of
++// the carrier changes nothing about the lighting (as it must not).
++//
++static void OroGatherAssembly(Scene* scn, vVessel* vRoot, std::list<vVessel*>& out)
++{
++	VESSEL* v = vRoot->GetInterface();
++	if (!v) return;
++	for (int guard = 0; guard < 8; guard++) {
++		VESSEL* parent = NULL;
++		DWORD n = v->AttachmentCount(true);
++		for (DWORD i = 0; i < n; i++) {
++			OBJHANDLE hP = v->GetAttachmentStatus(v->GetAttachmentHandle(true, i));
++			if (hP) { parent = oapiGetVesselInterface(hP); break; }
++		}
++		if (!parent) break;
++		v = parent;
++	}
++	std::list<VESSEL*> open; open.push_back(v);
++	std::set<VESSEL*> seen; seen.insert(v);
++	while (!open.empty()) {
++		VESSEL* cur = open.front(); open.pop_front();
++		vObject* vo = scn->GetVisObject(cur->GetHandle());
++		if (vo && vo->IsActive()) out.push_back((vVessel*)vo);
++		DWORD n = cur->AttachmentCount(false);
++		for (DWORD i = 0; i < n && seen.size() < 16; i++) {
++			OBJHANDLE hC = cur->GetAttachmentStatus(cur->GetAttachmentHandle(false, i));
++			if (!hC) continue;
++			VESSEL* c = oapiGetVesselInterface(hC);
++			if (c && !seen.count(c)) { seen.insert(c); open.push_back(c); }
++		}
++	}
++}
++
++// ===========================================================================================
++// ORO patch (w): the planet-shine map's own target (full ShadowMapSize, R32F like
++// the sun LODs). Lazy - never allocated under the three stock reflection modes.
++//
++bool Scene::EnsurePShnTarget()
++{
++	if (ptPShn) return true;
++	int size = Config->ShadowMapSize;
++	if (pDevice->CreateTexture(size, size, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &ptPShn, NULL) != S_OK) { ptPShn = NULL; return false; }
++	if (ptPShn->GetSurfaceLevel(0, &psPShn) != S_OK) { SAFE_RELEASE(ptPShn); psPShn = NULL; return false; }
++	return true;
++}
++
++// ===========================================================================================
++// ORO patch (w) part 2: the sun-map copy target - same recipe.
++//
++bool Scene::EnsureSunCpyTarget()
++{
++	if (ptSunCpy) return true;
++	int size = Config->ShadowMapSize;
++	if (pDevice->CreateTexture(size, size, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &ptSunCpy, NULL) != S_OK) { ptSunCpy = NULL; return false; }
++	if (ptSunCpy->GetSurfaceLevel(0, &psSunCpy) != S_OK) { SAFE_RELEASE(ptSunCpy); psSunCpy = NULL; return false; }
++	return true;
++}
++
+ // ===========================================================================================
+ //
+ int Scene::RenderShadowMap(D3DXVECTOR3 &pos, D3DXVECTOR3 &ld, float rad, bool bInternal, bool bListExists)
+@@ -2958,6 +3617,19 @@ void Scene::RenderVesselShadows (OBJHANDLE hPlanet, float depth) const
  	// If this planet is not a proxy body skip the rest
  	if (hPlanet != oapiCameraProxyGbody()) return;
  
@@ -1448,7 +3216,31 @@ index ebed069..67dacd7 100644
  	// render vessel shadows
  	VOBJREC *pv;
  	for (pv = vobjFirst; pv; pv = pv->next) {
-@@ -3406,6 +3837,8 @@ bool Scene::UpdateCameraFromOrbiter(DWORD dwPass)
+@@ -3088,6 +3760,23 @@ void Scene::DeleteVessel(OBJHANDLE hVessel)
+ 
+ // ===========================================================================================
+ //
++// ORO patch (y): walk the scene's particle streams and report the reconstructed
++// spec of hVessel's STOCK exhaust streams - the only place a vessel author's own
++// PARTICLESTREAMSPEC can be read back from (the core copies it at construction and
++// exposes no getter). Read-only; nothing is lent, so 23(k)'s load-window rule does
++// not apply.
++int Scene::GetExhaustStreamSpec (OBJHANDLE hVessel, int idx, PARTICLESTREAMSPEC* out,
++                                 VECTOR3* pos, VECTOR3* dir)
++{
++	int n = 0;
++	for (DWORD i = 0; i < nstream; i++) {
++		if (!pstream[i]->OroIsStockExhaust(hVessel)) continue;
++		if (n == idx) pstream[i]->OroGetSpec(out, pos, dir);
++		n++;
++	}
++	return n;
++}
++
+ void Scene::AddParticleStream (class D3D9ParticleStream *_pstream)
+ {
+ 
+@@ -3406,6 +4095,8 @@ bool Scene::UpdateCameraFromOrbiter(DWORD dwPass)
  
  	oapiCameraGlobalDir(&Camera.dir);
  	oapiCameraRotationMatrix(&grot);
@@ -1457,7 +3249,7 @@ index ebed069..67dacd7 100644
  	D3DXMatrixIdentity(&Camera.mView);
  	D3DMAT_SetRotation(&Camera.mView, &grot);
  
-@@ -3688,6 +4121,10 @@ void Scene::RenderGlares()
+@@ -3688,6 +4379,10 @@ void Scene::RenderGlares()
  			if (WorldToScreenSpace2(pos, &pt))
  			{
  				float cis = 1.0f, glare = float(Config->GFXGlare) * saturate(8.0 * AU / sdst);
@@ -1469,7 +3261,7 @@ index ebed069..67dacd7 100644
  
  				vPlanet* vp = GetCameraNearVisual();
 diff --git a/OVP/D3D9Client/Scene.h b/OVP/D3D9Client/Scene.h
-index 917f38b..e1eb624 100644
+index 917f38b..3bd400c 100644
 --- a/OVP/D3D9Client/Scene.h
 +++ b/OVP/D3D9Client/Scene.h
 @@ -134,6 +134,10 @@ public:
@@ -1495,7 +3287,21 @@ index 917f38b..e1eb624 100644
  	LPDIRECT3DTEXTURE9 GetSunTexture() const { return pSunTex; }
  	LPDIRECT3DTEXTURE9 GetSunGlareAtm() const { return pSunGlareAtm; }
  
-@@ -355,6 +364,25 @@ public:
+@@ -284,6 +293,13 @@ public:
+ 	void DeleteVessel (OBJHANDLE hVessel);
+ 
+ 	void AddParticleStream (class D3D9ParticleStream *_pstream);
++
++	// ORO patch (y): count / read back the reconstructed specs of a vessel's STOCK
++	// exhaust particle streams (reentry streams and ORO's own exempted replacement
++	// streams are not counted). Returns the count; fills the outputs when idx is
++	// valid. pos/dir are the stream's attach point and thrust direction, VESSEL frame.
++	int GetExhaustStreamSpec (OBJHANDLE hVessel, int idx, PARTICLESTREAMSPEC* out,
++	                          VECTOR3* pos, VECTOR3* dir);
+ 	void DelParticleStream (DWORD idx);
+ 
+ 	void AddLocalLight(const LightEmitter *le, const vObject *vo);
+@@ -355,6 +371,25 @@ public:
  	float			GetCameraNearPlane() const { return Camera.nearplane; }
  	float			GetCameraAperture() const { return (float)Camera.aperture; }
  	VECTOR3			GetCameraGPos() const { return Camera.pos; }
@@ -1521,18 +3327,67 @@ index 917f38b..e1eb624 100644
  	VECTOR3			GetCameraGDir() const { return Camera.dir; }
  	OBJHANDLE		GetCameraProxyBody() const { return Camera.hObj_proxy; }
  	vPlanet *		GetCameraProxyVisual() const { return Camera.vProxy; }
-@@ -519,6 +547,15 @@ private:
+@@ -519,6 +554,64 @@ private:
  	LPDIRECT3DTEXTURE9 pTextures[TEX_COUNT];
  
  	LPDIRECT3DSURFACE9 pEnvDS, pIrradDS, pDepthNormalDS;
 +	LPDIRECT3DTEXTURE9 ptWetRefl;		// ORO patch (s) part 6: wet-ground planar reflection, half res
++	// ORO patch (w): PLANET-SHINE SHADOWS - a depth map of the focus vessel's
++	// attachment assembly along the PLANET direction, so Earth glow cannot light
++	// the inside of a closed payload bay. Own target: the sun's LOD targets are
++	// repainted by the sun's own pass right after (the patch-(f) reuse trap).
++	SHADOWMAPPARAM pshn;
++	LPDIRECT3DTEXTURE9 ptPShn;
++	LPDIRECT3DSURFACE9 psPShn;
++	std::set<const class vVessel*> pshnSet;	// this frame's receiver set (the assembly)
++	bool EnsurePShnTarget();
++	// ORO patch (w) part 2: a COPY of the focus vessel's SUN shadow map, taken after
++	// the main scene renders it. Stock binds the sun map in the MAIN SCENE only, so
++	// every secondary render (probe cubes, both mirror passes) draws the assembly
++	// fully sunlit - invisible in stock (probes exclude self), glaring the moment an
++	// interior probe renders its own closed bay. The copy is one frame stale, which
++	// is bounded and invisible; the LOD target itself is repainted by other passes.
++	SHADOWMAPPARAM sunCpy;
++	LPDIRECT3DTEXTURE9 ptSunCpy;
++	LPDIRECT3DSURFACE9 psSunCpy;
++	bool sunCpyLive;
++	bool EnsureSunCpyTarget();
++	LPDIRECT3DTEXTURE9 ptRflPln[2];		// ORO patch (v) part 2: vessel planar mirrors, half res
++	LPDIRECT3DSURFACE9 psRflPln[2];		// ... their level-0 surfaces
++	const class vVessel* pRflPlnVes;	// ... whose planes they hold this frame
++	int nRflPlnLive;					// ... bitmask of planes rendered this frame
++	D3DXVECTOR4 rflPlnEq[2];			// ... plane equation (N, d), camera-centred world
++	float rflPlnDist[2];				// ... RDIST per plane [m] (the curvature warp)
 +	LPDIRECT3DSURFACE9 psWetRefl;		// ORO patch (s) part 6: its level-0 surface (the RT binding)
 +	LPDIRECT3DSURFACE9 psWetReflDS;		// ORO patch (s) part 6: its depth-stencil
 +	bool bWetReflLive;					// ORO patch (s) part 6: the RT holds this frame's mirror
 +public:
 +	// ORO patch (s) part 6: the terrain shader samples the same mirror as the base tiles
 +	LPDIRECT3DTEXTURE9 GetWetReflTex() const { return bWetReflLive ? ptWetRefl : NULL; }
++	// ORO patch (v) part 2: the vessel planar-mirror targets. Filled only for the
++	// vessel whose planes rendered this frame; everyone else gets zero, which is
++	// what keeps the mirrored RT off every other hull.
++	int GetRflPlaneTex(const class vVessel* v, LPDIRECT3DTEXTURE9* out, D3DXVECTOR4* eq, float* dist, int mx) const {
++		if (v != pRflPlnVes || !pRflPlnVes) return 0;
++		int n = 0;
++		for (int i = 0; i < 2 && n < mx; i++) {
++			out[n]  = (nRflPlnLive & (1 << i)) ? ptRflPln[i] : NULL;
++			if (eq)   eq[n]   = rflPlnEq[i];
++			if (dist) dist[n] = rflPlnDist[i];
++			n++;
++		}
++		return n;
++	}
 +	bool IsWetReflLive() const { return bWetReflLive; }
++	// ORO patch (w): the planet-shine shadow map, for assembly members this frame.
++	const SHADOWMAPPARAM* GetPShn(const class vVessel* v) const {
++		return (ptPShn && pshnSet.count(v)) ? &pshn : NULL;
++	}
++	// ORO patch (w) part 2: last frame's sun shadow map, for assembly members in
++	// secondary passes (the main scene binds the live map itself).
++	const SHADOWMAPPARAM* GetSunShdCopy(const class vVessel* v) const {
++		return (sunCpyLive && ptSunCpy && pshnSet.count(v)) ? &sunCpy : NULL;
++	}
 +private:
  	LPDIRECT3DSURFACE9 psShmDS[SHM_LOD_COUNT];
  	LPDIRECT3DSURFACE9 psShmRT[SHM_LOD_COUNT];
@@ -1609,10 +3464,130 @@ index 85278c8..0f813e5 100644
  	pShader->SetVSConstants(pShader->FlowVS, fcv, sizeof(FlowControlVS));
  	pShader->SetPSConstants(pShader->Flow, fc, sizeof(FlowControlPS));
 diff --git a/OVP/D3D9Client/VVessel.cpp b/OVP/D3D9Client/VVessel.cpp
-index bb0ab52..6028604 100644
+index bb0ab52..b91edcc 100644
 --- a/OVP/D3D9Client/VVessel.cpp
 +++ b/OVP/D3D9Client/VVessel.cpp
-@@ -944,11 +944,18 @@ void vVessel::RenderVectors (LPDIRECT3DDEVICE9 dev, D3D9Pad *pSkp)
+@@ -56,6 +56,7 @@ vVessel::vVessel(OBJHANDLE _hObj, const Scene *scene): vObject (_hObj, scene)
+ 	nEnv  = 0;
+ 	iFace = 0;
+ 	eFace = 0;
++	eCamIdx = 0;	// ORO patch (v)
+ 	sunLight = *scene->GetSun();
+ 	tCheckLight = oapiGetSimTime()-1.0;
+ 	vClass = 0;
+@@ -239,6 +240,31 @@ void vVessel::PreInitObject()
+ 	if (pMatMgr->LoadConfiguration()) {
+ 		for (DWORD i=0;i<nmesh;i++) if (meshlist[i].mesh) pMatMgr->ApplyConfiguration(meshlist[i].mesh);
+ 		pMatMgr->LoadCameraConfig();
++		OroHangTrace("stamp enter %s nmesh=%u", vessel->GetName(), nmesh);
++		// ORO patch (v): stamp each camera's GROUPS ranges onto the mesh instances,
++		// so the group loop in D3D9Mesh::Render can swap probes per group. Ranges
++		// apply to every mesh of the vessel (reflective hulls are single-mesh in
++		// practice; a per-mesh syntax can come later if one ever isn't).
++		for (DWORD c = 1; c < pMatMgr->CameraCount(); c++) {
++			ENVCAMREC* eC = pMatMgr->GetCamera(c);
++			for (WORD r = 0; r < eC->nGrpRng; r++) {
++				const WORD g0 = eC->pGrpRng[r * 2], g1 = eC->pGrpRng[r * 2 + 1];
++				for (DWORD i = 0; i < nmesh; i++) if (meshlist[i].mesh)
++					for (WORD g = g0; g <= g1; g++)
++						meshlist[i].mesh->SetGroupEnvCam(g, BYTE(c));
++			}
++		}
++		// ... and the PLANAR mirror assignments (patch (v) part 2), same shape.
++		for (DWORD p = 0; p < pMatMgr->PlaneCount(); p++) {
++			ENVPLNREC* eP = pMatMgr->GetPlane(p);
++			for (WORD r = 0; r < eP->nGrpRng; r++) {
++				const WORD g0 = eP->pGrpRng[r * 2], g1 = eP->pGrpRng[r * 2 + 1];
++				for (DWORD i = 0; i < nmesh; i++) if (meshlist[i].mesh)
++					for (WORD g = g0; g <= g1; g++)
++						meshlist[i].mesh->SetGroupRflPlane(g, BYTE(p + 1));
++			}
++		}
++		OroHangTrace("stamp exit %s", vessel->GetName());
+ 	}
+ 	else LogErr("Failed to load a custom configuration for %s",vessel->GetClassNameA());
+ }
+@@ -700,13 +726,78 @@ bool vVessel::Render(LPDIRECT3DDEVICE9 dev, bool internalpass)
+ 	HR(D3D9Effect::FX->SetBool(D3D9Effect::eEnvMapEnable, false));
+ 	HR(D3D9Effect::FX->SetMatrix(D3D9Effect::eLVP, &shd->mViewProj));
+ 
++	// ORO patch (v): build THIS vessel's probe table for the meshes' per-group swap -
++	// box centre, axes and probe position taken from vessel-local config space into
++	// the camera-centred world the shaders live in. Refilled on every Render call, so
++	// one vessel's boxes can never leak onto the next (the table is a static).
++	{
++		D3D9Mesh::ENVPRB prb[MAX_ENVCAM];
++		const int np = (Config->EnvMapMode >= 3)	// ORO: probes are exp-mode only
++		             ? min((int)pMatMgr->CameraCount(), (int)MAX_ENVCAM) : 0;
++		for (int c = 0; c < np; c++) {
++			ENVCAMREC* eC = pMatMgr->GetCamera(c);
++			D3DXVECTOR3 w;
++			D3DXVec3TransformCoord(&w, &eC->lPos, &mWorld);
++			prb[c].P = D3DXVECTOR4(w.x, w.y, w.z, 0);
++			if (eC->bBox) {
++				D3DXVec3TransformCoord(&w, &eC->bxC, &mWorld);
++				prb[c].C = D3DXVECTOR4(w.x, w.y, w.z, 1.0f);
++				// vessel axes in world = the world matrix's rows (row-vector convention)
++				prb[c].X = D3DXVECTOR4(mWorld._11, mWorld._12, mWorld._13, eC->bxE.x);
++				prb[c].Y = D3DXVECTOR4(mWorld._21, mWorld._22, mWorld._23, eC->bxE.y);
++				prb[c].Z = D3DXVECTOR4(mWorld._31, mWorld._32, mWorld._33, eC->bxE.z);
++			}
++			else prb[c].C = D3DXVECTOR4(0, 0, 0, 0);
++		}
++		D3D9Mesh::SetEnvProbes(prb, np);
++	}
++	// ORO patch (v) part 2: hand the meshes the mirrored-scene RTs - but ONLY in the
++	// main scene, and only when this vessel's planes were rendered this frame: in
++	// every other pass (env cubes, shadow, depth, the mirror passes themselves) the
++	// table is cleared, which is both the recursion guard and the staleness guard.
++	{
++		LPDIRECT3DTEXTURE9 pt[MAX_ENVPLN]; D3DXVECTOR4 peq[MAX_ENVPLN]; float prd[MAX_ENVPLN]; int npl = 0;
++		if (scn->GetRenderPass() == RENDERPASS_MAINSCENE && Config->EnvMapMode >= 3)
++			npl = scn->GetRflPlaneTex(this, pt, peq, prd, MAX_ENVPLN);
++		D3D9Mesh::SetRflPlanes(npl ? pt : NULL, peq, prd, npl);
++	}
++
+ 	if (shd->pShadowMap && (scn->GetRenderPass() == RENDERPASS_MAINSCENE)) {
+ 		HR(D3D9Effect::FX->SetTexture(D3D9Effect::eShadowMap, shd->pShadowMap));
+ 		HR(D3D9Effect::FX->SetVector(D3D9Effect::eSHD, ptr(D3DXVECTOR4(sr, 1.0f / s, float(oapiRand()), 1.0f / shd->depth))));
+ 		HR(D3D9Effect::FX->SetBool(D3D9Effect::eShadowToggle, true));
+ 	}
+ 	else {
+-		HR(D3D9Effect::FX->SetBool(D3D9Effect::eShadowToggle, false));
++		// ORO patch (w) part 2: in SECONDARY passes (probe cubes, both mirrors) bind
++		// last frame's COPY of the sun map for assembly members, so an interior probe
++		// does not render its own closed bay fully sunlit. ComputeShadow runs verbatim.
++		const Scene::SHADOWMAPPARAM* sw = scn->GetSunShdCopy(this);
++		if (sw && sw->pShadowMap && scn->GetRenderPass() != RENDERPASS_SHADOWMAP) {
++			float s2 = float(sw->size);
++			float sr2 = 2.0f * sw->rad / s2;
++			HR(D3D9Effect::FX->SetTexture(D3D9Effect::eShadowMap, sw->pShadowMap));
++			HR(D3D9Effect::FX->SetMatrix(D3D9Effect::eLVP, &sw->mViewProj));
++			HR(D3D9Effect::FX->SetVector(D3D9Effect::eSHD, ptr(D3DXVECTOR4(sr2, 1.0f / s2, float(oapiRand()), 1.0f / sw->depth))));
++			HR(D3D9Effect::FX->SetBool(D3D9Effect::eShadowToggle, true));
++		}
++		else HR(D3D9Effect::FX->SetBool(D3D9Effect::eShadowToggle, false));
++	}
++
++	// ORO patch (w): the planet-shine shadow map - assembly members carry it in EVERY
++	// pass that draws them: the planar/wet mirrors and the probe cubes would otherwise
++	// reflect the UNSHADOWED glow into an otherwise dark bay (a mirror cannot create
++	// light). The world frame is camera-centred and constant within a frame - only
++	// view matrices change per pass - so the lookup is valid everywhere; depth-only
++	// passes ignore the uniforms. Non-members still get the stock glow.
++	{
++		const Scene::SHADOWMAPPARAM* pw = scn->GetPShn(this);
++		if (pw && pw->pShadowMap) {
++			HR(D3D9Effect::FX->SetTexture(D3D9Effect::ePShnMap, pw->pShadowMap));
++			HR(D3D9Effect::FX->SetMatrix(D3D9Effect::ePShnLVP, &pw->mViewProj));
++			// x = enable, y = texel, z = world bias [m], w = 1/depth
++			HR(D3D9Effect::FX->SetVector(D3D9Effect::ePShnSHD, ptr(D3DXVECTOR4(1.0f, 1.0f / float(Config->ShadowMapSize), 0.15f, 1.0f / pw->depth))));
++		}
++		else HR(D3D9Effect::FX->SetVector(D3D9Effect::ePShnSHD, ptr(D3DXVECTOR4(0, 0, 0, 0))));
+ 	}
+ 
+ 	HR(D3D9Effect::FX->SetTexture(D3D9Effect::eIrradMap, pIrrad));
+@@ -944,11 +1035,18 @@ void vVessel::RenderVectors (LPDIRECT3DDEVICE9 dev, D3D9Pad *pSkp)
  
  
  // ============================================================================================
@@ -1632,7 +3607,124 @@ index bb0ab52..6028604 100644
  
  	DWORD nexhaust = vessel->GetExhaustCount();
  	if (!nexhaust) return true; // nothing to do
-@@ -1715,10 +1722,19 @@ void vVessel::AnimateComponent (ANIMATIONCOMP *comp, const D3DXMATRIX &T)
+@@ -1129,6 +1227,43 @@ void vVessel::RenderGroundShadow(LPDIRECT3DDEVICE9 dev, OBJHANDLE hPlanet, float
+ // Return true if it's time to move to a next vessel
+ // false, if more rendereing is required here.
+ //
++// ============================================================================================
++// ORO patch (v) part 2: this vessel's reflection plane in CAMERA-CENTRED WORLD space.
++// POS/NRM are authored in the mesh BASE pose; when GRPREF names an animated group the
++// plane rides that group's CURRENT transform, so an opening bay door carries its
++// mirror with it. Returns false when the plane is undeclared or unusable this frame.
++DWORD vVessel::RflPlaneCount()
++{
++	return pMatMgr->PlaneCount();
++}
++
++
++// ============================================================================================
++//
++bool vVessel::GetRflPlane(DWORD idx, D3DXVECTOR3* wPos, D3DXVECTOR3* wNrm, float* rDist)
++{
++	if (idx >= pMatMgr->PlaneCount()) return false;
++	ENVPLNREC* eP = pMatMgr->GetPlane(idx);
++	if (rDist) *rDist = eP->rDist;
++	D3DXVECTOR3 p = eP->lPos, n = eP->lNrm;
++	if (eP->refMesh >= 0 && (DWORD)eP->refMesh < nmesh && meshlist[eP->refMesh].mesh) {
++		const D3D9Mesh::GROUPREC* gr = meshlist[eP->refMesh].mesh->GetGroup((DWORD)eP->refGrp);
++		if (gr && gr->bTransform) {
++			D3DXVECTOR3 p2, n2;
++			D3DXVec3TransformCoord(&p2, &p, &gr->Transform);
++			D3DXVec3TransformNormal(&n2, &n, &gr->Transform);
++			p = p2; n = n2;
++		}
++	}
++	D3DXVec3TransformCoord(wPos, &p, &mWorld);
++	D3DXVec3TransformNormal(wNrm, &n, &mWorld);
++	D3DXVec3Normalize(wNrm, wNrm);
++	return true;
++}
++
++
++// ============================================================================================
++//
+ bool vVessel::RenderENVMap(LPDIRECT3DDEVICE9 pDev, DWORD cnt, DWORD flags)
+ {
+ 
+@@ -1155,24 +1290,42 @@ bool vVessel::RenderENVMap(LPDIRECT3DDEVICE9 pDev, DWORD cnt, DWORD flags)
+ 	}
+ 
+ 
+-	// Create a main EnvMap with mipmap chain for blurred maps --------------------------------------------------------------------
++	// ORO patch (v): the vessel may declare several reflection probes (MAX_ENVCAM).
++	// They render in sequence through the same round-robin that used to serve the one:
++	// six faces of probe eCamIdx across turns, then its blur, then the next probe -
++	// and only after the LAST probe does this vessel yield the turn. Update latency
++	// therefore scales with the probe count, which is the honest price of the feature
++	// and the reason MAX_ENVCAM is small. One camera = the exact stock sequence.
++	// ORO patch (v): multi-probe belongs to the EXPERIMENTAL mode only - under the
++	// three stock settings this runs the exact stock single-camera sequence.
++	OroHangTrace("envmap %s cam=%d face=%d", vessel->GetName(), eCamIdx, eFace);
++	const int nCams = (Config->EnvMapMode >= 3)
++	                ? max(1, min((int)pMatMgr->CameraCount(), (int)MAX_ENVCAM)) : 1;
++	if (eCamIdx >= nCams) eCamIdx = 0;   // config shrank between sessions
++
++	// Create this probe's EnvMap with mipmap chain for blurred maps ----------------------------------------
+ 	//
+-	if (pEnv[ENVMAP_MAIN] == NULL) {
++	if (pEnv[eCamIdx] == NULL) {
+ 		D3DSURFACE_DESC desc;
+ 		pEnvDS->GetDesc(&desc);
+-		if (D3DXCreateCubeTexture(pDev, desc.Width, 5, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &pEnv[ENVMAP_MAIN]) != S_OK) {
++		if (D3DXCreateCubeTexture(pDev, desc.Width, 5, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &pEnv[eCamIdx]) != S_OK) {
+ 			LogErr("Failed to create env cubemap for visual %s", _PTR(this));
+ 			return true;
+ 		}
+-		nEnv++;
++		if (eCamIdx + 1 > nEnv) nEnv = eCamIdx + 1;
++		// ORO patch (v) breadcrumb: proves the round-robin actually reached this probe.
++		if (eCamIdx > 0)
++			oapiWriteLogV("D3D9: env probe %d cube created (%s).", eCamIdx, vessel->GetName());
+ 	}
+ 
+ 	// Create blurred maps  -------------------------------------------------------------------------------
+ 	//
+ 	if (eFace >= 6) {
+ 		eFace = 0;
+-		scn->RenderBlurredMap(pDev, pEnv[ENVMAP_MAIN]);
+-		return true;
++		scn->RenderBlurredMap(pDev, pEnv[eCamIdx]);
++		eCamIdx++;
++		if (eCamIdx >= nCams) { eCamIdx = 0; return true; }   // full probe cycle done
++		return false;                                          // next probe, next turn
+ 	}
+ 
+ 	double tot_env = D3D9GetTime();
+@@ -1182,12 +1335,12 @@ bool vVessel::RenderENVMap(LPDIRECT3DDEVICE9 pDev, DWORD cnt, DWORD flags)
+ 	// Render EnvMaps ---------------------------------------------------------------------------------------
+ 	//
+ 
+-	std::set<vVessel *> RndList = scn->GetVessels(10e3, true);	
++	std::set<vVessel *> RndList = scn->GetVessels(10e3, true);
+ 	std::set<vVessel *> AddLightSrc;
+ 
+ 	AddLightSrc.insert(this);
+ 
+-	ENVCAMREC *eCam = pMatMgr->GetCamera(0);
++	ENVCAMREC *eCam = pMatMgr->GetCamera(eCamIdx);
+ 
+ 	if ((eCam->flags&ENVCAM_FOCUS) == 0) RndList.erase(this);
+ 
+@@ -1243,7 +1396,7 @@ bool vVessel::RenderENVMap(LPDIRECT3DDEVICE9 pDev, DWORD cnt, DWORD flags)
+ 
+ 	for (DWORD i=0;i<cnt;i++) {
+ 
+-		HR(pEnv[ENVMAP_MAIN]->GetCubeMapSurface(D3DCUBEMAP_FACES(eFace), 0, &pSrf));
++		HR(pEnv[eCamIdx]->GetCubeMapSurface(D3DCUBEMAP_FACES(eFace), 0, &pSrf));   // ORO patch (v)
+ 	
+ 		gc->AlterRenderTarget(pSrf, pEnvDS);
+ 
+@@ -1715,10 +1868,19 @@ void vVessel::AnimateComponent (ANIMATIONCOMP *comp, const D3DXMATRIX &T)
  // ============================================================================================
  //
  
@@ -1652,11 +3744,97 @@ index bb0ab52..6028604 100644
  
  	double p = vessel->GetAtmDensity();
  	double v = vessel->GetAirspeed();
+diff --git a/OVP/D3D9Client/VVessel.h b/OVP/D3D9Client/VVessel.h
+index 2ad3b2e..f6c929d 100644
+--- a/OVP/D3D9Client/VVessel.h
++++ b/OVP/D3D9Client/VVessel.h
+@@ -127,6 +127,10 @@ public:
+ 	void RenderGrapplePoints (LPDIRECT3DDEVICE9 dev);
+ 	void RenderGroundShadow (LPDIRECT3DDEVICE9 dev, OBJHANDLE hPlanet, float depth);
+ 	void RenderVectors (LPDIRECT3DDEVICE9 dev, D3D9Pad *pSkp);
++	// ORO patch (v) part 2: this vessel's declared reflection plane in camera-centred
++	// world (animation-aware). False when idx is undeclared.
++	bool GetRflPlane(DWORD idx, D3DXVECTOR3* wPos, D3DXVECTOR3* wNrm, float* rDist = NULL);
++	DWORD RflPlaneCount();
+ 	bool RenderENVMap (LPDIRECT3DDEVICE9 pDev, DWORD cnt=2, DWORD flags=0xFF);
+ 	bool ProbeIrradiance(LPDIRECT3DDEVICE9 pDev, DWORD cnt = 2, DWORD flags = 0xFF);
+ 
+@@ -209,6 +213,7 @@ private:
+ 	int nEnv;				// Number of environmental maps
+ 	int iFace;				// EnvMap Face index that is to be rendered next
+ 	int eFace;
++	int eCamIdx;		// ORO patch (v): which reflection probe is being rendered
+ 
+ 	struct MESHREC {
+ 		D3D9Mesh *mesh;		// DX9 mesh representation
+diff --git a/OVP/D3D9Client/VideoTab.cpp b/OVP/D3D9Client/VideoTab.cpp
+index 6b36013..98f01c9 100644
+--- a/OVP/D3D9Client/VideoTab.cpp
++++ b/OVP/D3D9Client/VideoTab.cpp
+@@ -615,6 +615,7 @@ void VideoTab::InitSetupDialog(HWND hWnd)
+ 	SendDlgItemMessageA(hWnd, IDC_ENVMODE, CB_ADDSTRING, 0, (LPARAM)"Disable (Debug)");
+ 	SendDlgItemMessageA(hWnd, IDC_ENVMODE, CB_ADDSTRING, 0, (LPARAM)"Planet Only");
+ 	SendDlgItemMessageA(hWnd, IDC_ENVMODE, CB_ADDSTRING, 0, (LPARAM)"Full Scene");
++	SendDlgItemMessageA(hWnd, IDC_ENVMODE, CB_ADDSTRING, 0, (LPARAM)"Full Scene ORO (exp)");	// ORO patch (v): index 3
+ 	SendDlgItemMessage(hWnd, IDC_ENVMODE, CB_SETCURSEL, 0, 0);
+ 
+ 	// CUSTOM CAMERA MODE --------------------------------------
+@@ -658,6 +659,26 @@ void VideoTab::InitSetupDialog(HWND hWnd)
+ 	SendDlgItemMessageA(hWnd, IDC_MICROMODE, CB_ADDSTRING, 0, (LPARAM)"Enabled");
+ 	SendDlgItemMessage(hWnd,  IDC_MICROMODE, CB_SETCURSEL, 0, 0);
+ 
++	// ORO patch (x): DIFFUSE particle sun lighting mode ------------
++	SendDlgItemMessage(hWnd,  IDC_PRTLIGHT, CB_RESETCONTENT, 0, 0);
++	SendDlgItemMessageA(hWnd, IDC_PRTLIGHT, CB_ADDSTRING, 0, (LPARAM)"Off (stock, always lit)");
++	SendDlgItemMessageA(hWnd, IDC_PRTLIGHT, CB_ADDSTRING, 0, (LPARAM)"Brightness only");
++	SendDlgItemMessageA(hWnd, IDC_PRTLIGHT, CB_ADDSTRING, 0, (LPARAM)"Brightness + colour");
++	// ... and the diffuse-particle ground-shadow strength (his ask, 2026-08-30: a
++	// low sun stretched a smoke column's shadow into a near-black band). 0..100 on
++	// the trackbar = 0..1 in the config; 100 = stock strength.
++	SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_SETRANGEMAX, 1, 100);
++	SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_SETRANGEMIN, 1, 0);
++	// ... and the three dawn-tint dials (his ask, 2026-08-30: tune without a
++	// recompile). All 0..100 on the trackbar; the mappings live at the
++	// SETPOS/GETPOS sites: lead 0..0.20 sin-el, depth 1..4, bloom 1..3.
++	SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_SETRANGEMAX, 1, 100);
++	SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_SETRANGEMIN, 1, 0);
++	SendDlgItemMessage(hWnd, IDC_PRTSAT,   TBM_SETRANGEMAX, 1, 100);
++	SendDlgItemMessage(hWnd, IDC_PRTSAT,   TBM_SETRANGEMIN, 1, 0);
++	SendDlgItemMessage(hWnd, IDC_PRTBLOOM, TBM_SETRANGEMAX, 1, 100);
++	SendDlgItemMessage(hWnd, IDC_PRTBLOOM, TBM_SETRANGEMIN, 1, 0);
++
+ 
+ 	// MICROTEX BLEND MODE -----------------------------------------
+ 	
+@@ -806,6 +827,11 @@ void VideoTab::InitSetupDialog(HWND hWnd)
+ 	SendDlgItemMessage(hWnd, IDC_SELFSHADOWS, CB_SETCURSEL, Config->ShadowMapMode, 0);
+ 	SendDlgItemMessage(hWnd, IDC_SHADOWFILTER, CB_SETCURSEL, Config->ShadowFilter, 0);
+ 	SendDlgItemMessage(hWnd, IDC_TERRAIN, CB_SETCURSEL, Config->TerrainShadowing, 0);
++	SendDlgItemMessage(hWnd, IDC_PRTLIGHT, CB_SETCURSEL, Config->ParticleLight, 0);	// ORO patch (x)
++	SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_SETPOS, 1, (LPARAM)(Config->ParticleShadow * 100.0 + 0.5));	// ORO patch (x)
++	SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_SETPOS, 1, (LPARAM)(Config->ParticleTintLead * 500.0 + 0.5));			// ORO patch (x): 0..0.20 -> 0..100
++	SendDlgItemMessage(hWnd, IDC_PRTSAT,   TBM_SETPOS, 1, (LPARAM)((Config->ParticleTintSat  - 1.0) / 0.03 + 0.5));		// ORO patch (x): 1..4 -> 0..100
++	SendDlgItemMessage(hWnd, IDC_PRTBLOOM, TBM_SETPOS, 1, (LPARAM)((Config->ParticleTintBloom - 1.0) / 0.02 + 0.5));	// ORO patch (x): 1..3 -> 0..100
+ 	SendDlgItemMessage(hWnd, IDC_GUIMODE, CB_SETCURSEL, Config->gcGUIMode, 0);
+ 
+ 	SendDlgItemMessage(hWnd, IDC_DEMAND, BM_SETCHECK, Config->PlanetPreloadMode==0, 0);
+@@ -896,6 +922,11 @@ void VideoTab::SaveSetupState(HWND hWnd)
+ 	Config->bAbsAnims	  = (int)SendDlgItemMessage (hWnd, IDC_ABSANIM, BM_GETCHECK, 0, 0);
+ 	Config->bCloudNormals = (int)SendDlgItemMessage(hWnd, IDC_CLOUDNORM, BM_GETCHECK, 0, 0);
+ 	Config->bFlats		  = (int)SendDlgItemMessage(hWnd, IDC_FLATS, BM_GETCHECK, 0, 0);
++	Config->ParticleLight = max(0, (int)SendDlgItemMessage(hWnd, IDC_PRTLIGHT, CB_GETCURSEL, 0, 0));	// ORO patch (x)
++	Config->ParticleShadow = max(0.0, min(1.0, (double)SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_GETPOS, 0, 0) / 100.0));	// ORO patch (x)
++	Config->ParticleTintLead  = max(0.0, min(0.2, (double)SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_GETPOS, 0, 0) / 500.0));		// ORO patch (x)
++	Config->ParticleTintSat   = max(1.0, min(4.0, 1.0 + (double)SendDlgItemMessage(hWnd, IDC_PRTSAT,   TBM_GETPOS, 0, 0) * 0.03));	// ORO patch (x)
++	Config->ParticleTintBloom = max(1.0, min(3.0, 1.0 + (double)SendDlgItemMessage(hWnd, IDC_PRTBLOOM, TBM_GETPOS, 0, 0) * 0.02));	// ORO patch (x)
+ 	Config->DebugBreak	  = (int)SendDlgItemMessage(hWnd, IDC_BREAK, BM_GETCHECK, 0, 0);
+ 	Config->bGlares		  = (int)SendDlgItemMessage(hWnd, IDC_ESUNGLARE, BM_GETCHECK, 0, 0);
+ 	Config->bLocalGlares  = (int)SendDlgItemMessage(hWnd, IDC_ELIGHTSGLARE, BM_GETCHECK, 0, 0);
 diff --git a/OVP/D3D9Client/gcCore.cpp b/OVP/D3D9Client/gcCore.cpp
-index 76c0d04..9274f85 100644
+index 76c0d04..8a70567 100644
 --- a/OVP/D3D9Client/gcCore.cpp
 +++ b/OVP/D3D9Client/gcCore.cpp
-@@ -42,6 +42,18 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
+@@ -42,6 +42,19 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
  	if (strcmp(name,"RegisterSwap")==0) *ppFnc = &gcCore2::RegisterSwap;
  	if (strcmp(name,"FlipSwap")==0) *ppFnc = &gcCore2::FlipSwap;
  	if (strcmp(name,"GetRenderTarget")==0) *ppFnc = &gcCore2::GetRenderTarget;
@@ -1665,6 +3843,7 @@ index 76c0d04..9274f85 100644
 +	if (strcmp(name,"SuppressReentry")==0) *ppFnc = &gcCore2::SuppressReentry;
 +	if (strcmp(name,"SuppressExhaust")==0) *ppFnc = &gcCore2::SuppressExhaust;
 +	if (strcmp(name,"ExemptNewStreams")==0) *ppFnc = &gcCore2::ExemptNewStreams;
++	if (strcmp(name,"GetExhaustStreamSpec")==0) *ppFnc = &gcCore2::GetExhaustStreamSpec;
 +	if (strcmp(name,"SetVCShadows")==0) *ppFnc = &gcCore2::SetVCShadows;
 +	if (strcmp(name,"SetSurfaceWetness")==0) *ppFnc = &gcCore2::SetSurfaceWetness;
 +	if (strcmp(name,"SetStormLight")==0) *ppFnc = &gcCore2::SetStormLight;
@@ -1675,12 +3854,13 @@ index 76c0d04..9274f85 100644
  	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
  	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
  	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
-@@ -50,6 +62,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
+@@ -50,6 +63,13 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
  	if (strcmp(name,"SketchpadVersion")==0) *ppFnc = &gcCore2::SketchpadVersion;
  	if (strcmp(name,"CreatePoly")==0) *ppFnc = &gcCore2::CreatePoly;
  	if (strcmp(name,"CreateTriangles")==0) *ppFnc = &gcCore2::CreateTriangles;
 +	if (strcmp(name,"CreateTrianglesDepth")==0) *ppFnc = &gcCore2::CreateTrianglesDepth;
 +	if (strcmp(name,"HasDepthBuffer")==0) *ppFnc = &gcCore2::HasDepthBuffer;
++	if (strcmp(name,"SetIPISceneDepth")==0) *ppFnc = &gcCore2::SetIPISceneDepth;
 +	if (strcmp(name,"CreateTrianglesTex")==0) *ppFnc = &gcCore2::CreateTrianglesTex;
 +	if (strcmp(name,"UpdateTexture2D")==0) *ppFnc = &gcCore2::UpdateTexture2D;
 +	if (strcmp(name,"GetRenderCam")==0) *ppFnc = &gcCore2::GetRenderCam;
@@ -1688,7 +3868,7 @@ index 76c0d04..9274f85 100644
  	if (strcmp(name,"DeletePoly")==0) *ppFnc = &gcCore2::DeletePoly;
  	if (strcmp(name,"GetTextLength")==0) *ppFnc = &gcCore2::GetTextLength;
  	if (strcmp(name,"GetCharIndexByPosition")==0) *ppFnc = &gcCore2::GetCharIndexByPosition;
-@@ -159,11 +177,220 @@ void gcCore::FlipSwap(HSWAP hSwap)
+@@ -159,11 +179,239 @@ void gcCore::FlipSwap(HSWAP hSwap)
  
  // ===============================================================================================
  //
@@ -1857,6 +4037,13 @@ index 76c0d04..9274f85 100644
 +// may not be replacing the streams. GCEXH_BILLBOARD / GCEXH_STREAM (gcCore.h).
 +static std::map<OBJHANDLE, DWORD> g_gcExhaustSuppressed;
 +
++// (ORO patch (h) part 2 - the authored rain glass - lived here briefly as a
++// gcCore::SetRainGlass per-vessel map. It moved WHOLLY into the client the same day:
++// clbkStoreMeshPersistent is told every preloaded mesh's FILENAME, so the client can
++// read the author's `RAIN 1` tokens itself - see RainGlassStoreScan in Mesh.cpp - and
++// no addon API is needed at all. His requirement: any vessel with the token works,
++// with nothing to configure.)
++
 +void gcCore::SuppressExhaust(OBJHANDLE hVessel, DWORD flags)
 +{
 +	if (!hVessel) return;
@@ -1908,10 +4095,22 @@ index 76c0d04..9274f85 100644
 +	return g_gcExemptLatch;
 +}
 +
++// ===============================================================================================
++// ORO patch (y): stock stream-spec readback - see gcCore.h.
++//
++int gcCore::GetExhaustStreamSpec(OBJHANDLE hVessel, int idx, PARTICLESTREAMSPEC* out,
++                                 VECTOR3* pos, VECTOR3* dir)
++{
++	if (!hVessel) return 0;
++	Scene *pScene = g_client->GetScene();
++	if (!pScene) return 0;
++	return pScene->GetExhaustStreamSpec(hVessel, idx, out, pos, dir);
++}
++
  // ===============================================================================================
  //
  void gcCore::ReleaseSwap(HSWAP hSwap) 
-@@ -269,6 +496,109 @@ HPOLY gcCore::CreateTriangles(HPOLY hPoly, const gcCore::clrVtx *pt, int npt, DW
+@@ -269,6 +517,130 @@ HPOLY gcCore::CreateTriangles(HPOLY hPoly, const gcCore::clrVtx *pt, int npt, DW
  }
  
  
@@ -1932,6 +4131,27 @@ index 76c0d04..9274f85 100644
 +{
 +	Scene *pScene = g_client->GetScene();
 +	return pScene && (pScene->GetDepthTexture() != NULL);
++}
++
++
++// ORO patch (h): bind the live scene depth buffer into an IPI shader's sampler. Patch (g)
++// gave the Sketchpad a per-pixel occlusion test; this gives the same question to a full-frame
++// pixel shader, which is what an effect living ON the windscreen needs - it must know, per
++// pixel, whether it is looking through glass or at the instrument panel.
++//
++// g_gcSceneDepth is patch (g)'s published pointer, so this inherits its lifecycle exactly:
++// set beside the buffer's creation in Scene::Scene and cleared in ~Scene BEFORE the release.
++// Nothing is created, referenced or owned here, and there is nothing to hand back.
++//
++// SetTextureNative (not SetTexture) because the g-buffer is a raw D3D texture and never had
++// a SurfNative wrapper; the client itself binds it the same way for its own visibility pass.
++bool gcCore::SetIPISceneDepth(gcIPInterface *pIP, const char *var, DWORD flags)
++{
++	extern LPDIRECT3DTEXTURE9 g_gcSceneDepth;
++	if (!pIP || !pIP->pIPI || !var) return false;
++	if (!g_gcSceneDepth) return false;			// SunGlare off - caller degrades
++	pIP->pIPI->SetTextureNative(var, g_gcSceneDepth, flags);
++	return true;
 +}
 +
 +
@@ -2022,7 +4242,7 @@ index 76c0d04..9274f85 100644
  //
  void gcCore::DeletePoly(HPOLY hPoly)
 diff --git a/OVP/D3D9Client/gcCore.h b/OVP/D3D9Client/gcCore.h
-index f8634ac..6204ab3 100644
+index f8634ac..a37b299 100644
 --- a/OVP/D3D9Client/gcCore.h
 +++ b/OVP/D3D9Client/gcCore.h
 @@ -16,6 +16,11 @@
@@ -2046,7 +4266,15 @@ index f8634ac..6204ab3 100644
  ///@}
  
  
-@@ -360,6 +367,15 @@ public:
+@@ -159,6 +166,7 @@ class gcIPInterface
+ public:
+ 
+ 	friend class gcCore2;
++	friend class gcCore;		// ORO patch (h) 2026: SetIPISceneDepth reaches pIPI
+ 
+ 	enum ipitemplate { Rect, Octagon, Mesh };
+ 	enum ipicull { None, CCW, CW };
+@@ -360,6 +368,15 @@ public:
  		DWORD color;
  	} clrVtx;
  
@@ -2062,7 +4290,7 @@ index f8634ac..6204ab3 100644
  
  	// ===========================================================================
  	/// \name Custom swap-chain management functions
-@@ -387,6 +403,159 @@ public:
+@@ -387,6 +404,178 @@ public:
  	*/
  	gc_interface SURFHANDLE GetRenderTarget(HSWAP hSwap);
  
@@ -2138,6 +4366,25 @@ index f8634ac..6204ab3 100644
 +ote An addon MUST clear its exemptions on unload.
 +	*/
 +	gc_interface void ExemptNewStreams(bool bExempt);
++
++	/**
++	* \brief ORO patch (y): read back the reconstructed PARTICLESTREAMSPEC of a
++	*  vessel's STOCK exhaust particle streams - the definitions a vessel author
++	*  wrote in code, which no core API can return (the core copies the spec at
++	*  construction and exposes no getter). Reentry streams and streams created
++	*  under the patch-(o) exemption latch (an addon's own replacements) are not
++	*  counted.
++	* \param hVessel vessel whose streams to query
++	* \param idx 0-based stream index; pass -1 to only count
++	* \param out receives the reconstructed spec (tex is NULL); may be NULL
++	* \param pos receives the stream's attach point, VESSEL frame; may be NULL
++	* \param dir receives the stream's THRUST direction, VESSEL frame; may be NULL -
++	*  it points into the vessel's own thruster storage, which is what lets a
++	*  consumer classify a stream by engine group
++	* \return the number of stock exhaust streams attached to hVessel
++	*/
++	gc_interface int GetExhaustStreamSpec(OBJHANDLE hVessel, int idx, PARTICLESTREAMSPEC* out,
++	                                      VECTOR3* pos, VECTOR3* dir);
 +
 +	/**
 +	* \brief Tune the virtual-cockpit shadow pass (ORO patch f).
@@ -2222,7 +4469,7 @@ index f8634ac..6204ab3 100644
  	/**
  	* \brief Release a swap object after it's no longer needed.
  	* \param hSwap Handle to a swap object.
-@@ -487,6 +656,86 @@ public:
+@@ -487,6 +676,117 @@ public:
  	gc_interface HPOLY CreateTriangles(HPOLY hPoly, const clrVtx* pt, int npt, DWORD flags);
  
  
@@ -2245,6 +4492,37 @@ index f8634ac..6204ab3 100644
 +	*   decide whether to lean on real depth or keep a geometric occlusion fallback.
 +	*/
 +	gc_interface bool HasDepthBuffer();
++
++
++	/**
++	* \brief [ORO patch (h) 2026] Bind the client's live scene depth buffer (GBUF_DEPTH) into
++	*   an IPI shader's sampler, so a full-frame addon pixel shader can ask the same per-pixel
++	*   visibility question patch (g) gave the Sketchpad. Nothing new is rendered and nothing
++	*   new is allocated: the texture already exists, the client already samples it itself
++	*   (Scene::ComputeLocalLightsVisibility), and patch (g) already publishes it. Same shape
++	*   as GetBackBufferHandle - a handle onto a resource that is already there.
++	* \param pIP the interface returned by CreateIPInterface.
++	* \param var the sampler name in the shader (e.g. "tDepth").
++	* \param flags sampler state, e.g. IPF_POINT|IPF_CLAMP - do NOT filter across depth edges.
++	* \return false if the buffer does not exist this session (SunGlare off), so the caller
++	*   degrades rather than assumes, exactly as with CreateTrianglesDepth.
++	* \note The .a channel holds the CAMERA-SPACE DISTANCE in metres. 0 means "nothing was
++	*   drawn at this pixel": RENDERPASS_NORMAL_DEPTH renders only the vessels in the render
++	*   list plus (when the camera is internal) the focus cockpit - no terrain, no sky. So a
++	*   test for "is the scene nearer than X here" must read `sd > 0.1 && sd < X`, never
++	*   `sd < X` alone.
++	* \note Materials below 0.9 alpha are excluded from that pass (patch f part 2), so a
++	*   canopy pane does NOT occlude: through a windscreen this reports the world beyond it.
++	*/
++	gc_interface bool SetIPISceneDepth(gcIPInterface* pIP, const char* var, DWORD flags);
++
++
++	/* [ORO patch (h) part 2] There is deliberately NO addon API for the rain glass:
++	*  the author's `RAIN 1` token in the mesh file is the entire interface. The client
++	*  reads it itself at clbkStoreMeshPersistent time (it is the one party told the
++	*  mesh's FILENAME) - see RainGlassStoreScan in Mesh.cpp. Any vessel whose preloaded
++	*  mesh carries the token gets the negated-depth window mask, with nothing to
++	*  configure anywhere. */
 +
 +
 +	/**
@@ -2309,8 +4587,25 @@ index f8634ac..6204ab3 100644
  	/**
  	* \brief Deletes a polyline created with gcCreatePolyPolyline()
  	* \param hPoly Handle to a polyline to be deleted
+diff --git a/OVP/D3D9Client/resource.h b/OVP/D3D9Client/resource.h
+index 83d89d8..515cb62 100644
+--- a/OVP/D3D9Client/resource.h
++++ b/OVP/D3D9Client/resource.h
+@@ -177,6 +177,12 @@
+ #define IDC_EARTHVISCFG                         3033
+ #define IDC_ESCACHE                             3034
+ #define IDC_EAQUALITY                           3035
++#define IDC_PRTLIGHT                            4067	// ⚠️ 3036 collided with IDC_TILECOUNT - the tiles combo's
++														//   values landed in this dropdown; always take max+1 file-wide
++#define IDC_PRTSHADOW                           4068	// ORO: diffuse particle shadow strength slider (same rule)
++#define IDC_PRTLEAD                             4069	// ORO: dawn tint lead slider (same rule)
++#define IDC_PRTSAT                              4070	// ORO: dawn tint depth slider
++#define IDC_PRTBLOOM                            4071	// ORO: dawn tint bloom slider
+ #define IDC_TILECOUNT                           3036
+ #define IDC_ATM_S1                              4000
+ #define IDC_ATM_S2                              4001
 diff --git a/OVP/D3D9Client/shaders/D3D9Client.fx b/OVP/D3D9Client/shaders/D3D9Client.fx
-index 471df00..6e4274b 100644
+index 471df00..14c8743 100644
 --- a/OVP/D3D9Client/shaders/D3D9Client.fx
 +++ b/OVP/D3D9Client/shaders/D3D9Client.fx
 @@ -144,6 +144,41 @@ uniform extern float     gDistScale;
@@ -2355,7 +4650,113 @@ index 471df00..6e4274b 100644
  uniform extern float 	 gMtrlAlpha;
  uniform extern float	 gGlowConst;
  uniform extern float	 gNightTime;		// 1 for nighttime, 0 for daytime
-@@ -637,6 +672,36 @@ float4 SpotTechPS(SimpleVS frg) : COLOR
+@@ -480,6 +515,105 @@ sampler EnvMapAS = sampler_state
+ 	AddressW = CLAMP;
+ };
+ 
++// ============================================================================
++// ORO patch (v): BOX-PROJECTED (parallax-corrected) environment sampling.
++// A cube map stores the world as seen from ONE point; sampling it by raw
++// reflection DIRECTION paints nearby geometry as if it stood at infinity -
++// magnified and unanchored, the "zoomed in" look of any probe placed inside
++// the thing it reflects (the Atlantis payload bay was the reporting case).
++// The correction is the standard one: intersect the reflection ray with a
++// proxy BOX around the probed volume and sample the cube TOWARD THE HIT
++// POINT, so near geometry lands at the right place and scale from any eye
++// position. The box (an OBB in the vessel's own axes) and the probe position
++// arrive per probe from the _ecam config via the per-group swap in
++// D3D9Mesh::Render; gEnvBoxC.w = 0 - the default, and every probe without a
++// BOX line - bypasses the whole thing, so stock content cannot move.
++// All vectors are camera-centred world, the shaders' native space.
++// ============================================================================
++uniform extern float4 gEnvBoxC;    // xyz box centre, w: 1 = box projection on
++uniform extern float4 gEnvBoxX;    // xyz unit axis, w half-extent [m]
++uniform extern float4 gEnvBoxY;
++uniform extern float4 gEnvBoxZ;
++uniform extern float4 gEnvPrbP;    // xyz probe position
++
++// ORO patch (v) part 2: the PLANAR mirror - the mirrored-scene RT for groups a
++// vessel's _ecam config assigns to a reflection plane. Sampled at the pixel's own
++// SCREEN position (the mirrored view-projection makes a real point land exactly
++// where the main camera sees its virtual image - the wet-ground mirror's law),
++// with the pass's clip-space X flip undone here. gPlnCtl: xy = 1/screen,
++// z = enable. Alpha 0 in the RT means "nothing reflected here" and the probe
++// keeps that pixel, so planet and sky still arrive from the cube.
++uniform extern texture   gPlnMap;
++uniform extern float4    gPlnCtl;
++// ORO patch (v) 2b: the mirror PLANE's equation (N, d) in camera-centred world,
++// and gPlnCtl.w = RDIST [m]. Together they let the pixel shader re-aim the
++// planar sample along the pixel's TRUE reflected ray - the curvature warp.
++uniform extern float4    gPlnEq;
++
++// ORO patch (w): PLANET-SHINE SHADOWS - a depth map of the focus assembly along
++// the planet direction (the sun shadow-map machinery, reused). gPShnSHD:
++// x = enable, y = texel size, z = world bias [m], w = 1/depth. With x = 0 the
++// glow term below is bit-exact stock.
++uniform extern float4x4  gPShnLVP;
++uniform extern float4    gPShnSHD;
++uniform extern texture   gPShnMap;
++
++sampler PShnS = sampler_state
++{
++	Texture = <gPShnMap>;
++	MinFilter = POINT;
++	MagFilter = POINT;
++	MipFilter = NONE;
++	AddressU = CLAMP;
++	AddressV = CLAMP;
++};
++
++// Lit factor for the planet-shine term at posW (camera-centred world). The map
++// stores 1 - z/w, the sun shadow-map convention; 4-tap PCF softens the edge -
++// planet light is a huge area source, a hard edge would be a lie.
++float PShineShadow(float3 posW)
++{
++	if (gPShnSHD.x < 0.5f) return 1.0f;
++	// orthographic projection: w is exactly 1, no divide needed
++	float3 h = mul(float4(posW, 1.0f), gPShnLVP).xyz;
++	h.xy = h.xy * float2(0.5f, -0.5f) + 0.5f;
++	if (any(saturate(h) != h)) return 1.0f;
++	float pd = (1.0f - h.z) + gPShnSHD.z * gPShnSHD.w;
++	float lit = step(tex2D(PShnS, h.xy).r, pd);
++	lit += step(tex2D(PShnS, h.xy + gPShnSHD.yy).r, pd);
++	return lit * 0.5f;
++}
++
++
++sampler PlnMapS = sampler_state
++{
++	Texture = <gPlnMap>;
++	MinFilter = LINEAR;
++	MagFilter = LINEAR;
++	MipFilter = NONE;
++	AddressU = CLAMP;
++	AddressV = CLAMP;
++};
++
++float3 EnvDir(float3 posW, float3 R)
++{
++	if (gEnvBoxC.w < 0.5f) return R;
++	// into the box frame
++	float3 rp = posW - gEnvBoxC.xyz;
++	float3 rl = float3(dot(rp, gEnvBoxX.xyz), dot(rp, gEnvBoxY.xyz), dot(rp, gEnvBoxZ.xyz));
++	float3 rd = float3(dot(R,  gEnvBoxX.xyz), dot(R,  gEnvBoxY.xyz), dot(R,  gEnvBoxZ.xyz));
++	// slab test, exit distance only (the surface is inside or near the box; a
++	// zero direction component yields +-inf slabs, which IEEE handles for us)
++	float3 ext = float3(gEnvBoxX.w, gEnvBoxY.w, gEnvBoxZ.w);
++	float3 tm = max((ext - rl) / rd, (-ext - rl) / rd);
++	float  t  = max(min(tm.x, min(tm.y, tm.z)), 0.0f);
++	// the hit, re-aimed from the PROBE rather than the surface
++	float3 pp = gEnvPrbP.xyz - gEnvBoxC.xyz;
++	float3 pl = float3(dot(pp, gEnvBoxX.xyz), dot(pp, gEnvBoxY.xyz), dot(pp, gEnvBoxZ.xyz));
++	float3 dl = (rl + rd * t) - pl;
++	return normalize(dl.x * gEnvBoxX.xyz + dl.y * gEnvBoxY.xyz + dl.z * gEnvBoxZ.xyz + 1e-6f);
++}
++
+ sampler EnvMapBS = sampler_state
+ {
+ 	Texture = <gEnvMapB>;
+@@ -637,6 +771,36 @@ float4 SpotTechPS(SimpleVS frg) : COLOR
  	return (tex2D(SimpleS, frg.tex0) * gColor) * gMix;
  }
  
@@ -2633,7 +5034,7 @@ index 970908d..38fc548 100644
  	//return float4(clr.rgb*frg.atten.rgb+frg.insca.rgb, cTex.a*(1-frg.insca.a));	// Make basetiles transparent during night
  }
 diff --git a/OVP/D3D9Client/shaders/Metalness.fx b/OVP/D3D9Client/shaders/Metalness.fx
-index 618ba0b..337212f 100644
+index 618ba0b..b35bec2 100644
 --- a/OVP/D3D9Client/shaders/Metalness.fx
 +++ b/OVP/D3D9Client/shaders/Metalness.fx
 @@ -185,7 +185,15 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
@@ -2653,6 +5054,15 @@ index 618ba0b..337212f 100644
  
  
  	// ======================================================================
+@@ -254,7 +262,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
+ 
+ 		// ======================================================================
+ 		// Sample Env Map
+-		SampleEnvMap(cEnv, dCN, fRgh, fMetal, rflW, nrmW);
++		SampleEnvMap(cEnv, dCN, fRgh, fMetal, EnvDir(-frg.camW, rflW), nrmW);   // ORO patch (v)
+ 	}
+ 
+ #if defined(_IRRADIANCE)
 @@ -265,7 +273,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
  
  	//cAmbient = saturate(cAmbient * (1.0f + 15.0f * gNightTime));	
@@ -2667,7 +5077,7 @@ index 618ba0b..337212f 100644
  	// Compute Earth glow
  	float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
 -	float3 cAmbient = gAtmColor.rgb * max(0, angl * gGlowConst) + gSun.Ambient;
-+	float3 cAmbient = gAtmColor.rgb * max(0, angl * gGlowConst) + gSun.Ambient * (1.0f + gStorm * 1.8f);   // ORO patch (s) part 2
++	float3 cAmbient = gAtmColor.rgb * (max(0, angl * gGlowConst) * PShineShadow(-frg.camW)) + gSun.Ambient * (1.0f + gStorm * 1.8f);   // ORO patch (s) part 2 + (w)
  #endif
  
  
@@ -2707,6 +5117,31 @@ index 618ba0b..337212f 100644
  
  	// Override material alpha to make reflections visible
  	cDiff.a = saturate(cDiff.a + cmax(zS + cE));
+diff --git a/OVP/D3D9Client/shaders/NewMesh.hlsl b/OVP/D3D9Client/shaders/NewMesh.hlsl
+index ae9c89d..1c6bc18 100644
+--- a/OVP/D3D9Client/shaders/NewMesh.hlsl
++++ b/OVP/D3D9Client/shaders/NewMesh.hlsl
+@@ -21,6 +21,10 @@ uniform extern struct PSConst {
+ 
+ uniform extern struct PSBools {
+ 	BOOL bOIT;		// Enable order independent transparency
++	BOOL bRainGlass;	// ORO patch (h) part 2: authored window glass (mesh FLAG 0x1000) -
++						// NormalDepth_PS writes camera distance NEGATED so effect shaders
++						// can tell "window" from "interior"; every other GBUF_DEPTH.a
++						// consumer guards with d > 0.1 and reads a negative as "nothing".
+ } ps_bools;
+ 
+ 
+@@ -165,6 +169,9 @@ float4 NormalDepth_PS(NormalTexVS frg) : COLOR
+ 	//if (dot(frg.nrmW, ps_const.Cam_Z) > 0) clip(-1);
+ 
+ 	float D = length(frg.posW);
++	// ORO patch (h) part 2: authored window glass writes its distance NEGATED - the
++	// sign IS the per-pixel "this is a window" mask. See Mesh.cpp's group loop.
++	if (ps_bools.bRainGlass) D = -D;
+ 	float x = dot(frg.nrmW, ps_const.Cam_X);
+ 	float y = dot(frg.nrmW, ps_const.Cam_Y);
+ 	float z = sqrt(saturate(1.0 - (x * x + y * y)));
 diff --git a/OVP/D3D9Client/shaders/NewPlanet.hlsl b/OVP/D3D9Client/shaders/NewPlanet.hlsl
 index 5b43b27..382f0d4 100644
 --- a/OVP/D3D9Client/shaders/NewPlanet.hlsl
@@ -3009,7 +5444,7 @@ index 5b43b27..382f0d4 100644
  
  
 diff --git a/OVP/D3D9Client/shaders/PBR.fx b/OVP/D3D9Client/shaders/PBR.fx
-index e09b23c..f0f51db 100644
+index e09b23c..db34103 100644
 --- a/OVP/D3D9Client/shaders/PBR.fx
 +++ b/OVP/D3D9Client/shaders/PBR.fx
 @@ -108,7 +108,10 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
@@ -3024,7 +5459,52 @@ index e09b23c..f0f51db 100644
  
  
  	// ----------------------------------------------------------------------
-@@ -194,8 +197,13 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -185,6 +188,44 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// ----------------------------------------------------------------------
+ 
+ 	float3 RflW = reflect(-CamD, nrmW);				// Reflection vector
++	// ORO patch (v): the direction the ENV MAP is sampled with - box-projected when
++	// this group's probe carries a proxy box, RflW verbatim otherwise. Lighting dot
++	// products below stay on the true RflW; only the cube lookup is re-aimed.
++	float3 RflE = EnvDir(-frg.camW, RflW);
++	// ORO patch (v) part 2: this group's PLANAR mirror, if it has one. Sampled once
++	// here; where its alpha says something was reflected, it REPLACES the cube colour
++	// at both env sites below - the exact image wins over the approximation, and the
++	// probe keeps the pixels the mirrored pass left empty (planet, sky).
++	float4 cPln = float4(0, 0, 0, 0);
++	if (gPlnCtl.z > 0.5f) {
++		// ORO patch (v) 2b: CURVATURE-AWARE planar sampling. Follow the pixel's TRUE
++		// reflected ray (curved normal, normal map and all) an assumed distance RDIST
++		// (gPlnCtl.w), mirror that point through the declared plane (gPlnEq) and
++		// project it with the scene camera. Law of reflection: for a flat on-plane
++		// pixel the mirrored point lies on the straight continuation of the eye ray,
++		// so this reduces EXACTLY to sampling the pixel's own screen position,
++		// independent of RDIST - the warp exists only where the normal deviates from
++		// the plane, and the distance error there is second-order.
++		// RDIST 0 is a SENTINEL: the flat mirror verbatim - the exact pre-warp
++		// sampling, kept so a config can A/B flat against warped per plane.
++		if (gPlnCtl.w > 0.01f) {
++			float3 Q  = RflW * gPlnCtl.w - frg.camW;         // P + R*t  (P = -camW)
++			float3 Qm = Q - (2.0f * (dot(gPlnEq.xyz, Q) + gPlnEq.w)) * gPlnEq.xyz;
++			float4 ch = mul(float4(Qm, 1.0f), gVP);
++			if (ch.w > 0.1f) {
++				float2 puv;
++				puv.x = 1.0f - (ch.x * (0.5f / ch.w) + 0.5f);  // + the pass's X flip
++				puv.y = 0.5f - ch.y * (0.5f / ch.w);           // ndc y-up -> v-down
++				// a ray warped off the RT falls back to the probe (CLAMP would smear)
++				if (all(saturate(puv) == puv)) cPln = tex2D(PlnMapS, puv);
++			}
++		}
++		else {
++			float2 puv = sc.xy * gPlnCtl.xy;
++			puv.x = 1.0f - puv.x;               // undo the pass's clip-space X flip
++			cPln = tex2D(PlnMapS, puv);
++		}
++	}
+ 	float dRS = saturate(-dot(RflW, gSun.Dir));		// Reflection/sun angle
+ 	float dLN = saturate(-dot(gSun.Dir, nrmW));		// Diffuse lighting term
+ 	float dLNx = saturate(dLN * 80.0f);				// Specular, Fresnel shadowing term
+@@ -194,8 +235,13 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
  	// Add vessel self-shadows
  	// ----------------------------------------------------------------------
  
@@ -3039,7 +5519,7 @@ index e09b23c..f0f51db 100644
  #endif
  
  
-@@ -235,6 +243,38 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -235,6 +281,38 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
  	// Compute a specular and diffuse lighting
  	// ----------------------------------------------------------------------
  
@@ -3078,8 +5558,12 @@ index e09b23c..f0f51db 100644
  	// Compute a specular lobe for base material
  	float fLobe = pow(dRS, cSpec.a) * dLNx;
  
-@@ -254,7 +294,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
- 	cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
+@@ -251,10 +329,10 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 	// ----------------------------------------------------------------------
+ 
+ 	float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
+-	cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
++	cDiffLocal += gAtmColor.rgb * (max(0, angl*gGlowConst) * PShineShadow(-frg.camW));	// ORO patch (w)
  
  	// Bake material props and lights together
 -	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient);
@@ -3087,7 +5571,7 @@ index e09b23c..f0f51db 100644
  
  #if LMODE > 0
  	cSun = Light_fx(cSun + cSpecLocal);	// Add local light sources
-@@ -265,7 +305,23 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+@@ -265,7 +343,23 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
  	if (gNoColor) cDiff.rgb = 1;
  
  	// ------------------------------------------------------------------------
@@ -3111,7 +5595,25 @@ index e09b23c..f0f51db 100644
  	cDiff.a *= gMtrlAlpha;				// Modulate material alpha
  
  
-@@ -442,9 +498,18 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+@@ -307,7 +401,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 			fLOD *= (1.0f - fFrsl);
+ 
+ 			// Fresnel based environment reflections
+-			cEnv = (cFrsl * fFrsl) * texCUBElod(EnvMapAS, float4(RflW, fLOD)).rgb;
++			cEnv = (cFrsl * fFrsl) * lerp(texCUBElod(EnvMapAS, float4(RflE, fLOD)).rgb, cPln.rgb, cPln.a);
+ 		}
+ #endif
+ 
+@@ -315,7 +409,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
+ 		float fLOD = (1.0f - fRghn) * 8.0f;
+ 
+ 		// Add a metallic reflections from a base material
+-		cEnv += cRefl3 * (1.0f-iFrsl) * texCUBElod(EnvMapAS, float4(RflW, fLOD)).rgb;
++		cEnv += cRefl3 * (1.0f-iFrsl) * lerp(texCUBElod(EnvMapAS, float4(RflE, fLOD)).rgb, cPln.rgb, cPln.a);
+ 	}
+ 
+ #endif
+@@ -442,9 +536,18 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
  
  		float3 nrmW  = normalize(frg.nrmW);
  		float4 cSpec = gMtrl.specular.rgba;
@@ -3131,8 +5633,13 @@ index e09b23c..f0f51db 100644
  		//cSpec.rgb *= 0.33333f;
  
  		if (gNoColor) cDiff.rgb = 1;
-@@ -472,11 +537,13 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+@@ -470,13 +573,18 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+ 		// ----------------------------------------------------------------------
+ 
  		float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
++		// ORO patch (w) deliberately NOT here: FAST is a per-mesh opt-in chosen for
++		// cheapness and sits at the ps_3_0 temp-register ceiling - adding the planet-
++		// shine shadow overflows it (X4505). FAST keeps the stock unshadowed glow.
  		cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
  
 -		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient) + gMtrl.emissive.rgb );
@@ -3147,7 +5654,7 @@ index e09b23c..f0f51db 100644
  
  #if SHDMAP > 0
  		fSun *= fShadow;
-@@ -491,6 +558,9 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
+@@ -491,6 +599,9 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
  		float3 specLight = (fSun * cSun);
  #endif
  		cDiff.rgb += (cSpec.rgb * specLight);
@@ -3157,6 +5664,36 @@ index e09b23c..f0f51db 100644
  
  		cDiff.rgb += cEmis;
  	}
+diff --git a/OVP/D3D9Client/shaders/Particle.fx b/OVP/D3D9Client/shaders/Particle.fx
+index fb74b0c..70e2ac4 100644
+--- a/OVP/D3D9Client/shaders/Particle.fx
++++ b/OVP/D3D9Client/shaders/Particle.fx
+@@ -13,14 +13,23 @@ struct ParticleVS
+ {
+ 	float4 posH     : POSITION0;
+ 	float2 tex0     : TEXCOORD0;
+-	float  light    : TEXCOORD1;
++	float3 light    : TEXCOORD1;	// ORO patch (x): RGB (was a scalar) - the sun share carries a hue
+ };
+ 
+ ParticleVS ParticleDiffuseVS(NTVERTEX vrt)
+ {
+ 	ParticleVS outVS = (ParticleVS)0;
+ 	outVS.tex0    = vrt.tex0;
+-	outVS.light   = 1.0f; // saturate(dot(-gSun.Dir, vrt.nrmL) * 2.0f);
++	// ORO patch (x): per-particle lighting, computed on the CPU and carried in the
++	// normal channel's x component (D3D9ParticleStream::RenderDiffuse). Stock
++	// hardcoded 1.0 here with the original N.L term commented out - normal-based
++	// lighting misbehaves on camera-facing billboards, so the replacement is
++	// POSITION-based: sun visibility at the particle (night side, terminator,
++	// twilight, altitude-depressed horizon) + the user's ambient floor + the engine
++	// flame lighting nearby smoke, with the sun share tinted by the client's own
++	// atmospheric sun colour (sunset reddening). A fully sunlit particle carries
++	// exactly (1,1,1), so the daytime look is bit-identical to stock.
++	outVS.light   = vrt.nrmL.xyz; // stock: 1.0f; // saturate(dot(-gSun.Dir, vrt.nrmL) * 2.0f);
+ 	outVS.posH    = mul(float4(vrt.posL, 1.0f), gVP);
+ 	return outVS;
+ }
 diff --git a/OVP/D3D9Client/shaders/Sketchpad.fx b/OVP/D3D9Client/shaders/Sketchpad.fx
 index 5cae620..af8fe33 100644
 --- a/OVP/D3D9Client/shaders/Sketchpad.fx

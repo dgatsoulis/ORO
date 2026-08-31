@@ -76,6 +76,7 @@ void  OroHueRotate(float& r, float& g, float& b, float deg);
 // glow has used since 2026-08-09 (BellUserLevel), adopted wholesale rather than
 // invented a second time.
 int  OroThrusterGroupOf(VESSEL* v, THRUSTER_HANDLE th);
+double OroPlumeSynAccMin();   // the 26(j) engine-admission floor [m/s^2] (OroPlume.cpp)
 bool OroThrusterHasUser(VESSEL* v);
 bool OroThrusterHasRcs(VESSEL* v);   // ... and attitude thrusters (ORO_THR_RCS)
 
@@ -127,6 +128,11 @@ public:
 	// they embody: WHAT SENSES THE WORLD RUNS EVERY FRAME, WHAT EVOLVES OVER TIME DOES NOT.
 	void SenseView();                       // view/cockpit domain gates + viewport size
 	void SenseRain();                       // where the storm is relative to the camera
+	void SenseMarker();                     // Phase B: validate the header-row thruster
+	                                        //   selection, publish its readouts, and
+	                                        //   snapshot the in-world nozzle marker(s).
+	                                        //   Called with the other two - idempotent,
+	                                        //   every frame, paused included.
 
 	// A vessel is about to be destroyed. MANDATORY for the reentry plasma: we hold a
 	// LightEmitter* belonging to that vessel, and the handle stops being valid the moment
@@ -483,6 +489,12 @@ private:
 	                                         // COCKPIT (reentryVC toggle && COCKPIT_VIRTUAL);
 	                                         // computed in clbkPreStep like the other gates
 	bool     rainVC = false;                 // 2026-08-23: the RAIN in the VIRTUAL cockpit
+	bool plumeVC = false;   // ORO 2026-08-29: the jet in the VIRTUAL COCKPIT - RCS made
+	                        // "your own engines are behind the cockpit" false (the OMS
+	                        // pods sit outside the aft windows). rainVC's recipe: VC +
+	                        // depthClipOK, no toggle - without the per-pixel clip the
+	                        // jet would paint over the cabin, so a depthless client
+	                        // keeps the old external-only behaviour.
 	bool     rainPanel = false;              // 2026-08-25: the rain in the FLAT internal
 	                                         //   views (2D panel / glass cockpit). A
 	                                         //   SEPARATE gate from rainVC because the two
@@ -854,6 +866,48 @@ private:
 	// is live this session (SunGlare on). Probed by BINDING, invariant 18(a).
 	bool    depthClipOK = false;
 	int     depthClipLogged = -1;           // -1 = never announced; else the value logged
+	// CLIENT CAPABILITY, patch (h): the scene depth buffer can be bound into an IPI
+	// shader, which is what lets a full-frame pixel shader ask the same per-pixel
+	// question patch (g) gave the Sketchpad. Probed by BINDING - and deliberately a
+	// gcCore entry rather than a new virtual on gcIPInterface, because a stock client's
+	// shorter vtable is not detectable from this side.
+	bool    ipiDepthOK = false;
+	int     ipiDepthLogged = -1;
+
+	// --- RAINDROPS ON THE GLASS (2026-08-26) -------------------------------
+	// The main-thread -> render-path handoff for the windscreen drops. Both are VESSEL
+	// FRAME, both are pure sensing (invariant 1's law: what senses the world runs every
+	// frame, what evolves over time does not), and both are read live by DrawGloomPass.
+	// ⚠️ EPOCH: the rotation is a PRE-STEP snapshot paired with a RENDER-epoch camera.
+	// That is safe here and it is worth saying why, because invariant 21(a) is a standing
+	// trap: the mismatch costs one step of ATTITUDE, a few hundredths of a degree, not one
+	// step of the planet's 29.8 km/s orbital motion. It is POSITION that needs patch (k2),
+	// and nothing here uses a position at all.
+	MATRIX3 rainGlassRot;                   // focus vessel rotation (vessel -> global)
+	VECTOR3 rainGlassRun = { 0, -1, 0 };    // where a drop runs on the glass, vessel frame:
+	                                        //   gravity and airflow summed as FORCES, so
+	                                        //   at rest they bead downward and at speed
+	                                        //   they stream aft, with no threshold and no
+	                                        //   hull-axis assumption (invariant 25e)
+	// THE SHEET'S INTEGRATED FALL PHASE (2026-08-27, his diagnosis: "it seems tied to
+	// the thrust level" / "the warp effect is playing backwards"). The streak phase
+	// used to be elapsed_time x current_rate, and with a time-varying rate the visible
+	// motion tracks that product's DERIVATIVE: accelerating, the rush follows thrust;
+	// decelerating, the product shrinks and the rain visibly flows BACKWARD. The phase
+	// integrates the rate per frame now - one wrapping scalar, the bell-thermal class
+	// of state, frozen under pause because animT is.
+	float   rainSheetPh  = 0.0f;
+	float   rainSheetPhT = -1.0f;           // last animT the integral advanced to
+	float   rainGlassRunMag = 9.81f;        // |gravity + airflow| at the glass - the
+	                                        //   runners' speed source (25e: bound to the
+	                                        //   physics, not to a hull axis or a knob)
+	bool    rainGlassOK = false;            // the sensing succeeded this frame
+	// TEMPORARY DIAGNOSTIC (2026-08-26) - the render path cannot log (invariant 1), so
+	// DrawGloomPass records and clbkPreStep writes the line. Out once the drops work.
+	int     glassDiag   = 0;
+	float   glassDiagDr = 0.0f;
+	float   glassDiagI  = -1.0f;            // the intensity the RENDER PATH sees
+	double  glassDiagT  = -99.0;
 
 	// --- THE PROJECTION CAMERA (2026-08-15, the pause fix) -----------------
 	// ⚠️ clbkPreStep IS NOT CALLED WHILE PAUSED. Anything built there therefore FREEZES
@@ -910,15 +964,28 @@ private:
 	// Vessel-anchored, so invariant 21(b)'s render-epoch problem does not apply: a
 	// tracking camera cancels the epoch, which is why the plasma never needed patch (k)
 	// either. Built with the pre-step camera like everything else attached to a hull.
-	// VAP_MAX_TRI * 3 = 6912 verts, far under invariant 19(d)'s 65535 stream ceiling.
-	static const int VAP_NA      = 64;      // angular segments around the flow axis. The
+	// VAP_MAX_TRI * 3 = 23232 verts, still well under invariant 19(d)'s 65535 ceiling.
+	static const int VAP_NA      = 160;     // angular segments around the flow axis. The
 	                                        //   cone is a surface of REVOLUTION, so this is
 	                                        //   the only place its smoothness comes from -
 	                                        //   and it is smooth at any count by
 	                                        //   construction (invariant 20e's law: nothing
 	                                        //   here inherits mesh tessellation).
+	                                        //   64 -> 160 on 2026-08-29: the SLIM streaks
+	                                        //   are per-vertex Gouraud, so a filament can
+	                                        //   be no narrower than ~2 segments - at 64
+	                                        //   that floor was ~11 deg (his "too thick"),
+	                                        //   at 160 it is ~4.5 deg.
 	static const int VAP_NR      = 9;       // rings apex -> rim, last one the feather band
-	static const int VAP_MAX_TRI = VAP_NA * VAP_NR * 2 + 64;   // 1216
+	static const int VAP_NCAP    = 3;       // BASE cap bands (2026-08-29: the filled disc
+	                                        //   closing the wide end - the reference photos'
+	                                        //   "base", which the open loft never had)
+	static const int VAP_NCONES  = 2;       // the second cone (2026-08-29, the Concorde
+	                                        //   photo: one collar at the nose, one at the
+	                                        //   tail) - the same loft run twice with its
+	                                        //   own knobs, into the same buffer
+	static const int VAP_MAX_TRI = VAP_NA * (VAP_NR + VAP_NCAP) * 2 * VAP_NCONES + 64;
+	                                        //   7744 (x3 = 23232 verts, far under 65535)
 	// --- RAIN (OroRain.cpp, 2026-08-20) ----------------------------------
 	// The runway slice: gloom + falling rain + rings where drops land. EXTERNAL only,
 	// Earth only, triggered. Alpha-blended like the vapour cone (rain SCATTERS and
@@ -1068,6 +1135,11 @@ private:
 	float   rainIntensityLive = 0.0f;       // 0..1 storm envelope x altitude gate, set on the
 	                                        //   main thread. The Gloom SLIDER is deliberately
 	                                        //   NOT folded in here - see UpdateRain.
+	float   rainGateLive = 0.0f;            // the GATE alone (altitude band x right-world x
+	                                        //   drawable view), no envelope in it - for what
+	                                        //   was DEPOSITED by the storm (the glass drops)
+	                                        //   and must survive it easing, but not a climb
+	                                        //   to orbit. Zero whenever SenseRain bails.
 
 	void    UpdateVapour();                 // per frame, main thread - builds vapVtx
 	void    DrawVapourPoly(oapi::Sketchpad* pSkp);   // push + ALPHA-BLENDED draw
@@ -1087,20 +1159,29 @@ private:
 	// uniforms - the render callback must make no oapi calls (invariant 1), so all the
 	// vessel/camera queries and the projection happen in clbkPreStep. Each plume is a
 	// screen-space CAPSULE: root (a) -> tip (b) in UV, a UV radius, and a strength.
-	// MAX_PLUMES is also the shader's array size - keep them in step.
-	static const int MAX_PLUMES = 6;
+	// MAX_PLUMES was 6 until 2026-08-29 - sized in the mains/hovers era. RCS became a
+	// group (26k) and a shuttle rotation fires far more than six jets at once, so the
+	// overflow rendered STOCK billboards beside ORO plumes (his report: "some of them
+	// make the huge plumes, others the standard stock effect"). 16 covers realistic
+	// simultaneous RCS + mains. The SHIMMER stays at SHIM_PLUMES = 6: its shader
+	// arrays (vPlume[6] in orofx.hlsl) and its per-pixel full-frame loop are priced
+	// per entry, and RCS haze is invisible - the model is sorted strongest-first, so
+	// "the first SHIM_PLUMES" is exactly the old strongest-6 behaviour.
+	static const int MAX_PLUMES = 16;
+	static const int SHIM_PLUMES = 6;   // must match orofx.hlsl vPlume[]/vPlumeP[]
 	struct PlumeScr {
 		float ax, ay, bx, by;   // plume root -> tip, in UV (0..1)
 		float rad;              // haze radius around the axis, in UV (aspect-corrected in the shader)
 		float str;              // 0..1 strength (thrust curve x air density x hull visibility)
 		float hpk;              // 0..1 position ALONG the plume where turbulence peaks (moves aft with thrust)
 	};
-	PlumeScr plumes[MAX_PLUMES] = {};
+	PlumeScr plumes[SHIM_PLUMES] = {};
 	int      plumeCount = 0;    // 0 = nothing to draw, skip the whole pass
 
-	// Rebuild the plume table for this frame: camera-target vessel (falls back to focus),
-	// main/hover/retro thrusters ONLY (no RCS puffs), strongest MAX_PLUMES kept, off-screen
-	// and behind-camera plumes culled. Main thread only.
+	// Rebuild the shimmer table for this frame from the plume model (consumer 2 since
+	// 2026-08-09): camera-target vessel, strongest SHIM_PLUMES kept (the model is sorted,
+	// so these are the biggest jets - RCS included since 26(k), though RCS haze rarely
+	// places), off-screen and behind-camera plumes culled. Main thread only.
 	void UpdateShimmerPlumes();
 
 	// --- PLUME EXPANSION (pressure-dependent exhaust, 2026-08-09) ----------
@@ -1117,8 +1198,10 @@ private:
 	// Same thruster set + strongest-6 rule as the shimmer; the two scans stay separate
 	// on purpose this round (the shimmer is settled code - merge when it is revisited).
 	// ⚠ PLM_MAX_TRI * 3 must stay under 65536 - invariant 19(d)'s vertex-stream ceiling.
-	static const int PLM_MAX_TRI = 8192;    // 24576 verts: 6 plumes x 3 layers (sheath +
-	                                        // core + diamond lozenges) x ~350 tris + slack
+	static const int PLM_MAX_TRI = 21504;   // 64512 verts (ceiling is 65535): 16 plumes
+	                                        // x ~1344 tris - the per-plume budget the
+	                                        // old 8192/6 gave, held while the pool grew
+	                                        // for RCS (2026-08-29)
 
 	// THE PLUME MODEL (2026-08-09) - one physics model, MANY consumers. Built once
 	// per step in BuildPlumeModel (OroPlume.cpp, main thread): per qualifying
@@ -1161,9 +1244,41 @@ private:
 		                        //   across frames (puff tracking) and the soot
 		                        //   streaks' random seed (stable however the
 		                        //   strongest-6 sort reshuffles the slots)
+		int     thrIdx;         // the vessel's THRUSTER index behind this plume, or -1
+		                        //   (unresolvable, or the vessel fails the class-
+		                        //   faithful rule). OroThr_Eff resolves per-thruster
+		                        //   overrides by it - decided at BUILD time (main
+		                        //   thread) so the render path never asks oapi.
+		int     cls;            // the vessel's CLASS-CACHE slot (OroThr_CacheFor), or
+		                        //   -1 = the live tables. Resolved at BUILD time; the
+		                        //   render path reads OroThr_EffC(cls, grp, thrIdx)
+		                        //   which is memory-only. A docked SRB's plume answers
+		                        //   to Atlantis_SRB.cfg through this, whoever has focus.
 	};
 	PlumeModel plmModel[MAX_PLUMES];
 	int        plmModelN = 0;               // entries this step (0 = nothing burning)
+
+	// THE NOZZLE MARKER (Phase B, 2026-08-30) - the in-world half of the header-row
+	// thruster selector: a pulsing ring + flow tick at each marked nozzle, drawn by
+	// UpdatePlumeFx into the plume poly (same domains, same pre-resolve slot; X-RAY
+	// depth so a far-side jet can be FOUND - hiding it would defeat the finder).
+	// Snapshotted by SenseMarker (main thread, every frame, paused included - the
+	// SenseView law) and projected in the render path off FillProjCam, so it is
+	// pause-correct from birth. Test-rig class: nothing here persists.
+	// ⚠️ MARKERS ARE PER NOZZLE, NOT PER THRUSTER (his DG report, 2026-08-30): the
+	// DG feeds one attitude thruster from SEVERAL AddExhaust nozzles, so a
+	// per-thruster marker ringed the first nozzle and left its twins bare. The jet
+	// draws per exhaust; the marker agrees with it. Hence the cap counts NOZZLES.
+	static const int MK_MAX = 96;           // DG: ~15 RCS thrusters but 30+ nozzles
+	int        mkN = 0;                     // markers this frame (0 = nothing to draw)
+	bool       mkBri[MK_MAX] = {};          // bright = a nozzle of the SELECTED thruster
+	                                        //   (all of them); dim = ALL + MARK mode
+	VECTOR3    mkPos[MK_MAX];               // nozzle exit, GLOBAL frame (pre-step epoch)
+	VECTOR3    mkDir[MK_MAX];               // exhaust FLOW direction, global frame
+	OBJHANDLE  mkOwn = NULL;                // the vessel the positions came from and
+	VECTOR3    mkCg  = { 0,0,0 };           //   its CENTRE - RenderEpochShift's pair
+	                                        //   (invariant 21a: shift by the BODY centre)
+	double     mkScale = 10.0;              // that vessel's GetSize() - marker sizing
 	float      plmShimStr = 0.0f;           // shimmer strength of the STRONGEST group that
 	                                        //   actually contributed a capsule this frame.
 	                                        //   PSShimmer has one full-frame uniform, so a
@@ -1204,9 +1319,9 @@ private:
 	// in (soot is IN the jet; the G11 draw-dark-first recipe is for smoke BEHIND
 	// content, which this deliberately is not). Own poly + buffers because the
 	// blend state differs; same per-vertex depth, same full-buffer rule.
-	static const int PLM_DK_MAX_TRI = 6144; // 18432 verts: 6 plumes x 16 lifecycled
-	                                        // streaks x ~55 tris worst case (the dynamic
-	                                        // soot rework, 2026-08-09)
+	static const int PLM_DK_MAX_TRI = 16384; // 49152 verts: 16 plumes x 16 lifecycled
+	                                        // streaks x ~55 tris worst case (pool grew
+	                                        // for RCS 2026-08-29; soot rework 2026-08-09)
 	PlasVtx plmDkVtx[PLM_DK_MAX_TRI * 3];
 	float   plmDkDepth[PLM_DK_MAX_TRI * 3];
 	int     plmDkVtxN = 0;
@@ -1253,6 +1368,26 @@ private:
 	                                        //   the texture - so per-group colour means one
 	                                        //   texture per group. 4 x 256^2 is cheap; the
 	                                        //   alternative was making the swatch lie.
+	SURFHANDLE hPrtTexOvr[ORO_THR_OVR_MAX] = {};   // Phase B: same reasoning per THRUSTER -
+	                                        //   an override with its own colour/texture
+	                                        //   needs its own surface. Lazily created at
+	                                        //   rebuild time, bounded by the pool, and
+	                                        //   released with the group set below.
+	SURFHANDLE hPrtTexC[ORO_THR_CACHE_MAX][ORO_THR_N] = {};   // ... and per CACHED CLASS
+	                                        //   per group (the SRB's Contrail1a must not
+	                                        //   render through the orbiter's texture).
+	                                        //   Lazily created at rebuild for the
+	                                        //   (class, group) pairs that actually
+	                                        //   contribute streams.
+	SURFHANDLE hPrtTexCO[ORO_THR_CACHE_MAX][ORO_THR_OVR_MAX] = {};  // ... and per CACHED
+	                                        //   OVERRIDE. A "share the class-group's
+	                                        //   texture" bound was tried first and his
+	                                        //   FIRST real use broke it: the SRB motor's
+	                                        //   Contrail4 lives in a THR0 override while
+	                                        //   the group holds Contrail1a, and the
+	                                        //   launch flew the wrong contrail. The
+	                                        //   ARRAY is pointers; surfaces only ever
+	                                        //   exist for overrides that stream.
 	bool       prtTexMode  = false;         // patch (l) bound AND the texture exists
 	bool       prtTexTried = false;         // one-shot probe/create guard (per session)
 	void UpdateParticles(double simdt);     // main thread (clbkPreStep): rebuild on change
@@ -1289,13 +1424,26 @@ private:
 	// loops are Rain_light/medium/heavy.wav (the storm, crossfaded by the envelope)
 	// plus Rain_hull.wav (drops drumming the skin - interior only), all generated by
 	// tools/raingen.py.
-	enum { SND_RAIN_BASE = 30, SND_RAIN_N = 4 };
+	// THE MUFFLE (2026-08-27, his spec: "the interior of a spacecraft is supposed to
+	// be a pressurized cabin" - a volume cut is not a muffle). XRSound has no runtime
+	// filter, so the interior character is PRE-BAKED: tools/rainmuffle.py writes a
+	// low-passed `_in` twin of each storm tier and thunder clap (450 Hz zero-phase -
+	// the hiss and the crack die, the rumble survives), and the mixer runs SEVEN
+	// channels - three exterior tiers, the hull taps, three INTERIOR tiers - the view
+	// change crossfading between families through the same 0.35 s slew that already
+	// de-clicks everything. The hull loop is deliberately unfiltered: the taps are ON
+	// the hull, structure-borne, and inside is exactly where they are bright.
+	enum { SND_RAIN_BASE = 30, SND_RAIN_N = 4, SND_RAIN_IN_BASE = 34,
+	       SND_RAIN_CH = 7 };               // channels 0-2 ext tiers, 3 hull, 4-6 int
 	bool  rainSndLoaded = false;            // all three LoadWav'd this session
-	float rainSndLvl[SND_RAIN_N] = {};      // slewed per-loop volume (anti-click)
-	bool  rainSndOn[SND_RAIN_N]  = {};      // which loops currently hold a mixer voice
+	bool  rainSndInLoaded = false;          // ... and the three _in twins (all-or-
+	                                        //   nothing too; absent, interior falls
+	                                        //   back to the old 45% volume duck)
+	float rainSndLvl[SND_RAIN_CH] = {};     // slewed per-loop volume (anti-click)
+	bool  rainSndOn[SND_RAIN_CH]  = {};     // which loops currently hold a mixer voice
 	                                        // (silent loops are STOPPED, not parked at
 	                                        //  volume 0 - no idle voices in the mixer)
-	float rainSndPushed[SND_RAIN_N] = {};   // volume each loop was last STARTED at -
+	float rainSndPushed[SND_RAIN_CH] = {};  // volume each loop was last STARTED at -
 	                                        //   an XRSound module sound keeps its start
 	                                        //   volume forever (the 2026-08-23 finding,
 	                                        //   see UpdateRainSound), so a change means
@@ -1305,11 +1453,14 @@ private:
 	// credit ledger in XRSound\ORO\README.txt, leveled by tools/thunderprep.py) fired
 	// by UpdateThunder with each flash event's own dist/340 delay. One-shots at final
 	// volume, so the module-volume freeze above cannot touch them.
-	enum { SND_THUNDER_BASE = 40, THUN_FILES = 9, THUN_Q = 12 };
+	enum { SND_THUNDER_BASE = 40, THUN_FILES = 9, THUN_Q = 12,
+	       SND_THUNDER_IN_BASE = 50 };      // the muffled twins (ids 50..58)
 	void   UpdateThunder();                 // main thread, right after UpdateRainSound
 	void   ThunderEnqueue(float fireT, int file, float vol);
 	bool   thunLoaded[THUN_FILES] = {};     // per-file tolerant: a missing variant just
 	                                        //   narrows the pick at fire time
+	bool   thunInLoaded[THUN_FILES] = {};   // the _in twins, same tolerance; a clap
+	                                        //   picks its family at FIRE time by view
 	int    thunLastEp[6] = {};              // per-slot epoch cursor (edge = new event)
 	bool   thunPrimed = false;              // 21e's prime: entering the gates schedules
 	                                        //   nothing retroactively

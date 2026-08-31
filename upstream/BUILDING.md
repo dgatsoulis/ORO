@@ -1,6 +1,6 @@
-# Rebuilding D3D9Client for ORO (TWENTY-ONE local patches: a-g, i-u)
+# Rebuilding D3D9Client for ORO (TWENTY-SIX local patches: a-y, +k2)
 
-ORO runs on a locally-patched D3D9Client carrying **twenty-one** ORO patches:
+ORO runs on a locally-patched D3D9Client carrying **twenty-six** ORO patches:
 
 - **(a) `D3D9Client-HUD-renderproc-CTD-fix.patch`** - the crash fix. Stock Orbiter 2024
   clients CTD the moment any `RENDERPROC_HUD_1ST/2ND` callback is registered
@@ -88,7 +88,7 @@ This documents the local rebuild that produced all five patches.
 
 ## Build recipe (mirrors .github/workflows/reusable-build.yml)
 
-> **THE EASY PATH (since 2026-08-13): skip step 3 entirely.** All twenty-one patches are
+> **THE EASY PATH (since 2026-08-13): skip step 3 entirely.** All twenty-six patches are
 > published, already applied, on the `oro-patches` branch of
 > <https://github.com/dgatsoulis/orbiter-oro> (branched from tag `2024`). Clone that
 > instead of upstream and there is nothing to apply:
@@ -107,8 +107,8 @@ Workspace used: `C:\OrbiterDev\` (deletable; everything here recreates it).
 2. DXSDK June 2010: download `https://download.microsoft.com/download/a/e/7/ae743f1f-632b-4809-87a9-aa1bb3458e31/DXSDK_Jun10.exe`
    (~600 MB), then `7z x DXSDK_Jun10.exe DXSDK/Include DXSDK/Lib` into `C:\OrbiterDev\`.
 3. Apply the ORO patches, **with `git apply`** (see note). ⚠️ **Only SEVEN of the
-   twenty-one exist as `.patch` files** — the rest are documented as code listings in the
-   per-patch sections below, because all twenty-one were developed as uncommitted
+   twenty-six exist as `.patch` files** — the rest are documented as code listings in the
+   per-patch sections below, because all twenty-six were developed as uncommitted
    working-tree changes and a per-file diff would carry the earlier ones too. The
    complete, verified set is `ORO-D3D9Client-all-patches.patch` (every patch, against
    tag `2024`), or just use the fork above. The individual files are:
@@ -990,11 +990,12 @@ the DEPLOYED shaders D3D9Client.fx, Mesh.fx, PBR.fx, Vessel.fx, Metalness.fx,
 NewPlanet.hlsl. The shader halves are runtime-compiled - edit, copy, restart - but the
 C++ half needs the DLL rebuild. WARNING: NewPlanet.hlsl also carries patch (m)'s tuned
 `ORO_NIGHT_CLOUD 0.5f` - verify it on every deploy.
-⚠️ **THE DEPLOYED SET IS SEVEN FILES NOW** (with Sketchpad.fx from patches d/g/l), and
+⚠️ **THE DEPLOYED SET IS EIGHT FILES NOW** (with Sketchpad.fx from patches d/g/l and
+NewMesh.hlsl from patch (h) part 2), and
 `Mesh.fx` is the one every ship-list forgot: it joined with (s)'s base-tile ground work
 (a wet RUNWAY is a base tile), was live in the sim from 2026-08-22, and was absent from
 the staging list, the stock restore bundle and the installer's backup loops until the
-260823 release audit hash-compared clone against deployed. **Audit all seven on every
+260823 release audit hash-compared clone against deployed. **Audit all eight on every
 release: the clone, the deployed copies and `upstream/stock` must agree.**
 
 **EXTENDED 2026-08-23 - THE COCKPIT INTERIOR IS DRY.** The VC is rendered with the same
@@ -1136,7 +1137,7 @@ over the UI.
 
 His ask, straight after the exhaust/particle extension landed: the reflection shows the
 hull and now the contrail, but not ORO's own jet. Three files, DLL-only, no shader change,
-one new render-proc id. It is the smallest of the twenty-one patches and the one with the
+one new render-proc id. It is one of the smallest patches in the set and the one with the
 highest ratio of comment to code, because every part of it is an argument about *why no
 new API was needed*.
 
@@ -1268,3 +1269,224 @@ should report its own camera and its own target size through the same interfaces
 pass uses.* Both halves of that were free here because the client already had the two
 accessors; designed in rather than patched in, it costs nothing at all.
 
+
+
+## Patch (h): scene depth into IPI + the `RAIN 1` glass token (2026-08-27)
+
+Two parts, one purpose: raindrops ON the VC glass that refract the world and stop at
+the window frame.
+
+**Part 1 - `gcCore::SetIPISceneDepth(gcIPInterface*, const char* name, DWORD flags)`**
+(gcCore.h/.cpp, ~3 lines): binds `ptgBuffer[GBUF_DEPTH]` into a user IPI shader by
+sampler name. The resource has existed since patch (g)'s work and already includes the
+cockpit; this is the same shape as (b) and (g) - hand out a handle to a texture that is
+already there. Probe by binding: `CanSetIPISceneDepth` is hand-added guard **#10** in
+`gcCoreAPI.h` (re-add after any codegen regeneration, as ever).
+
+**Part 2 - the authored glass mask.** Mesh groups whose .msh carries a `RAIN 1` line
+before their GEOM are written into the NORMAL_DEPTH pass with their distance NEGATED
+(`NewMesh.hlsl`, deployed shader #8): the SIGN of the per-pixel depth is the window
+mask, and occlusion by seats/frames/helmets is the pass's own z-buffer, free. The core's
+mesh parser skips unknown tokens (verified in source), so the CLIENT reads them itself:
+`RainGlassStoreScan` (Mesh.cpp) parses the mesh FILE at `clbkStoreMeshPersistent` - the
+one place a mesh's filename is ever spoken - into a `map<MESHHANDLE, groups>` the mesh
+constructors consult. ANY vessel works with one line in its mesh; nothing to configure.
+Two landmines, both hit: the scan must run BEFORE `meshmgr->StoreMesh` (the stored
+template's constructor reads the map), and the membership test in `RenderShadowMap`
+(opt==1, the depth pass) must sit ABOVE the `UsrFlag 0x1/0x2` skips - the DG canopy
+carries FLAG 1 and would otherwise never enter the mask.
+
+## Patch (v): REFLECTIONS - multi-probe env maps, planar vessel mirrors, and the "Full Scene ORO (exp)" mode (2026-08-28)
+
+Community-requested (DaveS): stock "Full Scene" reflections show planet and sky but
+never the vessel itself or its payload. Three parts.
+
+**Part 1 - MULTI-PROBE ENV MAPS.** `MAX_ENVCAM 4` (MaterialMgr): `BEGIN_CAMERA n` is
+un-parked (stock parsed the index and then forced `camera = 0; // For now just one
+camera`), each probe carries its own LPOS/flags/omit lists plus `GROUPS a b` ranges of
+mesh groups that sample it, and `BOX cx cy cz hx hy hz` - a proxy volume for
+box-projected (parallax-corrected) sampling: `EnvDir()` in D3D9Client.fx re-aims the
+cube lookup at the box intersection, so a probe INSIDE the geometry it reflects stops
+painting that geometry magnified. `DO_NOT_OMIT_FOCUS` (a stock key) puts the vessel
+itself in its own probe. `vVessel::RenderENVMap` cycles probes through the same
+round-robin that served the one; `D3D9Mesh::Render` swaps cubes per group.
+
+**Part 2 - PLANAR VESSEL MIRRORS.** For flat near-mirrors (the shuttle's radiators)
+where probe parallax always shows: `BEGIN_PLANE n` blocks (POS/NRM in the mesh BASE
+pose; `GRPREF mesh grp` ties the plane to an animated group so an opening door carries
+its mirror; `GROUPS` = receivers; `RDIST` below). Scene renders the vessel list -
+SELF INCLUDED, the whole point - through a camera mirrored about the plane into a
+half-res RT, with the wet mirror's clip-space double-flip keeping every group's culling
+legal, and the clip plane transformed into CLIP SPACE (inverse-transpose of the VP;
+with shaders active D3D9 clip planes live there). Receiver groups sample the RT at
+their own screen position and the probe cube fills every pixel the mirror pass left
+empty (alpha = coverage) - exact where declared, probe elsewhere. The CURVATURE WARP:
+instead of the pixel's own screen position (exact only for a flat mirror), follow the
+pixel's TRUE reflected ray - curved normal, normal map and all - an assumed distance
+RDIST, mirror that point through the declared plane, and project it with the scene
+camera. Law of reflection: for a flat on-plane pixel this degenerates EXACTLY to the
+flat sampling, independent of RDIST - the warp exists only where the surface actually
+curves. `RDIST 0` is a sentinel: the flat mirror verbatim, kept as an exact A/B.
+
+**Part 3 - THE FOURTH REFLECTION MODE, and the two-file law.** All of the above lives
+behind `EnvMapMode 3` = "Full Scene ORO (exp)" in the Launchpad combo. The three stock
+settings are PIXEL-EXACT stock: consumer-side gates everywhere, zero extra passes, and
+stock's own cfg reader clamps `min(2, i)` so a saved mode 3 degrades to Full Scene on
+a stock client for free.
+WARNING - THE FINDING THAT FORCED THE FILE SPLIT: stock's `_ecam.cfg` parser forces any
+`BEGIN_CAMERA n` to camera 0 AND clears its flags, so an experimental camera block in
+the shared file would RECONFIGURE a stock client's probe (move it into the bay, un-omit
+the payload). Experimental content therefore lives in `<class>_ecam_oro.cfg` - a
+filename stock never builds, so nothing in it can reach a stock install BY CONSTRUCTION.
+`<class>_ecam.cfg` is parsed with stock grammar, byte-exact semantics, in every mode.
+(Also fixed while in there: `fgets2` cuts `;` comments and returns the EMPTY remainder
+as a valid line, so every comment line in a camera file spammed "Invalid Line" - ours
+skips empties; stock still has the bug.)
+
+## Patch (w): PLANET-SHINE SHADOWS - Earth glow learns what a closed door is (2026-08-29)
+
+Community-reported (DaveS, stock behaviour): planet shine has NO occlusion term of any
+kind. The glow sites in PBR.fx/Metalness.fx add `gAtmColor * f(angle)` to every
+planet-facing surface - the sun term gets `ComputeShadow()`, the glow term gets
+nothing - so a closed payload bay flying bay-to-Earth glows sky-blue inside.
+
+**The fix:** the focus vessel's ATTACHMENT ASSEMBLY (climb the attachment tree to its
+root, collect everything below - orbiter + berthed payloads, so focusing the payload
+changes nothing) renders into a depth map along the PLANET direction, reusing
+`RenderShadowMap` wholesale. The result is copied out by `StretchRect` to a dedicated
+R32F target and the sun's `smap` struct restored - the shared LOD targets are repainted
+by later passes, the same reuse trap patch (f) documented. `PShineShadow()`
+(D3D9Client.fx; orthographic, so no w-divide; 2-tap PCF - planet light is a huge area
+source) attenuates the glow sites for assembly members. The FAST_PS variant keeps the
+stock unshadowed glow: it is a per-mesh opt-in chosen for cheapness and sits at the
+ps_3_0 temp-register ceiling - adding the call overflows it (X4505, caught by the
+mandatory fxc compile-check).
+
+**Part 2 - A MIRROR MUST NOT CREATE LIGHT.** First flight: the bay went black but its
+REFLECTIONS stayed lit. Two causes, one class: the planet-shine bind was main-scene
+gated (fixed: the pass renders at the top of the frame, before the env-cube turn and
+both mirror passes, and assembly members bind it in EVERY pass - the world frame is
+camera-centred and constant within a frame, only view matrices change, so the lookup
+is valid everywhere); and - the deeper stock finding - THE SUN SELF-SHADOW MAP IS
+MAIN-SCENE-ONLY in stock (`vVessel::Render`), so every secondary render (probe cubes,
+both mirror passes) draws geometry fully sunlit. Stock never noticed because stock
+probes exclude the vessel itself; an interior probe with DO_NOT_OMIT_FOCUS is the
+first thing that ever rendered a vessel's own closed bay into a cube. Fix: after the
+main scene renders the focus sun map, copy it out (same recipe), and secondary passes
+bind the copy for assembly members - `ComputeShadow` runs verbatim, one frame stale,
+bounded.
+
+**Known floor, accepted:** a faint stable residual remains in the reflections - real
+light leaking through places the bay mesh is not watertight from the inside. An
+authoring fact of the mesh, not a lighting bug (same family as shadows leaking through
+non-watertight hulls).
+
+**FOR THE VULKAN REQUIREMENTS DOCUMENT:** planet shine (and any ambient-class light)
+needs an occlusion input, and shadow maps should be bindable in EVERY pass that renders
+vessels - both invisible in stock only because nothing ever rendered a vessel's own
+interior from a secondary viewpoint before.
+
+## Patch (x): PARTICLE SUN LIGHTING - diffuse smoke learns what night is (2026-08-30)
+
+**The stock finding:** `Particle.fx`'s diffuse vertex shader hardcodes `light = 1.0f`
+with the original N.L term COMMENTED OUT, so every DIFFUSE particle stream renders
+fully daylight-lit on the night side of a planet - a midnight smoke trail glows as if
+at noon (a tester report, with photographs). The disable was probably deliberate:
+normal-based lighting misbehaves on camera-facing billboards. The fix is POSITION-based
+instead - "does sunlight reach this particle?".
+
+**Files:** `Particle.cpp` (the whole model), `shaders/Particle.fx` (the NINTH deployed
+ORO shader - one line in the VS reads the value, the `light` interpolant becomes
+float3), `D3D9Config.{h,cpp}` (+`ParticleLight`, persisted 0..2, default 2),
+`VideoTab.cpp` + `D3D9Client.rc` + `resource.h` (the Launchpad "Particle lighting
+(ORO)" group: the Advanced Setup's right-column checkboxes moved down, a "Diffuse sun
+light" dropdown above them - Off (stock, always lit) / Brightness only / Brightness +
+colour).
+
+**The model, all CPU-side per particle, carried in the vertex normal channel the
+shader no longer reads as a normal** (those vertices were already rewritten every
+frame; zero new buffers):
+- **Sun visibility:** sun-at-the-global-origin (RenderGroundShadow's own long-standing
+  convention), sin(elevation) against the ALTITUDE-DEPRESSED horizon, smoothstepped over
+  a twilight band (sin -1..+5 deg) onto the user's Launchpad-ambient floor (the exact
+  vVessel::ModLighting scaling). Per particle, so a long trail straddles the terminator;
+  the depressed horizon keeps an orbital trail lit past the ground terminator.
+- **The flame:** young smoke near the source is lit by the engine - `max()` with an
+  inverse-square glow reaching ~10 src-sizes, scaled by the stream's own level. It can
+  only LIFT, so daylight is untouched; engine shutdown kills it.
+- **The dawn/dusk tint** rides the TRUE sun elevation (0..+9 deg - the air path the
+  light crossed; the visibility coordinate would whiten high smoke that photographs
+  gold, the STS-108 lesson), three smoothstepped stops: RED (1,.30,.10) at the shadow
+  edge -> GOLD (1,.62,.18) -> white. ⚠️ The g:b RATIO is the hue - ~2:1 reads SALMON.
+  Two buried experiments, both REVERTED on flight: a head/tail hue lerp from
+  vPlanet::GetObjectAtmoParams (normalized low-sun colour = saturated full-brightness
+  red smeared by the age lerp), and an altitude-thinning + 0.6 softener ("goes straight
+  to yellow"). The tunables live at the top of Particle.cpp.
+- **Fully sunlit evaluates to exactly 1.0** and EMISSIVE streams never enter the path,
+  so daylight and every self-luminous effect are bit-identical to stock. Mode 0 skips
+  the whole block - bit-exact stock for the scene.
+
+⚠️ **RESOURCE-ID LANDMINE:** the first build defined `IDC_PRTLIGHT = 3036`, which
+COLLIDED with `IDC_TILECOUNT` - the tiles combo's 600/1200/2400 landed in the new
+dropdown and the tiles combo went empty. resource.h has multiple ID ranges; always
+take max+1 FILE-WIDE (4067).
+
+**STAGE 2 (2026-08-30/31, DLL-only - the FX file's per-vertex `light` interpolant
+already carries whatever the CPU writes, so none of this touched the shader):**
+- **Directional shading, per billboard CORNER:** pseudo-normal = the corner's offset
+  from the particle centre + a view-direction bulge (`ORO_PRT_DIR_ZC` - the billboard
+  as the front hemisphere of a sphere), wrap-Lambert against the sun
+  (`(dot+W)/(1+W)`, `ORO_PRT_DIR_WRAP`). The sun-facing side of a cloud is bright,
+  the far side smoky. Orientation-proof: the offsets are read off the vertices the
+  atlas rotation just wrote.
+- **Two-light split:** cool sky ambient (`ORO_PRT_AMB_*`, colour mode + atmosphere
+  only) + tinted directional sun + white omnidirectional engine flame. The flame ADDS
+  (was `max()` - the hard max had a kink exactly at the flame->sun handover, reported
+  as an abrupt white-to-orange cutoff) and its falloff gained a LORENTZIAN tail past
+  the reach, value- and slope-continuous at the boundary.
+- **The dawn tint is the HULL'S OWN** (round 4/5): per particle,
+  `vPlanet::SunLightColor(-sinel, alt)` - the exact extinction curve
+  GetObjectAtmoParams feeds vessel sunlight - normalized to hue (magnitude stays with
+  the twilight ramp), deepened and read slightly AHEAD of the true sun. The three-stop
+  band survives as the fallback when the proxy body has no planet visual. Where the
+  hue is deep the sun term overdrives past 1.0 into the fp16 chain (the diffuse PS
+  multiplies light through unclamped), so Light glow BLOOMS the tinted smoke; white
+  daylight and engine-lit steam overdrive by exactly nothing.
+- **Four more Launchpad controls** (`D3D9Config` + `VideoTab` + rc, IDs 4068-4071,
+  the max+1 rule): "Shadow strength (diffuse)" (`ParticleShadow` 0..1 - scales
+  RenderGroundShadow's alpha including its 0.1 floor; a low sun stretched a smoke
+  column's shadow into a near-black band), and the three dawn-tint dials
+  `ParticleTintLead` (0..0.20 sin-el), `ParticleTintSat` (1..4), `ParticleTintBloom`
+  (1..3). Defaults are the author's settled tuning (0.10 / 1.6 / 2.34). The setup
+  dialog grew 42 DLU (378 -> 420) for the three rows - IDC_FLATS and everything
+  below moved down with it.
+
+**FOR THE VULKAN REQUIREMENTS DOCUMENT:** particle lighting wants a position-based
+sun-visibility input per particle (or per stream segment); billboard normals are the
+wrong basis and a hardcoded 1.0 is the wrong fix.
+
+## Patch (y): STREAM-SPEC READBACK - the stock definitions an addon cannot otherwise see (2026-08-30)
+
+**Why:** the core COPIES a `PARTICLESTREAMSPEC` at stream construction and exposes no
+getter, so "start my sliders from what the vessel author shipped" (ORO's COPY STOCK
+buttons) is impossible through the SDK. The client's scene holds every live stream
+with all its derived spec fields - the only place the definition can be read back.
+
+**Files:** `Particle.h/.cpp` (`OroGetSpec` inverts SetSpecs exactly - lifetime out of
+`ipht2`, amax out of `afac`; `OroIsStockExhaust` = belongs to the vessel AND not
+created under patch (o)'s exemption latch, so ORO's own replacement streams and
+reentry streams are excluded), `Scene.h/.cpp` (the walker over `pstream[]`),
+`gcCore.h/.cpp`:
+
+    gc_interface int GetExhaustStreamSpec(OBJHANDLE hVessel, int idx,
+                     PARTICLESTREAMSPEC* out, VECTOR3* pos, VECTOR3* dir);
+
+Returns the stock-stream count; fills the outputs when idx is valid. `pos`/`dir` are
+the stream's attach point and THRUST direction, VESSEL frame - they are pointers into
+the vessel's own thruster storage, which is what lets the consumer classify a stream
+by ENGINE GROUP (ORO matches dir against the selected group's thruster directions and
+folds byte-identical specs, so a DeltaGlider's MAIN offers exactly two candidates:
+the contrail and the flame puffs). Read-only - nothing is lent, so the 23(k)
+load-window rule does not apply. Guard #11 in the hand-maintained gcCoreAPI.h:
+`CanGetExhaustStreamSpec` (probe by binding, as ever - and re-add it after any codegen
+regeneration, with the wrapper verified to pass ALL FIVE arguments).

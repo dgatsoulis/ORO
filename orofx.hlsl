@@ -349,14 +349,359 @@ uniform extern float fGloom;       // 0..1 overcast strength
 // in the surface shaders, fades the projected shadows and kills the glare). What remains
 // here is the one thing the source change does not do: the slight cool desaturation of a
 // scene lit through water.
+// ----------------------------------------------------------------------------
+// RAINDROPS ON THE GLASS (2026-08-26) - and the reason they live inside PSGloom
+// rather than in a pass of their own is that this pass is ALREADY RUNNING whenever
+// rain is live, in both view domains. One copy of the frame, one full-screen draw,
+// two jobs: refract, then grey. That order is also the physical one - the gloom is
+// what the world outside looks like, and the drop is a lens held in front of it.
+//
+// ⚠️ WHY THIS IS A RESAMPLE AND NOT GEOMETRY. A drop on glass is a short-focus lens
+// showing an inverted, magnified image of what is behind it, and the giveaway is that
+// its interior swings hugely for a small head turn. Sketchpad can add light or blend a
+// colour; it cannot displace what is already in the frame. So no amount of decal work
+// reaches this look - the same shape of verdict as graveyard G13.
+//
+// ⚠️ ANCHORING IS THE WHOLE RISK, AND INVARIANT 28(n) ALREADY WROTE THE WARNING: a
+// camera-glued field survives unnoticed in a cockpit BECAUSE the camera hardly
+// translates there. It does ROTATE, and a drop stuck to a windscreen is maximally
+// sensitive to exactly that. So the lattice is keyed on the pixel's view ray rotated
+// into the VESSEL frame - the drops stay put on the glass while you look around, which
+// is the entire illusion. Eye TRANSLATION (a seat shift) makes them lag slightly; that
+// is the one honest approximation here, and it is small because a VC camera pivots.
+//
+// ⚠️ AND 28(n)'s SECOND HALF TOO: being vessel-fixed is not enough, the coordinate must
+// also measure distance the same way in every direction. Plate carree does not - its
+// longitude carries a cos(lat) factor - so cell WIDTH is scaled by the cosine of each
+// ROW's own centre latitude. Per row, not per pixel: a per-pixel cosine would shear
+// every cell. Cells come out square in arc measure at any latitude.
+//
+// ⚠️ AND THE INTEGER-CYCLE LAW (invariant 28e), for the third time in this project:
+// longitude wraps at +-pi, so a lattice whose column count is not a whole number seams
+// along the line directly behind the ship. Each row's column count is ROUNDED to an
+// integer, which costs a few percent of squareness and makes the field seamless
+// everywhere instead of nearly everywhere.
+// ----------------------------------------------------------------------------
+uniform extern float  fDrop;       // 0..1 OCCUPIED FRACTION of lattice cells (0 = block
+                                   //   off). The host ramps it with the canopy soak, so
+                                   //   it is the fill level, not just a strength.
+uniform extern float  fDropCell;   // lattice cells per RADIAN - the size knob, inverted
+uniform extern float  fDropLens;   // refraction gain: how far a drop displaces what it shows
+uniform extern float  fTanAp;      // tan(camera aperture), for the ray reconstruction
+uniform extern float3 vGlR;        // camera RIGHT   axis, expressed in the VESSEL frame
+uniform extern float3 vGlU;        // camera UP      axis, expressed in the VESSEL frame
+uniform extern float3 vGlF;        // camera FORWARD axis, expressed in the VESSEL frame
+uniform extern float3 vGlRun;      // where a drop runs: gravity + airflow, VESSEL frame
+uniform extern float3 vGlRunA;     // with vGlRunB: an orthonormal basis AROUND vGlRun,
+uniform extern float3 vGlRunB;     //   host-built - the streaks' polar chart axes
+uniform extern float  fRunAmt;     // RUNNERS: how many columns carry one (0 = none)
+uniform extern float  fRunSize;    // ... their thickness - rides the DROP SIZE slider
+                                   //   (his ask: one size control for the whole glass)
+uniform extern float  fRunSpd;     // ... and how fast they travel, in COLUMN-CELLS/s -
+                                   //   derived host-side from |gravity + airflow| at
+                                   //   the glass, so parked runners crawl and in-flight
+                                   //   ones whip aft with no threshold (invariant 25e)
+uniform extern float  fDropDbg;    // TEMPORARY scaffold: 1 = ignore the depth mask,
+                                   //   2 = VISUALIZE THE BUFFER instead of drawing
+                                   //   drops - green where the depth is NEGATIVE (an
+                                   //   authored window), blue-tinted where positive
+                                   //   (interior/hull), untouched where 0 (nothing) -
+                                   //   so "did the negation arrive" is answered by eye
+
+// ⚠️ PATCH (h). GBUF_DEPTH: .a is the CAMERA DISTANCE in metres; 0 means "nothing was
+// drawn here", and - part 2, 2026-08-26 - NEGATIVE means AUTHORED WINDOW GLASS: a mesh
+// group carrying FLAG 1000 (his design: the burden is on the author to mark the panes)
+// is written into the depth pass with its distance sign-flipped. The sign IS the mask:
+// drops live exactly where sd < 0 and nowhere else - not on the panel, not on the
+// coaming, not on an astronaut three metres down the cabin (the 1.6 m glass-plane guess
+// this replaces failed precisely there: looking aft, the whole interior sat beyond the
+// plane and read as sky). Occlusion is inherited from the pass's own z-buffer, so a
+// seat back or helmet IN FRONT of a window holes the mask per pixel for free. Every
+// other consumer of this channel guards with `sd > 0.1` and reads a negative as
+// "nothing drawn" - which is exactly how unflagged glass already reads to them.
+sampler tDepth;
+
+float2 dhash2(float2 p)
+{
+	float2 q = float2(dot(p, float2(127.1f, 311.7f)), dot(p, float2(269.5f, 183.3f)));
+	return frac(sin(q) * 43758.5453f);
+}
+
 float4 PSGloom(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 {
-	float4 src = tex2D(tSrc, float2(x, y));
+	float2 suv  = float2(x, y);      // where this pixel SAMPLES the world (a drop moves it)
+	float3 tint = float3(1, 1, 1);   // rim darkening x caustic gain
+
+	// A uniform branch: coherent across the whole frame, so it costs nothing when the
+	// rain is external, dry, or running on a client without patch (h).
+	if (fDrop > 0.001f)
+	{
+		// Is this pixel AUTHORED WINDOW GLASS? The sign of the depth answers it
+		// (patch h part 2 - see tDepth's comment above). -0.25 rather than 0: a
+		// pane nearer than 25 cm is the visor of a helmet you are wearing, not a
+		// window, and fp16 noise around zero stays out.
+		// TEMPORARY (2026-08-26): fDropDbg >= 1 bypasses the mask, so one flight says
+		// whether the drops are absent or merely masked away. Scaffolding - out on
+		// sign-off, like the wet mirror's MIR X toggle.
+		float sd = tex2D(tDepth, suv).a;
+		// TEMPORARY: dbg 2 paints the buffer itself - see fDropDbg's comment.
+		if (fDropDbg >= 1.5f) {
+			float4 s2 = tex2D(tSrc, suv);
+			if (sd < -0.25f)     return float4(s2.rgb * 0.3f + float3(0, 0.7f, 0), s2.a);
+			else if (sd > 0.1f)  return float4(s2.rgb * 0.5f + float3(0, 0, 0.4f), s2.a);
+			return s2;
+		}
+		if (sd < -0.25f || fDropDbg >= 0.5f)
+		{
+			// --- the pixel's view ray, in the VESSEL frame -------------------------
+			// Inverse of ProjectToUV: u = 0.5 + 0.5*(cx/cz)/(tanAp*aspect), v likewise
+			// with the sign flipped because UV y grows downward.
+			float2 ndc  = float2(x * 2.0f - 1.0f, 1.0f - y * 2.0f);
+			float3 rayC = float3(ndc.x * fTanAp * fAspect, ndc.y * fTanAp, 1.0f);
+			float  sec2 = 1.0f + dot(rayC.xy, rayC.xy);          // sec^2 of the off-axis angle
+			float  sec  = sqrt(sec2);
+			float3 rayV = normalize(rayC.x * vGlR + rayC.y * vGlU + rayC.z * vGlF);
+
+			// --- lattice coordinates ---------------------------------------------
+			float lat = asin(clamp(rayV.y, -0.9995f, 0.9995f));
+			float lon = atan2(rayV.x, rayV.z);
+			float rowsF = max(fDropCell * 3.1415927f, 4.0f);
+			float bN    = (lat * 0.3183099f + 0.5f) * rowsF;      // 1/pi
+
+			// The local tangent frame - east along +lon, north along +lat. Degenerate
+			// only looking straight along the vessel's own Y axis, i.e. through the
+			// roof or the floor, where the mask has already said no.
+			float2 hor = float2(rayV.z, -rayV.x);
+			float  hl  = length(hor);
+			float3 east  = (hl > 1e-4f) ? float3(hor.x / hl, 0.0f, hor.y / hl) : float3(1, 0, 0);
+			float3 north = cross(rayV, east);
+
+			// Lattice-space -> UV, exactly (no small-angle assumption): perturb the
+			// camera-space ray along each tangent and differentiate the projection.
+			// rayC.z == 1 by construction, which is what makes these two lines short.
+			float3 eC = float3(dot(east,  vGlR), dot(east,  vGlU), dot(east,  vGlF));
+			float3 nC = float3(dot(north, vGlR), dot(north, vGlU), dot(north, vGlF));
+			float2 Ju = float2(eC.x - rayC.x * eC.z, nC.x - rayC.x * nC.z) * ( 0.5f * sec / (fTanAp * fAspect));
+			float2 Jv = float2(eC.y - rayC.y * eC.z, nC.y - rayC.y * nC.z) * (-0.5f * sec /  fTanAp);
+
+			// Where a drop runs on this piece of glass, in lattice space. Gravity and
+			// airflow are summed as forces in the VESSEL frame by the host (invariant
+			// 25e), so nothing here assumes a hull axis; the component along the view
+			// ray is simply not on the glass and drops out with the projection.
+			float2 rd = float2(dot(vGlRun, east), dot(vGlRun, north));
+			float  rl = length(rd);
+			rd = (rl > 1e-4f) ? rd / rl : float2(0.0f, -1.0f);
+
+			// --- the 3x3 neighbourhood -------------------------------------------
+			float best = 0.0f;          // the winning drop's height
+			float2 bestN = float2(0, 0);// ... its in-plane normal, lattice space
+			float  bestR = 1.0f;        // ... its radius, in cells
+			float  br    = floor(bN);
+
+			for (int dr = -1; dr <= 1; dr++)
+			{
+				float row  = br + dr;
+				float phi  = ((row + 0.5f) / rowsF - 0.5f) * 3.1415927f;
+				float cols = max(floor(6.2831853f * fDropCell * cos(phi) + 0.5f), 4.0f);
+				float aN   = (lon * 0.1591549f + 0.5f) * cols;   // 1/2pi
+				float ba   = floor(aN);
+
+				for (int dc = -1; dc <= 1; dc++)
+				{
+					float col = ba + dc;
+					// WRAPPED id, so the column past the last one hashes as the first.
+					float2 id = float2(col - floor(col / cols) * cols, row);
+					// THREE independent hashes, and that is not extravagance. Sharing a
+					// channel between two properties correlates them, and a correlation
+					// between size and position inside the cell is exactly what the eye
+					// picks up as a diagonal grain in an otherwise random field - the
+					// lesson invariant 28(k) paid for with three rejected pool patterns.
+					float2 h1 = dhash2(id);                          // occupancy, x jitter
+					float2 h2 = dhash2(id + float2( 37.7f, 91.3f));  // radius, y jitter
+					float2 h3 = dhash2(id + float2(-53.1f, 17.9f));  // elongation
+
+					// COVERAGE IS A BIRTH ORDER (2026-08-26, the build-up). fDrop is now
+					// the plain occupied fraction, and each cell's hash IS its birth
+					// rank: as the glass fills (the host ramps fDrop with the canopy's
+					// own soak scalar), cells cross the threshold one at a time in hash
+					// order - drops pop in one by one across the pane, and thin out in
+					// reverse when it dries. No per-drop state, no clock: a pure
+					// function of (cell, fDrop), so it is warp-proof and freezes
+					// correctly under pause with the scalar that drives it.
+					if (h1.x >= fDrop) continue;
+
+					// ... and a newborn GROWS rather than appearing full-size: maturity
+					// ramps over the last ~8% of coverage rise, scaling the radius (and
+					// with it the lens, which rides bestR). At GLASS_RISE = 16 s that is
+					// roughly a second of swelling per drop - visible, not a pop.
+					float m = saturate((fDrop - h1.x) * 12.5f);
+
+					// Radius 0.22 .. 0.50 of a cell, biased small - a real windscreen
+					// is mostly small drops with a few fat ones, and the max() below
+					// lets neighbours that overlap read as one merged blob.
+					float rad = (0.22f + 0.28f * h2.x * h2.x) * m;
+					float str = 1.0f + 0.85f * h3.x;             // elongation along the run
+
+					// Jitter across MOST of the cell (0.15 .. 0.85), not a timid ±0.2.
+					// A tight jitter leaves the lattice legible underneath, which is the
+					// failure mode that reads as "a pattern" rather than as weather.
+					float2 q = float2(aN - (col + 0.15f + 0.70f * h1.y),
+					                  bN - (row + 0.15f + 0.70f * h2.y));
+					// into the run frame, then stretched along it
+					float2 qr = float2(dot(q, float2(-rd.y, rd.x)), dot(q, rd) / str);
+					float  d  = length(qr) / rad;
+					if (d >= 1.0f) continue;
+
+					float f = 1.0f - d * d;                       // paraboloid height
+					if (f > best) { best = f; bestN = qr / rad; bestR = rad; }
+				}
+			}
+
+			if (best > 0.0f)
+			{
+				float d = sqrt(saturate(1.0f - best));            // 0 centre .. 1 rim
+
+				// THE LENS. A droplet's focal length is far shorter than its distance
+				// to anything outside, so it does not merely smear - it INVERTS. The
+				// displacement is therefore several times the drop's own angular size,
+				// which is what makes the interior swing as the view moves.
+				float2 offA = -bestN * (bestR * fDropLens / fDropCell) * sec2;
+				float2 duv  = float2(dot(offA, Ju), dot(offA, Jv));
+
+				// Soft edge, so a drop is not a cut-out at any size.
+				float a = smoothstep(1.0f, 0.90f, d);
+				suv += duv * a;
+
+				// THE RIM IS DARK because at a grazing angle the surface stops
+				// transmitting and reflects the dark surround instead - total internal
+				// reflection, and it is the outline that makes each drop legible.
+				// The CENTRE IS BRIGHT because the same lens concentrates what it
+				// gathers. Both ride the same d, so they can never disagree.
+				float rim   = smoothstep(0.62f, 1.00f, d);
+				float caust = (1.0f - d * d) * (1.0f - d * d);
+				tint = lerp(float3(1, 1, 1),
+				            float3(1, 1, 1) * (1.0f - 0.55f * rim + 0.30f * caust), a);
+			}
+
+			// --- THE RUN STREAKS (2026-08-27, chart v2 the same day) ---------------
+			// Runners: drops that broke loose and carve a wet track down-run. THE SOOT
+			// IDIOM (invariant 23d): every runner is a pure function of (sector, fTime)
+			// - born, travels, fades, reseeds - so nothing accumulates (G10) and pause
+			// freezes them with the clock, exactly like the fill.
+			// ⚠️ THE CHART IS ANCHORED TO THE RUN AXIS, NOT TO A PER-PIXEL PROJECTION.
+			// v1 built a flat chart from the run direction AS PROJECTED AT EACH PIXEL -
+			// and that projection DEGENERATES where the run axis points into the screen,
+			// which in flight is the middle of the FORWARD WINDOW: the columns closed
+			// into concentric rings that shimmered with attitude (his report, verbatim:
+			// "circular concentric motion/rings... vibrating"). The v2 chart is polar
+			// AROUND the flow axis: AZIMUTH sectors as columns, angle-from-stagnation as
+			// the travel coordinate. Smooth everywhere but the two poles; in the forward
+			// view the streaks RADIATE from the impact point - the driving-into-rain
+			// look he asked for, and also what flow over a canopy really does, diverging
+			// from stagnation. A small calm disc at the exact centre is the stagnation
+			// region, honestly, and it is also what hides the pole.
+			// The sector count is an INTEGER - azimuth wraps, so this is the
+			// integer-cycle law (28e) in its fourth outfit.
+			#define ORO_RUN_SEC 140.0f       /* azimuth sectors around the run axis */
+			if (fRunAmt > 0.001f)
+			{
+				// local tangent axes of the polar chart: rd (the run direction's
+				// tangent projection, already computed for the drops) IS the meridian
+				// away from stagnation; pp2 is the azimuthal direction beside it.
+				float2 pp2 = float2(-rd.y, rd.x);
+				// the pixel's ray in the RUN FRAME (vGlRunA/B = host-built basis)
+				float ca = dot(rayV, vGlRunA);
+				float cb = dot(rayV, vGlRunB);
+				float cr = dot(rayV, vGlRun);
+				float cv = acos(clamp(-cr, -1.0f, 1.0f));     // 0 = stagnation point,
+				                                              // grows DOWNSTREAM
+				float sv = sin(cv);                           // sector width factor
+				float cu = atan2(ca, cb) * (ORO_RUN_SEC / 6.2831853f);
+				float ci = floor(cu);
+				float id = ci - floor(ci / ORO_RUN_SEC) * ORO_RUN_SEC;   // wrap the seam
+				float2 h1r = dhash2(float2(id, 17.31f));
+				float2 h2r = dhash2(float2(id + 91.7f, 3.13f));
+				float2 h3r = dhash2(float2(id - 53.1f, 17.9f));   // trail length seed -
+				                                  // its OWN channel (the drops' three-
+				                                  // hash lesson: sharing correlates)
+				// Occupancy rides the knob AND the fill: runners need water on the
+				// glass before they have anything to gather.
+				if (h1r.x < saturate(0.08f + 0.30f * fRunAmt) * saturate(fDrop * 1.6f))
+				{
+					const float L = 0.45f;                    // wrap period, radians
+					float spd = fRunSpd * (0.6f + 0.8f * h2r.x);        // rad/s
+					float vh  = fmod(fTime * spd + h1r.y * L, L);       // the head
+					float va  = cv - floor(cv / L) * L;                 // this pixel
+					// column-local ACROSS offset, in RADIANS of arc (sector width is
+					// (2pi/N)*sin(cv)); curvature is SPATIAL and seed-keyed, never
+					// temporal - a time wiggle would slide the laid trail sideways,
+					// G12(c)'s chord-polyline cousin.
+					// SIZED AS ONE FAMILY WITH THE DROPS (his ask, round 2): a static
+					// drop's radius is (0.22..0.50 cells) x (fDropSize/100 rad per
+					// cell); the head lands in the upper half of that range - a runner
+					// IS a gathered drop, so it reads as one of the bigger ones, never
+					// as a different species. The track is ~65% of its head's width
+					// (the channel a drop carves is narrower than the drop). rs is
+					// capped so slider-max heads cannot outgrow their azimuth column.
+					// Base = the MIDPOINT of the two flown rounds (too thick / too
+					// small); fRunSize now also carries his Runner size multiplier,
+					// so the final word on this number is the slider's, not a guess.
+					float rs = min(fRunSize, 2.2f);
+					float rh = (0.0048f + 0.0027f * h1r.x) * rs;   // head radius, rad
+					float w  = (0.0032f + 0.0018f * h2r.y) * rs;   // track half-width
+					float xl = (cu - ci - 0.5f) * (6.2831853f / ORO_RUN_SEC) * sv
+					         - 0.0035f * rs * sin(cv * 11.0f + h2r.y * 6.2832f);
+					// the two pole fades: the stagnation disc, and the convergence
+					// behind the run pole
+					float sp = smoothstep(0.05f, 0.16f, cv)
+					         * smoothstep(0.08f, 0.22f, 3.1416f - cv);
+
+					// THE TRAIL: a thin wet channel fading behind the head. A point at
+					// distance db behind was passed db/spd seconds ago; fading with db
+					// is the same statement with no second clock.
+					float db = vh - va; if (db < 0.0f) db += L;
+					// PER-RUNNER trail length (his ask: "some runners produce longer
+					// trails than others... so it seems random like the real thing") -
+					// 0.30..0.90 of the wrap, its own seed, and longer on average than
+					// the old fixed 0.42 so parked runners visibly DRAG something.
+					float TR = (0.30f + 0.60f * h3r.x) * L;
+					if (db < TR && abs(xl) < w)
+					{
+						float nx = xl / w;                    // cross-channel normal
+						float aT = (1.0f - db / TR) * (1.0f - nx * nx) * sp;
+						float2 offEN = pp2 * (nx * 0.010f * fDropLens);
+						suv += float2(dot(offEN, Ju), dot(offEN, Jv)) * aT;
+						tint *= 1.0f - 0.28f * aT * smoothstep(0.25f, 1.0f, abs(nx));
+					}
+
+					// THE HEAD: a fat drop on the move - the drop shading restated in
+					// the streak chart, with the same rim and caustic so a runner's
+					// head and a sitting drop are visibly the same kind of thing.
+					float dv = va - vh; dv -= L * floor(dv / L + 0.5f);  // wrap +-L/2
+					float2 hq = float2(xl, dv) / rh;
+					float hd2 = dot(hq, hq);
+					if (hd2 < 1.0f)
+					{
+						float hdd = sqrt(hd2);
+						float ah  = smoothstep(1.0f, 0.90f, hdd) * sp;
+						float2 offEN = -(pp2 * hq.x + rd * hq.y)
+						             * (rh * fDropLens) * sec2;
+						suv += float2(dot(offEN, Ju), dot(offEN, Jv)) * ah;
+						float rim   = smoothstep(0.62f, 1.0f, hdd);
+						float caust = (1.0f - hd2) * (1.0f - hd2);
+						tint *= lerp(1.0f, 1.0f - 0.55f * rim + 0.30f * caust, ah);
+					}
+				}
+			}
+		}
+	}
+
+	float4 src = tex2D(tSrc, suv);
 	float  lum = dot(src.rgb, float3(0.299f, 0.587f, 0.114f));
 	float3 grey = lum * float3(0.94f, 0.98f, 1.08f);        // cool, not neutral
 	float3 c = lerp(src.rgb, grey, saturate(fGloom) * 0.45f);
 	c = lerp(c, c * 0.90f + 0.012f, saturate(fGloom));      // a whisper of the old dimmer
-	return float4(saturate(c), src.a);
+	return float4(saturate(c * tint), src.a);
 }
 
 // ----------------------------------------------------------------------------

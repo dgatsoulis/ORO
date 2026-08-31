@@ -112,6 +112,23 @@ namespace {
 	// HANDLE REFERS TO unless something resets it - so any static holding a core or client
 	// resource needs a session-boundary reset, the way OroLightning_Close() already does
 	// for the cloud-map file handle and its tile cache.
+	// --- gimbal-follow records (2026-08-31, Phase C) ------------------------
+	// A group whose mesh header carries a GIMBAL token opts in: it rotates
+	// about its throat pivot to track its matched engine's LIVE thrust
+	// direction. The opt-in is authored because most vessels gimbal the
+	// THRUSTER but never animate their bell mesh - on those, our static glow
+	// sits on their static bell and is correct; following unconditionally
+	// would break the common case to fix the rare one.
+	#define BELL_GIM_MAX 16
+	struct BellGim {
+		int     grp;         // mesh group index
+		int     fam;         // BELL_* family (the label's FIRST word)
+		bool    hasOvr;      // authored pivot override (GIMBAL x y z)
+		VECTOR3 ovr;
+		VECTOR3 pivot;       // resolved pivot (throat centroid, or the override)
+		VECTOR3 axis;        // rest axis, unit, exit->throat = the THRUST direction
+		int     exIdx;       // matched exhaust index on the attached vessel (-1 = none)
+	};
 	struct BellCfg {
 		char       cls[64];          // sanitised class leaf this holds ("" = none)
 		bool       tried;            // true once we looked (negative cache)
@@ -119,6 +136,8 @@ namespace {
 		int        grp[BELL_NFAM];   // group index per family, -1 = absent
 		int        mat[BELL_NFAM];   // material index per family (0-based), -1 = absent
 		MATERIAL   base[BELL_NFAM];  // the template's original materials (the borrow base)
+		int        nGim;             // gimbal-follow groups parsed from the mesh
+		BellGim    gim[BELL_GIM_MAX];
 		char       info[64];         // dialog readout
 	};
 	BellCfg  s_cfg = {};
@@ -179,10 +198,14 @@ namespace {
 		fclose(f);
 
 		for (int k = 0; k < BELL_NFAM; k++) { c.grp[k] = -1; c.mat[k] = -1; }
+		c.nGim = 0;
 
 		char matNames[64][32]; int nMatNames = 0;
 		int  pendMat = -1;                   // 1-based, from the group's MATERIAL line
 		char pendLabel[32] = "";
+		bool pendGim = false;                // the group's GIMBAL opt-in token
+		bool pendHasOvr = false;             // GIMBAL x y z pivot override form
+		VECTOR3 pendOvr = _V(0, 0, 0);
 		int  grpIdx = 0;
 		int  readNames = 0;                  // >0: consuming the MATERIALS name list
 
@@ -215,17 +238,49 @@ namespace {
 			else if (_strnicmp(line, "MATERIAL", 8) == 0 && (line[8] == ' ' || line[8] == '\t')) {
 				pendMat = atoi(line + 9);    // 1-based; 0 = none
 			}
+			else if (_strnicmp(line, "GIMBAL", 6) == 0 && (line[6] == 0 || line[6] == ' ' || line[6] == '\t')) {
+				// The gimbal-follow opt-in (2026-08-31): bare GIMBAL = derive the
+				// pivot; GIMBAL x y z = the authored override for a mesh that
+				// defeats the derivation. The core's own parser skips unknown
+				// tokens (verified when RAIN 1 shipped), so the line is safe.
+				pendGim = true;
+				double x, y, z;
+				if (sscanf_s(line + 6, "%lf %lf %lf", &x, &y, &z) == 3) { pendOvr = _V(x, y, z); pendHasOvr = true; }
+			}
 			else if (_strnicmp(line, "GEOM", 4) == 0) {
-				// Commit this group: match the pending label to a family.
-				for (int k = 0; k < BELL_NFAM; k++) {
-					if (_stricmp(pendLabel, FAM_NAME[k]) == 0) {
-						c.grp[k] = grpIdx;
-						c.mat[k] = pendMat - 1;          // -1 when the line was absent/0
+				// Commit this group. The label's FIRST WORD is the family (his
+				// convention, 2026-08-31): "MAIN 1" / "MAIN 2" keep mesh editors
+				// happy with unique names while ORO reads only the leading token,
+				// and a bare "MAIN" parses exactly as it always did.
+				char famTok[32] = "";
+				for (int i = 0; i < 31 && pendLabel[i] && pendLabel[i] != ' ' && pendLabel[i] != '\t'; i++) {
+					famTok[i] = pendLabel[i]; famTok[i + 1] = 0;
+				}
+				int fam = -1;
+				for (int k = 0; k < BELL_NFAM; k++)
+					if (_stricmp(famTok, FAM_NAME[k]) == 0) { fam = k; break; }
+				if (fam >= 0) {
+					if (c.grp[fam] < 0) {
+						c.grp[fam] = grpIdx;
+						c.mat[fam] = pendMat - 1;        // -1 when the line was absent/0
+					}
+					else if (pendMat - 1 != c.mat[fam])
+						oapiWriteLogV("ORO bell: extra %s group %d uses material %d - the family drives material %d only.",
+						              FAM_NAME[fam], grpIdx, pendMat, c.mat[fam] + 1);
+					if (pendGim && c.nGim < BELL_GIM_MAX) {
+						BellGim& G = c.gim[c.nGim++];
+						memset(&G, 0, sizeof(G));
+						G.grp = grpIdx; G.fam = fam; G.exIdx = -1;
+						G.hasOvr = pendHasOvr;
+						if (pendHasOvr) G.ovr = pendOvr;
 					}
 				}
+				else if (pendGim)
+					oapiWriteLogV("ORO bell: GIMBAL on group %d without a family label - ignored.", grpIdx);
 				grpIdx++;
 				pendLabel[0] = 0;
 				pendMat = -1;
+				pendGim = false; pendHasOvr = false;
 			}
 		}
 		delete[] buf;
@@ -246,6 +301,91 @@ namespace {
 					oapiWriteLogV("ORO bell: %s and %s share material %d - it will follow the hotter of the two.",
 					              FAM_NAME[j], FAM_NAME[k], c.mat[k] + 1);
 		}
+		return true;
+	}
+
+	// --- gimbal geometry: axis + pivot from the group's own vertices --------
+	// A bell is a surface of revolution AUTHORED AT REST, so its axis of
+	// revolution IS the rest thrust axis and needs no declaration. Rotational
+	// symmetry makes the vertex covariance carry it exactly: two eigenvalues
+	// are equal (the radial pair), and the DISTINCT one's eigenvector is the
+	// axis - true for any mix of inner/outer sheets and any tessellation.
+	// The narrow end is the throat (where a real gimbal pivots): its slab
+	// centroid is the pivot, and the axis is SIGNED exit->throat, which is
+	// the THRUST direction - the same convention as EXHAUSTSPEC.ldir, so the
+	// follow needs no sign fix-up anywhere.
+	bool DeriveGimGeom(MESHHANDLE hTmpl, BellGim& G)
+	{
+		MESHGROUP* mg = oapiMeshGroup(hTmpl, (DWORD)G.grp);
+		if (!mg || mg->nVtx < 8) return false;
+		const DWORD n = mg->nVtx;
+		double cx = 0, cy = 0, cz = 0;
+		for (DWORD i = 0; i < n; i++) { cx += mg->Vtx[i].x; cy += mg->Vtx[i].y; cz += mg->Vtx[i].z; }
+		cx /= n; cy /= n; cz /= n;
+		double C[3][3] = {};
+		for (DWORD i = 0; i < n; i++) {
+			const double d[3] = { mg->Vtx[i].x - cx, mg->Vtx[i].y - cy, mg->Vtx[i].z - cz };
+			for (int r = 0; r < 3; r++) for (int s = r; s < 3; s++) C[r][s] += d[r] * d[s];
+		}
+		C[1][0] = C[0][1]; C[2][0] = C[0][2]; C[2][1] = C[1][2];
+		// cyclic Jacobi; V's columns converge to the eigenvectors
+		double V[3][3] = { {1,0,0},{0,1,0},{0,0,1} };
+		for (int sweep = 0; sweep < 24; sweep++) {
+			if (fabs(C[0][1]) + fabs(C[0][2]) + fabs(C[1][2]) < 1e-12) break;
+			for (int p = 0; p < 2; p++) for (int q = p + 1; q < 3; q++) {
+				if (fabs(C[p][q]) < 1e-15) continue;
+				const double th = 0.5 * atan2(2.0 * C[p][q], C[q][q] - C[p][p]);
+				const double ct = cos(th), st = sin(th);
+				for (int r = 0; r < 3; r++) {
+					const double crp = C[r][p], crq = C[r][q];
+					C[r][p] = ct * crp - st * crq; C[r][q] = st * crp + ct * crq;
+				}
+				for (int s = 0; s < 3; s++) {
+					const double cps = C[p][s], cqs = C[q][s];
+					C[p][s] = ct * cps - st * cqs; C[q][s] = st * cps + ct * cqs;
+				}
+				for (int r = 0; r < 3; r++) {
+					const double vrp = V[r][p], vrq = V[r][q];
+					V[r][p] = ct * vrp - st * vrq; V[r][q] = st * vrp + ct * vrq;
+				}
+			}
+		}
+		const double ev[3] = { C[0][0], C[1][1], C[2][2] };
+		int ax = 0; double best = -1.0;
+		for (int i = 0; i < 3; i++) {
+			const int j = (i + 1) % 3, k2 = (i + 2) % 3;
+			const double dj = fabs(ev[i] - ev[j]), dk = fabs(ev[i] - ev[k2]);
+			const double score = dj < dk ? dj : dk;    // distance to the NEARER other
+			if (score > best) { best = score; ax = i; }
+		}
+		VECTOR3 a = _V(V[0][ax], V[1][ax], V[2][ax]);
+		const double al = length(a); if (al < 1e-9) return false;
+		a = a * (1.0 / al);
+		// end slabs along the axis: mean ring radius decides which end is the throat
+		double tmin = 1e30, tmax = -1e30;
+		for (DWORD i = 0; i < n; i++) {
+			const double t = (mg->Vtx[i].x - cx) * a.x + (mg->Vtx[i].y - cy) * a.y + (mg->Vtx[i].z - cz) * a.z;
+			if (t < tmin) tmin = t;
+			if (t > tmax) tmax = t;
+		}
+		const double span = tmax - tmin; if (span < 1e-6) return false;
+		double rlo = 0, rhi = 0, plo[3] = {}, phi[3] = {}; int nlo = 0, nhi = 0;
+		for (DWORD i = 0; i < n; i++) {
+			const double dx = mg->Vtx[i].x - cx, dy = mg->Vtx[i].y - cy, dz = mg->Vtx[i].z - cz;
+			const double t = dx * a.x + dy * a.y + dz * a.z;
+			const double rx = dx - t * a.x, ry = dy - t * a.y, rz = dz - t * a.z;
+			const double r = sqrt(rx * rx + ry * ry + rz * rz);
+			if (t < tmin + 0.12 * span) { rlo += r; plo[0] += mg->Vtx[i].x; plo[1] += mg->Vtx[i].y; plo[2] += mg->Vtx[i].z; nlo++; }
+			if (t > tmax - 0.12 * span) { rhi += r; phi[0] += mg->Vtx[i].x; phi[1] += mg->Vtx[i].y; phi[2] += mg->Vtx[i].z; nhi++; }
+		}
+		if (!nlo || !nhi) return false;
+		rlo /= nlo; rhi /= nhi;
+		const bool throatLo = (rlo < rhi);
+		if (throatLo) a = a * (-1.0);                    // sign toward the narrow end
+		const double* pt = throatLo ? plo : phi;
+		const int     np = throatLo ? nlo : nhi;
+		G.axis  = a;
+		G.pivot = G.hasOvr ? G.ovr : _V(pt[0] / np, pt[1] / np, pt[2] / np);
 		return true;
 	}
 
@@ -337,7 +477,26 @@ void OroModule::UpdateBellGlow(double simdt)
 						if (fam[0]) strcat_s(fam, "+");
 						strcat_s(fam, FAM_NAME[k]);
 					}
-					sprintf_s(s_cfg.info, "bell: %s", fam[0] ? fam : "no usable groups");
+					// gimbal-follow: derive each opted-in group's axis + throat
+					// pivot from its own vertices; a group the derivation cannot
+					// read is dropped (logged), never guessed at.
+					int nGimOk = 0;
+					for (int gi = 0; gi < s_cfg.nGim; gi++) {
+						if (DeriveGimGeom(s_cfg.hTmpl, s_cfg.gim[gi])) {
+							nGimOk++;
+							oapiWriteLogV("ORO bell: gimbal group %d (%s): axis (%.3f, %.3f, %.3f), pivot (%.3f, %.3f, %.3f)%s.",
+							              s_cfg.gim[gi].grp, FAM_NAME[s_cfg.gim[gi].fam],
+							              s_cfg.gim[gi].axis.x, s_cfg.gim[gi].axis.y, s_cfg.gim[gi].axis.z,
+							              s_cfg.gim[gi].pivot.x, s_cfg.gim[gi].pivot.y, s_cfg.gim[gi].pivot.z,
+							              s_cfg.gim[gi].hasOvr ? " [authored pivot]" : "");
+						} else {
+							oapiWriteLogV("ORO bell: gimbal group %d - axis/pivot derivation failed, group stays static.",
+							              s_cfg.gim[gi].grp);
+							s_cfg.gim[gi].grp = -1;
+						}
+					}
+					if (nGimOk) sprintf_s(s_cfg.info, "bell: %s (%d gimbal)", fam[0] ? fam : "?", nGimOk);
+					else        sprintf_s(s_cfg.info, "bell: %s", fam[0] ? fam : "no usable groups");
 					oapiWriteLogV("ORO bell: %s -> %s.", name, s_cfg.info);
 				} else {
 					sprintf_s(s_cfg.info, "bell mesh failed to load");
@@ -446,6 +605,29 @@ void OroModule::UpdateBellGlow(double simdt)
 		bellVessel  = hObj;
 		bellMeshIdx = v->AddMesh(s_cfg.hTmpl);
 		v->SetMeshVisibilityMode(bellMeshIdx, MESHVIS_EXTERNAL);
+		// gimbal-follow: match each opted-in group to its engine - the nearest
+		// exhaust of the SAME family to the group's throat pivot. Identity by
+		// geometry, never by name: the DG's twin mains resolve trivially, and
+		// a multi-nozzle thruster matches per NOZZLE, which is the right grain.
+		for (int gi = 0; gi < s_cfg.nGim; gi++) {
+			BellGim& G = s_cfg.gim[gi];
+			G.exIdx = -1;
+			if (G.grp < 0) continue;
+			double best = 1e30;
+			const DWORD ne = v->GetExhaustCount();
+			for (DWORD e = 0; e < ne; e++) {
+				EXHAUSTSPEC es;
+				v->GetExhaustSpec(e, &es);
+				if (!es.lpos || !es.ldir || !es.th) continue;
+				if (OroThrusterGroupOf(v, es.th) != G.fam) continue;
+				const VECTOR3 d = *es.lpos - G.pivot;
+				const double dd = dotp(d, d);
+				if (dd < best) { best = dd; G.exIdx = (int)e; }
+			}
+			if (G.exIdx < 0)
+				oapiWriteLogV("ORO bell: gimbal group %d (%s) - no %s exhaust to follow on this vessel.",
+				              G.grp, FAM_NAME[G.fam], FAM_NAME[G.fam]);
+		}
 	}
 
 	// --- the material driver: EVERY FRAME while attached -------------------
@@ -508,6 +690,70 @@ void OroModule::UpdateBellGlow(double simdt)
 		// The thermal fade owns visibility: a cold shell renders NOTHING.
 		m.diffuse.a  = s_cfg.base[k].diffuse.a * sstepf(0.26f, 0.45f, T);
 		oapiSetMaterial(hDM, (DWORD)s_cfg.mat[k], &m);
+	}
+
+	// === THE GIMBAL FOLLOW (2026-08-31, Phase C) =============================
+	// Groups whose mesh header carries a GIMBAL token rotate about their
+	// throat pivot, from the authored rest axis onto the matched engine's
+	// LIVE thrust direction - EXHAUSTSPEC.ldir is a pointer into the vessel's
+	// own storage (the 2026-08-02 finding), so a gimballing engine moves it
+	// every frame; the plume and particles already ride the same signal.
+	// The rest pose is read from the TEMPLATE each frame (23m: cache nothing
+	// that outlives a session) and the rotated copy pushed with
+	// oapiEditMeshGroup on the live instance EVERY frame - the material
+	// driver's f1 rule: the client re-instantiates the visual behind our
+	// back, and a push-on-change would leave a fresh instance in the
+	// authored pose forever. Mechanism proven by the 2026-08-31 spin test.
+	// No roll term anywhere: a surface of revolution has none to lose, so
+	// the minimal rotation is the whole answer.
+	{
+		static NTVERTEX buf[1024];
+		for (int gi = 0; gi < s_cfg.nGim; gi++) {
+			const BellGim& G = s_cfg.gim[gi];
+			if (G.grp < 0 || G.exIdx < 0) continue;
+			if (G.exIdx >= (int)v->GetExhaustCount()) continue;   // list changed under us
+			EXHAUSTSPEC es;
+			v->GetExhaustSpec((UINT)G.exIdx, &es);
+			if (!es.ldir || !es.th) continue;
+			if (OroThrusterGroupOf(v, es.th) != G.fam) continue;  // ditto - re-validate, never trust a stale index
+			VECTOR3 d = *es.ldir;
+			const double dl = length(d);
+			if (dl < 1e-9) continue;
+			d = d * (1.0 / dl);
+			// minimal rotation, rest axis -> live thrust direction
+			const VECTOR3 w = crossp(G.axis, d);
+			const double  s = length(w);
+			const double  c = dotp(G.axis, d);
+			// Past ~25 deg this is not a gimbal, it is a convention mismatch or
+			// a data error - leave the bell in its authored pose rather than
+			// swing it somewhere no engine points.
+			if (c < 0.90) continue;
+			double kx = 0, ky = 0, kz = 1, sA = 0, cA = 1;
+			if (s > 1e-9) { kx = w.x / s; ky = w.y / s; kz = w.z / s; sA = s; cA = c; }
+			const double t1 = 1.0 - cA;
+			const double R00 = cA + t1 * kx * kx,      R01 = t1 * kx * ky - sA * kz,  R02 = t1 * kx * kz + sA * ky;
+			const double R10 = t1 * ky * kx + sA * kz, R11 = cA + t1 * ky * ky,       R12 = t1 * ky * kz - sA * kx;
+			const double R20 = t1 * kz * kx - sA * ky, R21 = t1 * kz * ky + sA * kx,  R22 = cA + t1 * kz * kz;
+			MESHGROUP* mg = oapiMeshGroup(s_cfg.hTmpl, (DWORD)G.grp);
+			if (!mg || mg->nVtx == 0 || mg->nVtx > 1024) continue;
+			for (DWORD i = 0; i < mg->nVtx; i++) {
+				const NTVERTEX& v0 = mg->Vtx[i]; NTVERTEX& vb = buf[i]; vb = v0;
+				const double px = v0.x - G.pivot.x, py = v0.y - G.pivot.y, pz = v0.z - G.pivot.z;
+				vb.x  = (float)(G.pivot.x + R00 * px + R01 * py + R02 * pz);
+				vb.y  = (float)(G.pivot.y + R10 * px + R11 * py + R12 * pz);
+				vb.z  = (float)(G.pivot.z + R20 * px + R21 * py + R22 * pz);
+				vb.nx = (float)(R00 * v0.nx + R01 * v0.ny + R02 * v0.nz);
+				vb.ny = (float)(R10 * v0.nx + R11 * v0.ny + R12 * v0.nz);
+				vb.nz = (float)(R20 * v0.nx + R21 * v0.ny + R22 * v0.nz);
+			}
+			GROUPEDITSPEC ges;
+			memset(&ges, 0, sizeof(ges));
+			ges.flags = GRPEDIT_VTXCRD | GRPEDIT_VTXNML;
+			ges.Vtx   = buf;
+			ges.nVtx  = mg->nVtx;
+			ges.vIdx  = NULL;
+			oapiEditMeshGroup(hDM, (DWORD)G.grp, &ges);
+		}
 	}
 }
 

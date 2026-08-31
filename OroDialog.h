@@ -23,3 +23,9 @@ void OroDlg_Open(HINSTANCE hInst);
 
 // Close it if open (module unload / simulation end).
 void OroDlg_Close();
+
+// Phase B: is the panel open on a THRUSTERS page right now? SenseMarker publishes
+// this into g_fx.thrPageLive each frame (single writer), which is what gates the
+// in-world nozzle marker - a finder with the panel closed would be scaffolding
+// nobody asked for. Same thread as everything else; safe from the module.
+bool OroDlg_ThrPageLive();
