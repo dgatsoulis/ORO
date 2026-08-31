@@ -239,7 +239,7 @@ install at any time, in one click, and it will not touch anything you tuned.
 To confirm the install took, open Orbiter.log in the Orbiter root and look near
 the top for:
 
-    Module D3D9Client.dll ........ [Build 260820, ...]   <- patched, good
+    Module D3D9Client.dll ........ [Build 260830, ...]   <- patched, good
     Module D3D9Client.dll ........ [Build 241231, ...]   <- still stock
 
 It is the BUILD number that tells them apart. Ignore the "API" number printed

@@ -30,7 +30,7 @@ function Reset-Mock([string]$exeDate, [bool]$withPulse, [bool]$withPulseBackup) 
   Set-Content "$MOCK\Orbiter_ng.exe" "mock orbiter ng binary"    -NoNewline
   Set-Content "$MOCK\Config\Vessels\DeltaGlider.cfg" "mock dg cfg"
   Set-Content "$MOCK\Modules\Plugin\D3D9Client.dll"  "STOCK CLIENT DLL"
-  foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx') {
+  foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx','NewMesh.hlsl','Particle.fx') {
     Set-Content "$MOCK\Modules\D3D9Client\$s" "STOCK SHADER $s"
   }
   if ($exeDate) {
@@ -61,7 +61,7 @@ function Reset-Mock([string]$exeDate, [bool]$withPulse, [bool]$withPulseBackup) 
     New-Item -ItemType Directory -Force -Path `
       "$MOCK\PULSE_beta\backup\Modules\Plugin","$MOCK\PULSE_beta\backup\Modules\D3D9Client" | Out-Null
     Set-Content "$MOCK\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "STOCK CLIENT DLL"
-    foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx') {
+    foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx','NewMesh.hlsl','Particle.fx') {
       Set-Content "$MOCK\PULSE_beta\backup\Modules\D3D9Client\$s" "STOCK SHADER $s"
     }
   }
@@ -219,13 +219,18 @@ Check "E9 texture installed"           (Test-Path "$MOCK\Textures\ORO\bell_glow.
 Check "E10 scenarios installed"        ((Get-ChildItem "$MOCK\Scenarios\ORO_beta\*.scn" -EA SilentlyContinue).Count -eq 4) "count wrong"
 Check "E11 client REPLACED by patched" ((Get-Content "$MOCK\Modules\Plugin\D3D9Client.dll" -Raw) -notmatch 'STOCK CLIENT') "still stock"
 Check "E12 backup of THEIR client made" ((Get-Content "$MOCK\ORO_beta\backup\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK CLIENT') "backup wrong"
-Check "E13 backup of their 7 shaders"  ((Get-ChildItem "$MOCK\ORO_beta\backup\Modules\D3D9Client\*" -EA SilentlyContinue).Count -eq 7) "count wrong"
+Check "E13 backup of their 9 shaders"  ((Get-ChildItem "$MOCK\ORO_beta\backup\Modules\D3D9Client\*" -EA SilentlyContinue).Count -eq 9) "count wrong"
 Check "E14 no PULSE-named file landed" ((Get-ChildItem $MOCK -Recurse -File | Where-Object { $_.Name -match 'PULSE' }).Count -eq 0) "PULSE file present"
-Check "E15 15 sounds at XRSound\ORO"   ((Get-ChildItem "$MOCK\XRSound\ORO\*.wav" -EA SilentlyContinue).Count -eq 15) "wav count wrong"
+Check "E15 27 sounds at XRSound\ORO"   ((Get-ChildItem "$MOCK\XRSound\ORO\*.wav" -EA SilentlyContinue).Count -eq 27) "wav count wrong"
+Check "E15b 12 interior _in variants"  ((Get-ChildItem "$MOCK\XRSound\ORO\*_in.wav" -EA SilentlyContinue).Count -eq 12) "the VC storm would be silent"
 Check "E16 credit ledger shipped"      (Test-Path "$MOCK\XRSound\ORO\README.txt") "freesound credits missing!"
 Check "E17 rain shields shipped"       ((Test-Path "$MOCK\Meshes\ORO\DG-S_rainshield.msh") -and (Test-Path "$MOCK\Meshes\ORO\DeltaGlider_rainshield.msh")) "missing"
 Check "E18 bolt atlas shipped"         (Test-Path "$MOCK\Textures\ORO\bolt_atlas.dds") "missing"
 Check "E19 no raw bolt pack leaked"    (-not (Test-Path "$MOCK\Textures\ORO\Resource Boy - Lightning Bolt Textures")) "LICENCE: the raw pack must never ship!"
+Check "E20 the two new shaders landed" ((Test-Path "$MOCK\Modules\D3D9Client\Particle.fx") -and (Test-Path "$MOCK\Modules\D3D9Client\NewMesh.hlsl")) "260831 shader pair missing"
+Check "E21 particle texture folder"    ((Test-Path "$MOCK\Textures\ORO\Particles\README.txt") -and ((Get-ChildItem "$MOCK\Textures\ORO\Particles\*.dds" -EA SilentlyContinue).Count -eq 5)) "picker folder wrong"
+Check "E22 SRB class cfg shipped"      (Test-Path "$MOCK\Config\ORO\Atlantis_SRB.cfg") "the class-cache showcase is missing"
+Check "E23 exp reflection ecam"        (Test-Path "$MOCK\Config\GC\Atlantis_ecam_oro.cfg") "patch (v) exp config missing"
 
 # --- F: a second install is an UPGRADE (changed 2026-08-23 for the public beta) ---
 # The old refusal became an in-place upgrade: "they run the install bat and
@@ -272,6 +277,8 @@ Check "G8 untouched shipped cfg gone"  (-not (Test-Path "$MOCK\Config\ORO\Atlant
 Check "G9 shipped sound removed"       (-not (Test-Path "$MOCK\XRSound\ORO\Rain_light.wav")) "left behind"
 Check "G10 migrated USER wav KEPT"     (Test-Path "$MOCK\XRSound\ORO\MyCustomClip.wav") "the user's clip was deleted!"
 Check "G11 Mesh.fx restored"           ((Get-Content "$MOCK\Modules\D3D9Client\Mesh.fx" -Raw) -match 'STOCK SHADER') "not restored"
+Check "G12 Particle.fx restored"       ((Get-Content "$MOCK\Modules\D3D9Client\Particle.fx" -Raw) -match 'STOCK SHADER') "not restored"
+Check "G13 NewMesh.hlsl restored"      ((Get-Content "$MOCK\Modules\D3D9Client\NewMesh.hlsl" -Raw) -match 'STOCK SHADER') "not restored"
 
 # --- H: double uninstall -----------------------------------------------------
 # H2 is deliberately narrow. Since 2026-08-15 there are TWO "ORO is not here"

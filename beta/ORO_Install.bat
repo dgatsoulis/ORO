@@ -157,7 +157,7 @@ if defined UPGRADE (
     if not exist "%BACKUP%\Modules\Plugin"     mkdir "%BACKUP%\Modules\Plugin"     >nul 2>&1
     if not exist "%BACKUP%\Modules\D3D9Client" mkdir "%BACKUP%\Modules\D3D9Client" >nul 2>&1
     copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx) do (
       if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] backup reseeded from the shipped stock copies
@@ -269,7 +269,7 @@ if defined PULSEFOUND (
   if exist "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" (
     echo   Recovering your original graphics client from PULSE's backup...
     copy /y "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx) do (
       if exist "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" copy /y "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] restored from PULSE's own backup
@@ -277,7 +277,7 @@ if defined PULSEFOUND (
     echo   PULSE's backup is gone - using the pristine Orbiter 2024 originals
     echo   shipped with this beta instead...
     copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx) do (
       if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] restored from the shipped originals
@@ -289,7 +289,7 @@ if defined PULSEFOUND (
 rem --- 4. say plainly what is about to happen, and ask ------------------------
 echo.
 echo   This will:
-echo     - back up your D3D9 client and its seven shaders into
+echo     - back up your D3D9 client and its nine shaders into
 echo       ORO_beta\backup\  (on an upgrade the first install's backup is
 echo       kept instead - that one holds your true originals)
 echo     - install a PATCHED D3D9 client. Stock Orbiter 2024 crashes when any
@@ -322,7 +322,7 @@ if defined UPGRADE (
   if not exist "%BACKUP%\Modules\D3D9Client"  mkdir "%BACKUP%\Modules\D3D9Client"  >nul 2>&1
 
   copy /y "%ROOT%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul || goto :copyfail
-  for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx) do (
+  for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx) do (
     if exist "%ROOT%\Modules\D3D9Client\%%F" (
       copy /y "%ROOT%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul || goto :copyfail
     )
@@ -366,6 +366,9 @@ if not exist "%ROOT%\Modules\Plugin\ORO.dll"            set "MISSING=ORO.dll"
 if not exist "%ROOT%\Modules\ORO\orofx.hlsl"          set "MISSING=orofx.hlsl"
 if not exist "%ROOT%\Modules\D3D9Client\Vessel.fx"        set "MISSING=Vessel.fx"
 if not exist "%ROOT%\Modules\D3D9Client\Mesh.fx"          set "MISSING=Mesh.fx"
+if not exist "%ROOT%\Modules\D3D9Client\Particle.fx"      set "MISSING=Particle.fx"
+if not exist "%ROOT%\Modules\D3D9Client\NewMesh.hlsl"     set "MISSING=NewMesh.hlsl"
+if not exist "%ROOT%\Textures\ORO\Particles\README.txt"  set "MISSING=Particles README"
 if not exist "%ROOT%\XRSound\ORO\Rain_light.wav"          set "MISSING=Rain_light.wav (XRSound\ORO)"
 if not exist "%ROOT%\Config\ORO.cfg"                    set "MISSING=ORO.cfg"
 if defined MISSING (
