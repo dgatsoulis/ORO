@@ -15,13 +15,16 @@ $payload = @(
   # 1. the two DLLs
   @("Modules\Plugin\ORO.dll",                  "Modules\Plugin\ORO.dll"),
   @("Modules\Plugin\D3D9Client.dll",           "Modules\Plugin\D3D9Client.dll"),
-  # 2. the NINE deployed shaders (patched; must match the DLL). Mesh.fx joined
+  # 2. the ELEVEN deployed shaders (patched; must match the DLL). Mesh.fx joined
   #    with patch (s)'s base-tile ground work - the 260823 audit caught it
   #    missing from this list while already being load-bearing in the sim.
   #    NewMesh.hlsl (patch (h)'s negated glass depth) and Particle.fx (patch
   #    (x)'s per-particle lighting) joined for 260831 - ⚠️ Particle.fx and the
   #    DLL are a PAIR: new DLL + old shader is harmless stock, but new shader
-  #    + old DLL reads garbage normals as brightness.
+  #    + old DLL reads garbage normals as brightness. Common.hlsl joined for
+  #    260904 (patch (z3)'s local-light shadow test in the vessel light loops -
+  #    it always shipped with the client as an include, but was byte-stock
+  #    until 2026-09-02, so it also rides the stock restore bundle now).
   @("Modules\D3D9Client\D3D9Client.fx",        "Modules\D3D9Client\D3D9Client.fx"),
   @("Modules\D3D9Client\Vessel.fx",            "Modules\D3D9Client\Vessel.fx"),
   @("Modules\D3D9Client\PBR.fx",               "Modules\D3D9Client\PBR.fx"),
@@ -31,6 +34,8 @@ $payload = @(
   @("Modules\D3D9Client\Mesh.fx",              "Modules\D3D9Client\Mesh.fx"),
   @("Modules\D3D9Client\NewMesh.hlsl",         "Modules\D3D9Client\NewMesh.hlsl"),
   @("Modules\D3D9Client\Particle.fx",          "Modules\D3D9Client\Particle.fx"),
+  @("Modules\D3D9Client\BeaconArray.fx",       "Modules\D3D9Client\BeaconArray.fx"),
+  @("Modules\D3D9Client\Common.hlsl",          "Modules\D3D9Client\Common.hlsl"),
   # 3. ORO's own runtime assets. Sounds live under XRSound\ORO since 2026-08-23
   #    (the Orbiter convention); README.txt is the freesound CREDIT LEDGER and
   #    ships wherever the thunder wavs do - CC-BY requires it.
@@ -101,6 +106,11 @@ $payload = @(
   # 5d. the experimental reflection camera config for patch (v)'s exp mode -
   #     the _oro filename is unreachable by a stock client BY CONSTRUCTION.
   @("Config\GC\Atlantis_ecam_oro.cfg",         "Config\GC\Atlantis_ecam_oro.cfg"),
+  # 5e. the rain-glass declarations (2026-09-04, his ruling: stock meshes are
+  #     NEVER shipped, so this ORO-owned cfg is how a stock DG gets windscreen
+  #     drops - DG\deltaglider_vc 77 is his own pick from the RAINSURFACES
+  #     picker's first flight).
+  @("Config\ORO\VesselsRainSurfaces.cfg",      "Config\ORO\VesselsRainSurfaces.cfg"),
   # 6. scenarios
   @("Scenarios\ORO_beta\Atlantis reentry.scn", "Scenarios\ORO_beta\Atlantis reentry.scn"),
   @("Scenarios\ORO_beta\DG reentry.scn",       "Scenarios\ORO_beta\DG reentry.scn"),
@@ -138,6 +148,12 @@ Get-ChildItem "$REPO\upstream\stock" -File | Where-Object { $_.Extension -in '.f
 }
 Put "$R\Modules\Plugin\D3D9Client.dll.orig-241231" "$OUT\stock\Modules\Plugin\D3D9Client.dll"; $n++
 Put "$REPO\upstream\stock\RESTORE.txt"             "$OUT\stock\RESTORE.txt"; $n++
+
+# 7b. the vessel-unlock lua tool (2026-09-04, his ask: "really useful to have -
+#     gives access to un-tunable / unselectable vessels in a scenario"). Lives
+#     in the REPO's tools\, ships into Orbiter's Script\ so the Lua console
+#     runs it as run('focusall').
+Put "$REPO\tools\focusall.lua" "$PAY\Script\focusall.lua"; $n++
 
 # 8. installer, uninstaller, readme
 Put "$REPO\beta\ORO_Install.bat"   "$OUT\ORO_Install.bat";   $n++

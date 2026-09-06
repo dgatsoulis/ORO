@@ -473,8 +473,21 @@ void OroModule::DrawGloomPass()
 			const float mag  = rainGlassRunMag;
 			float radS = 0.045f + mag * mag * 4.0e-5f;         // rad/s along the meridian
 			if (radS > 0.9f) radS = 0.9f;
+			// ... INTEGRATED here, never multiplied by the clock in the shader (2026-09-06,
+			// his runway report: engine cut, still rolling, "the drops sliding on the
+			// window reverse their direction"). fTime x radS tracks the product's
+			// DERIVATIVE: at 300 s of session a drop of radS from 0.15 to 0.11 moves the
+			// heads 12 rad backward while the true motion is 0.11 rad/s forward. The
+			// sheet had this exact bug on 08-27 (rainSheetPh); the runners, built the
+			// same day, were not swept. Real time, so it freezes under pause with animT.
+			{
+				const float dtp = (rainGlassRunPhT >= 0.0f && animT > rainGlassRunPhT) ? (animT - rainGlassRunPhT) : 0.0f;
+				rainGlassRunPhT = animT;
+				rainGlassRunPh += dtp * radS;
+				if (rainGlassRunPh > 1.0e4f) rainGlassRunPh -= 1.0e4f;   // bounded; the shader wraps mod 0.45
+			}
 			pIPIGloom->SetFloat("fRunAmt", ra);
-			pIPIGloom->SetFloat("fRunSpd", radS);
+			pIPIGloom->SetFloat("fRunPh",  rainGlassRunPh);
 			// Drop size scales BOTH families; Runner size sets only their RATIO -
 			// one uniform carries the product, and the shader's column-overflow cap
 			// guards the combined extreme.
@@ -780,6 +793,18 @@ namespace {
 		// RAIN - the runway slice. GLOBAL for v1: one world, one storm. The pill only;
 		// rainTest is deliberately NOT saved, for the same reason CANCEL THRUST is not
 		// (23i) - a test rig that comes back on at load reads as a bug in the weather.
+		// FOG (2026-09-05, client patch aa) - the FOG leaf. GLOBAL like the rain, and for
+		// the same reason; fogTest is transient and never written (23i's rule again).
+		{ "FogOn",            &g_fx.fogEnabled,       ST_B },
+		{ "FogVisibility",    &g_fx.fogVis,           ST_F },
+		{ "FogTop",           &g_fx.fogTop,           ST_F },
+		{ "FogFade",          &g_fx.fogFade,          ST_F },
+		{ "FogBrightness",    &g_fx.fogBright,        ST_F },
+		{ "FogSunGlow",       &g_fx.fogGlow,          ST_F },
+		// BASE LIGHTS (patch ac) - one setting, two pages (RAIN + FOG), GLOBAL.
+		{ "BaseLightsOn",     &g_fx.baseLightsOn,     ST_B },
+		{ "BaseLightsGlow",   &g_fx.baseLightsGlow,   ST_F },
+		{ "BaseLightsHalo",   &g_fx.baseLightsHalo,   ST_F },
 		{ "RainOn",           &g_fx.rainEnabled,      ST_B },
 		{ "RainGloom",        &g_fx.rainGloom,        ST_F },
 		{ "RainGlass",        &g_fx.rainGlass,        ST_F },
@@ -809,7 +834,6 @@ namespace {
 		{ "RainReflBlur",     &g_fx.rainReflBlur,     ST_F },
 		{ "RainSound",        &g_fx.rainSoundVol,     ST_F },
 		{ "RainThunder",      &g_fx.rainThunder,      ST_F },
-		{ "RainHullVol",      &g_fx.rainHullVol,      ST_F },
 		{ "RainViewMode",     &g_fx.rainViewMode,     ST_I },
 		{ "VapourOn",         &g_fx.vapEnabled,       ST_B },
 	};
@@ -924,6 +948,13 @@ namespace {
 	// looks like, and that shape belongs to the airframe.
 	const SetItem VCSET[] = {
 		{ "VCShadowsOn",      &g_fx.vcShadows,        ST_B },
+		{ "VCNightOn",        &g_fx.vcNight,          ST_B },   // patch (ad): the cabin at night
+		{ "VCNightFloor",     &g_fx.vcNightFloor,     ST_F },
+		{ "VCWeatherDimOn",   &g_fx.vcWxDimOn,        ST_B },   // ... and under the weather
+		{ "VCWeatherDim",     &g_fx.vcWxDim,          ST_F },
+		{ "VCRainSound",      &g_fx.vcRainSound,      ST_F },   // the cabin's own rain loops (2026-09-06)
+		{ "RainHullVol",      &g_fx.rainHullVol,      ST_F },   // moved here from the RAIN table the same
+		                                                        //   day - the drum is about the HULL (28q)
 		{ "ShakeOn",          &g_fx.shakeEnabled,     ST_B },
 		{ "ShakeAmpX",        &g_fx.shakeAmpX,        ST_F },
 		{ "ShakeAmpY",        &g_fx.shakeAmpY,        ST_F },
@@ -969,8 +1000,10 @@ namespace {
 		// next hull that has no file. LoadClass clears it explicitly.
 		{ "PilotScope",       &g_fx.pilotPerClass,    ST_B },
 		{ "VCScope",          &g_fx.vcPerClass,       ST_B },   // ... and the VC tab's
-		{ "Shimmer",          &g_fx.shimmer,          ST_F },   // engine haze: per engine
-		{ "ShimmerOfs",       &g_fx.shimmerOfs,       ST_F },   //   layout
+		{ "Shimmer",          &g_fx.shimmer,          ST_F },   // engine haze: amplitude,
+		{ "ShimmerOfs",       &g_fx.shimmerOfs,       ST_F },   //   axial slide [m], plus
+		{ "ShimmerWave",      &g_fx.shimmerWave,      ST_F },   //   the wave texture's
+		{ "ShimmerFreq",      &g_fx.shimmerFreq,      ST_F },   //   scale + churn (26-09-04)
 		{ "Plume",            &g_fx.plume,            ST_F },   // plume expansion overlay:
 		{ "PlumeWidth",       &g_fx.plumeWidth,       ST_F },   //   the silhouette axes
 		{ "PlumeLen",         &g_fx.plumeLen,         ST_F },   //   (ours replaces stock),
@@ -984,13 +1017,18 @@ namespace {
 		{ "BellTint",         &g_fx.bellTint,         ST_I },   //   and its hue pick
 		{ "PlumeCells",       &g_fx.plumeCells,       ST_F },   //   the disc count,
 		{ "PlumeDiamond",     &g_fx.plumeDiamond,     ST_F },   //   strength + the shape
-		{ "PlumeSpacing",     &g_fx.plumeSpacing,     ST_F },   //   knobs + the two colour
+		{ "PlumeDiaShape",    &g_fx.plumeDiaShape,    ST_F },   //   knobs (lozenge profile,
+		{ "PlumeDiaSize",     &g_fx.plumeDiaSize,     ST_F },   //   width - the key predates
+		{ "PlumeDiaLength",   &g_fx.plumeDiaLen,      ST_F },   //   the length/width split -
+		{ "PlumeDiaOfs",      &g_fx.plumeDiaOfs,      ST_F },   //   + train slide [m])
+		{ "PlumeSpacing",     &g_fx.plumeSpacing,     ST_F },   //   + the two colour
 		{ "PlumeBloomWid",    &g_fx.plumeBloomWid,    ST_F },   //   picks, per class like
 		{ "PlumeBloomBri",    &g_fx.plumeBloomBri,    ST_F },   //   the shimmer (nozzle
 		{ "PlumeThroat",      &g_fx.plumeThroat,      ST_F },   //   + the throat fire
 		{ "PlumeThroatOfs",   &g_fx.plumeThroatOfs,   ST_F },   //   and its axial slide,
 		{ "PlumeColJet",      &g_fx.plumeColJet,      ST_I },   //   layout is a property
 		{ "PlumeColBloom",    &g_fx.plumeColBloom,    ST_I },   //   of the hull)
+		{ "PlumeColDia",      &g_fx.plumeColDia,      ST_I },   //   + the diamond tint
 		{ "PrtOffset",        &g_fx.prtOffset,        ST_F },   // exhaust particles: the
 		{ "PrtSize",          &g_fx.prtSize,          ST_F },   //   author's own stream
 		{ "PrtLifetime",      &g_fx.prtLifetime,      ST_F },   //   fields, per class -
@@ -1051,6 +1089,7 @@ namespace {
 		{ "VapourColour",     &g_fx.vapColour,        ST_I },   // COLORREF bits via int,
 		{ "VapourStreakCol",  &g_fx.vapStreakCol,     ST_I },   //   the PlasmaTint pattern
 		{ "VapourBaseFill",   &g_fx.vapBaseOn,        ST_B },   // the base disc pill
+		{ "VapourBaseOfs",    &g_fx.vapBaseOfs,       ST_F },   //   + its axial offset (26-09-04)
 		{ "VapourPos",        &g_fx.vapPos,           ST_F },   // "Position z" on the panel;
 	                                                        //   key unchanged (old cfgs)
 	{ "VapourPosX",       &g_fx.vapPosX,          ST_F },   // full placement, 2026-08-30
@@ -1072,6 +1111,7 @@ namespace {
 		{ "Vapour2Colour",    &g_fx.vapColour2,       ST_I },
 		{ "Vapour2StreakCol", &g_fx.vapStreakCol2,    ST_I },
 		{ "Vapour2BaseFill",  &g_fx.vapBaseOn2,       ST_B },
+		{ "Vapour2BaseOfs",   &g_fx.vapBaseOfs2,      ST_F },
 		{ "Vapour2Pos",       &g_fx.vapPos2,          ST_F },
 	{ "Vapour2PosX",      &g_fx.vapPosX2,         ST_F },
 	{ "Vapour2PosY",      &g_fx.vapPosY2,         ST_F },
@@ -1540,16 +1580,20 @@ void OroSettings_SaveHelpSize(int w, int h)
 // ----------------------------------------------------------------------------
 #define ORO_THR_FIELDS(A, B) \
 	A.shimmerEnabled = B.shimmerEnabled;   A.shimmer = B.shimmer;                 \
-	A.shimmerOfs = B.shimmerOfs;           A.plumeEnabled = B.plumeEnabled;       \
+	A.shimmerOfs = B.shimmerOfs;           A.shimmerWave = B.shimmerWave;         \
+	A.shimmerFreq = B.shimmerFreq;         A.plumeEnabled = B.plumeEnabled;       \
 	A.plume = B.plume;                     A.plumePhysics = B.plumePhysics;       \
 	A.plumeExpHi = B.plumeExpHi;           A.plumeExpLo = B.plumeExpLo;           \
 	A.plumeWidth = B.plumeWidth;           A.plumeLen = B.plumeLen;               \
 	A.plumeCells = B.plumeCells;           A.plumeDiamond = B.plumeDiamond;       \
+	A.plumeDiaShape = B.plumeDiaShape;     A.plumeDiaSize = B.plumeDiaSize;       \
+	A.plumeDiaLen = B.plumeDiaLen;         A.plumeDiaOfs = B.plumeDiaOfs;         \
 	A.plumeSpacing = B.plumeSpacing;       A.plumeBloomWid = B.plumeBloomWid;     \
 	A.plumeBloomBri = B.plumeBloomBri;     A.plumeThroatOfs = B.plumeThroatOfs;   \
 	A.plumeThroat = B.plumeThroat;         A.plumeSootRate = B.plumeSootRate;     \
 	A.plumeSoot = B.plumeSoot;             A.plumeColJet = B.plumeColJet;         \
-	A.plumeColBloom = B.plumeColBloom;     A.plumeBellOn = B.plumeBellOn;         \
+	A.plumeColBloom = B.plumeColBloom;     A.plumeColDia = B.plumeColDia;         \
+	A.plumeBellOn = B.plumeBellOn;                                                \
 	A.plumeBellGlow = B.plumeBellGlow;     A.plumeBellHeatT = B.plumeBellHeatT;   \
 	A.plumeBellCoolT = B.plumeBellCoolT;   A.bellTint = B.bellTint;               \
 	A.prtEnabled = B.prtEnabled;           A.prtOffset = B.prtOffset;             \
@@ -1582,6 +1626,8 @@ static const ThrKey THRSET[] = {
 	{ "ShimmerOn",      offsetof(OroThrusterFx, shimmerEnabled), ST_B, ORO_FAM_EXH },
 	{ "Shimmer",        offsetof(OroThrusterFx, shimmer),        ST_F, ORO_FAM_EXH },
 	{ "ShimmerOfs",     offsetof(OroThrusterFx, shimmerOfs),     ST_F, ORO_FAM_EXH },
+	{ "ShimmerWave",    offsetof(OroThrusterFx, shimmerWave),    ST_F, ORO_FAM_EXH },
+	{ "ShimmerFreq",    offsetof(OroThrusterFx, shimmerFreq),    ST_F, ORO_FAM_EXH },
 	{ "PlumeOn",        offsetof(OroThrusterFx, plumeEnabled),   ST_B, ORO_FAM_EXH },
 	{ "Plume",          offsetof(OroThrusterFx, plume),          ST_F, ORO_FAM_EXH },
 	{ "PlumePhysics",   offsetof(OroThrusterFx, plumePhysics),   ST_B, ORO_FAM_EXH },
@@ -1591,6 +1637,10 @@ static const ThrKey THRSET[] = {
 	{ "PlumeLen",       offsetof(OroThrusterFx, plumeLen),       ST_F, ORO_FAM_EXH },
 	{ "PlumeCells",     offsetof(OroThrusterFx, plumeCells),     ST_F, ORO_FAM_EXH },
 	{ "PlumeDiamond",   offsetof(OroThrusterFx, plumeDiamond),   ST_F, ORO_FAM_EXH },
+	{ "PlumeDiaShape",  offsetof(OroThrusterFx, plumeDiaShape),  ST_F, ORO_FAM_EXH },
+	{ "PlumeDiaSize",   offsetof(OroThrusterFx, plumeDiaSize),   ST_F, ORO_FAM_EXH },
+	{ "PlumeDiaLength", offsetof(OroThrusterFx, plumeDiaLen),    ST_F, ORO_FAM_EXH },
+	{ "PlumeDiaOfs",    offsetof(OroThrusterFx, plumeDiaOfs),    ST_F, ORO_FAM_EXH },
 	{ "PlumeSpacing",   offsetof(OroThrusterFx, plumeSpacing),   ST_F, ORO_FAM_EXH },
 	{ "PlumeBloomWid",  offsetof(OroThrusterFx, plumeBloomWid),  ST_F, ORO_FAM_EXH },
 	{ "PlumeBloomBri",  offsetof(OroThrusterFx, plumeBloomBri),  ST_F, ORO_FAM_EXH },
@@ -1600,6 +1650,7 @@ static const ThrKey THRSET[] = {
 	{ "PlumeSoot",      offsetof(OroThrusterFx, plumeSoot),      ST_F, ORO_FAM_EXH },
 	{ "PlumeColJet",    offsetof(OroThrusterFx, plumeColJet),    ST_I, ORO_FAM_EXH },
 	{ "PlumeColBloom",  offsetof(OroThrusterFx, plumeColBloom),  ST_I, ORO_FAM_EXH },
+	{ "PlumeColDia",    offsetof(OroThrusterFx, plumeColDia),    ST_I, ORO_FAM_EXH },
 	{ "PlumeBellOn",    offsetof(OroThrusterFx, plumeBellOn),    ST_B, ORO_FAM_BELL },
 	{ "PlumeBellGlow",  offsetof(OroThrusterFx, plumeBellGlow),  ST_F, ORO_FAM_BELL },
 	{ "PlumeBellHeatT", offsetof(OroThrusterFx, plumeBellHeatT), ST_F, ORO_FAM_BELL },
@@ -2430,11 +2481,96 @@ static void __cdecl OroShutdownProc(int iUser, void* pUser, void* pParam)
 	if (pParam) static_cast<OroModule*>(pParam)->ReleaseSceneOwnedBorrows(true);
 }
 
+// ----------------------------------------------------------------------------
+// RAINSURFACES (2026-09-01) - the click-to-declare rain-glass pick.
+// GENERICPROC_PICK_VESSEL is a STOCK gcCore slot: while a proc is registered the
+// client's own WM_LBUTTONDOWN handler runs Scene::PickScene - the same pick the
+// D3D9 Debug dialog uses, VC meshes included - and calls back with a
+// gcCore::PickData. Same thunk shape as OroShutdownProc above: the instance is
+// the THIRD argument; here iUser = sizeof(PickData) and pUser = the data (our
+// patch (h) part 3 also null-guards the client side, so a sky click makes no
+// call at all instead of crashing stock's unchecked dereference).
+// ----------------------------------------------------------------------------
+static void __cdecl OroRsPickProc(int iUser, void* pUser, void* pParam)
+{
+	if (!pParam || !pUser || iUser != (int)sizeof(gcCore::PickData)) return;
+	static_cast<OroModule*>(pParam)->RsPickDeliver(pUser);
+}
+
+// ⚠️ Registered PER ARM, not per session, unlike the procs above: a registered
+// pick proc makes the client run a full scene pick on EVERY left click
+// (IsGenericProcEnabled gates it), so the cost must exist only while the popup's
+// ADD button is amber. RegisterGenericProc with a non-zero id APPENDS - a second
+// register would duplicate the entry (read in the client source) - so the flag
+// guards it; id 0 unregisters by proc pointer, which the client also supports.
+static bool s_rsPickOn = false;
+
+bool OroModule::RsPickAvail() const
+{
+	// Guard #12: the name getter is the half the cfg cannot live without -
+	// PickData's mesh is a DEVICE handle, and only the client can name it.
+	return pCore && pCore->CanGetDevMeshName();
+}
+
+bool OroModule::RsPickArm(bool on)
+{
+	if (!RsPickAvail()) return false;
+	if (on == s_rsPickOn) return true;
+	if (on) {
+		if (!pCore->RegisterGenericProc(OroRsPickProc, GENERICPROC_PICK_VESSEL, this))
+			return false;
+	} else {
+		pCore->RegisterGenericProc(OroRsPickProc, 0, this);   // id 0 = unregister by proc
+	}
+	s_rsPickOn = on;
+	return true;
+}
+
+void OroModule::RsPickDeliver(const void* pickData)
+{
+	// Main thread (the client's message pump), so oapi queries are safe here -
+	// this is the same phase the Debug dialog's own pick handling runs in.
+	if (!s_rsPickOn || !pCore) return;
+	const gcCore::PickData* pd = (const gcCore::PickData*)pickData;
+	// Only works in VC view (his spec) - and only on the ship you are sitting in:
+	// PickScene can hit another vessel through the glass. A non-qualifying click
+	// keeps the pick armed, so a stray click on the scenery is not a cancel.
+	if (!oapiCameraInternal() || oapiCockpitMode() != COCKPIT_VIRTUAL) return;
+	if (pd->hVessel != oapiGetFocusObject()) return;
+	char mesh[192] = "";
+	pCore->GetDevMeshName(pd->mesh, mesh, sizeof(mesh));
+	if (!mesh[0]) return;              // a nameless mesh cannot be declared in a cfg
+	// The confirmation highlight (his spec, 2026-09-02): the picked group lights the
+	// Debug dialog's own green and STAYS lit while the mouse button is held (msec 0 =
+	// the held mode), so the user SEES what they just declared. On every ACCEPTED
+	// pick - a duplicate answer lights too, since either way it is the honest answer
+	// to "which group did I click".
+	if (pCore->CanFlashMeshGroup()) pCore->FlashMeshGroup(pd->mesh, pd->group, 0);
+	OroDlg_RsPickResult(mesh, pd->group);
+}
+
+bool OroModule::RsApplyAvail() const
+{
+	return pCore && pCore->CanReloadRainSurfaces();   // guard #13 - patch (h) part 4
+}
+
+bool OroModule::RsApplyNow()
+{
+	// The client re-reads the cfg and hands every LIVE mesh its fresh rain-glass list,
+	// so the picker's SAVE (adds AND removals) takes effect on the next frame. On an
+	// older client this answers false and the picker's message says "reload" instead.
+	if (!RsApplyAvail()) return false;
+	pCore->ReloadRainSurfaces();
+	return true;
+}
+
 // File-scope mirror of the module's patch-(f) capability flag, so the dialog can grey the
 // VC SHADOWS section out without reaching into the module instance (the OroSettings_*
 // pattern). Set once in clbkSimulationStart.
 static bool g_vcShadowSupported = false;
 bool OroVCShadowsSupported() { return g_vcShadowSupported; }
+static bool g_vcNightSupported = false;
+bool OroVCNightSupported() { return g_vcNightSupported; }
 
 // Same pattern for patch (g)'s depth clip: the REENTRY tab warns when it is dark,
 // because on screen the degradation is silent (plasma paints through the hull).
@@ -2445,6 +2581,9 @@ bool OroDepthClipOK() { return g_depthClipMirror; }
 // the client cannot suppress (a switch that cannot do anything is worse than none).
 static bool g_stockExSupported = false;
 bool OroStockExhaustSupported() { return g_stockExSupported; }
+// Patch (ac): the BASE LIGHTS pill greys out wholesale without the patch (18b's rule).
+bool g_baseLightsSupported = false;
+bool OroBaseLightsSupported() { return g_baseLightsSupported; }
 
 // ---------------------------------------------------------------------------
 // Patch (y) bridge: the PARTICLES page's COPY STOCK button. The core pointer
@@ -2681,6 +2820,11 @@ OroModule::~OroModule()
 	if (pCore && pCore->CanSetWetGlint())       { pCore->SetWetGlint(1.0f);       glintPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetReflection())  { pCore->SetWetReflection(1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f);  reflPushed = -1.0f; swimAmpPushed = -1.0f; swimRatePushed = -1.0f; poolSizePushed = -1.0f; poolReachPushed = -1.0f; reflBlurPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetGrain())       { pCore->SetWetGrain(1.0f, 1.0f);  grainOpPushed = -1.0f; grainSizePushed = -1.0f; }
+	// patch (aa): and its clear air - both fog layers to zero, the anchor forgotten
+	if (pCore && pCore->CanSetFogLayer())       { pCore->SetFogLayer(0, 0.0, 0.0f, 1.0f, 0.0f); pCore->SetFogLayer(1, 0.0, 0.0f, 1.0f, 0.0f); }
+	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = 0.0f; }
+	if (pCore && pCore->CanSetBaseLights())     { pCore->SetBaseLights(false, 1.0f, 1.0f); blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f; }   // patch (ac): stock lights back
+	if (pCore && pCore->CanSetVCNightLight())   { pCore->SetVCNightLight(1.0f); vcNightPushed = -1.0f; g_fx.vcNightLive = 1.0f; }   // patch (ad): the cabin lit as stock
 	if (rainLtgLight && rainLtgLightV && oapiIsVessel(rainLtgLightV)) {
 		VESSEL* lv = oapiGetVesselInterface(rainLtgLightV);
 		if (lv) lv->DelLightEmitter(rainLtgLight);      // invariant 14: hand it back
@@ -2747,6 +2891,10 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	                         //   cfgs may have been edited between scenarios)
 	OroRain_ShieldReset();   // same rule: re-probe the shield mesh next storm (he
 	                         // iterates on the file between runs)
+	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = fogNearDens0 = 0.0f; }
+	blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f;   // patch (ac): the first push of the session is unconditional
+	                         // and the fog's anchor + envelope (patch aa): a crash must
+	                         // not leave last session's world anchored under this one
 	pCore = gcGetCoreInterface();
 	if (!pCore) {
 		oapiWriteLogV("ORO: D3D9Client interface NOT found - effects disabled (is D3D9Client the active graphics client?).");
@@ -2782,11 +2930,17 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		vcShadowSupported = pCore->CanSetVCShadows();
 		g_vcShadowSupported = vcShadowSupported;
 		vcShadowLastRad = -1.0f;      // force the first push
+		// Patch (ad): the cabin at night - the same binding probe.
+		vcNightSupported = pCore->CanSetVCNightLight();
+		g_vcNightSupported = vcNightSupported;
+		vcNightPushed = -1.0f;
 		// Patch (n): per-vessel stock-exhaust suppression, probed by binding like the
 		// rest. The dialog's STOCK EXHAUST pill greys out without it (invariant 18b).
 		g_stockExSupported = pCore->CanSuppressExhaust();
 		oapiWriteLogV("ORO: client VC shadows (patch f) %s.",
 		              vcShadowSupported ? "available" : "NOT available");
+		oapiWriteLogV("ORO: VC night light (patch ad) %s.",
+		              vcNightSupported ? "available - the CABIN AT NIGHT section is live" : "NOT available - section greyed");
 		oapiWriteLogV("ORO: stock exhaust suppression (patch n) %s.",
 		              g_stockExSupported ? "available" : "NOT available");
 		// Patch (y): stock stream-spec readback for the COPY STOCK buttons.
@@ -2800,6 +2954,13 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		oapiWriteLogV("ORO: storm light (patch s part 2) %s.",
 		              pCore->CanSetStormLight() ? "available - overcast collapses the sun"
 		                                        : "NOT available - storms stay sunlit");
+		oapiWriteLogV("ORO: fog layers (patch aa) %s; snow cover %s.",
+		              pCore->CanSetFogLayer() ? "available - the FOG page is live"
+		                                      : "NOT available - FOG page inert",
+		              pCore->CanSetSnowCover() ? "plumbed (dormant)" : "NOT available");
+		g_baseLightsSupported = pCore->CanSetBaseLights();
+		oapiWriteLogV("ORO: base lights (patch ac) %s.",
+		              g_baseLightsSupported ? "available - the BASE LIGHTS pill is live" : "NOT available - pill greyed");
 		oapiWriteLogV("ORO: additive sketchpad blend (patch d, probed by binding) %s; gcAPIVer reads %u (diagnostic only, known-broken).",
 		              padAdditive ? "available" : "NOT available (plasma will alpha-blend)", specs.gcAPIVer);
 	}
@@ -3224,6 +3385,11 @@ void OroModule::ReleaseDeviceResources()
 	if (pCore && pCore->CanSetWetGlint())       { pCore->SetWetGlint(1.0f);       glintPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetReflection())  { pCore->SetWetReflection(1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f);  reflPushed = -1.0f; swimAmpPushed = -1.0f; swimRatePushed = -1.0f; poolSizePushed = -1.0f; poolReachPushed = -1.0f; reflBlurPushed = -1.0f; }
 	if (pCore && pCore->CanSetWetGrain())       { pCore->SetWetGrain(1.0f, 1.0f);  grainOpPushed = -1.0f; grainSizePushed = -1.0f; }
+	// patch (aa): and its clear air - both fog layers to zero, the anchor forgotten
+	if (pCore && pCore->CanSetFogLayer())       { pCore->SetFogLayer(0, 0.0, 0.0f, 1.0f, 0.0f); pCore->SetFogLayer(1, 0.0, 0.0f, 1.0f, 0.0f); }
+	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = 0.0f; }
+	if (pCore && pCore->CanSetBaseLights())     { pCore->SetBaseLights(false, 1.0f, 1.0f); blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f; }   // patch (ac): stock lights back
+	if (pCore && pCore->CanSetVCNightLight())   { pCore->SetVCNightLight(1.0f); vcNightPushed = -1.0f; g_fx.vcNightLive = 1.0f; }   // patch (ad): the cabin lit as stock
 	if (rainLtgLight && rainLtgLightV && oapiIsVessel(rainLtgLightV)) {
 		VESSEL* lv = oapiGetVesselInterface(rainLtgLightV);
 		if (lv) lv->DelLightEmitter(rainLtgLight);      // invariant 14: hand it back
@@ -3794,6 +3960,14 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	                           //   ⚠️ MUST FOLLOW UpdateRain here - it reads the envelope
 	                           //   that call just advanced.
 	PushSurfaceWet();          // patch (s) - client state, pushed on change (invariant 18)
+	UpdateFog();               // THE FOG (patch aa): evolves the envelope + the anchor slew
+	SenseFog();                //   senses world/air/ground/altitude (also every frame from
+	                           //   the keyboard tick, so it stays true while paused)
+	PushFog();                 //   the two layers to the client, on change. AFTER
+	                           //   PushSurfaceWet: the storm mist reads rainIntensityLive.
+	PushBaseLights();          // the BASE LIGHTS pill + glow (patch ac), on change
+	SenseVCNight();            // the cabin at night (patch ad): the sun at the camera, every frame
+	PushVCNight();             //   ... and the scale to the client, on change
 	UpdateRainSound();         // the loop crossfade rides the envelope just published
 	UpdateThunder();           // flash events -> delayed one-shots (dist/340 s)
 	UpdateRainFlashLight();    // rain lightning's borrowed scene light - unconditional,
@@ -3972,6 +4146,11 @@ bool OroModule::clbkProcessKeyboardImmediate(char kstate[256], bool simRunning)
 	// WHEREVER THE SENSING RUNS; it is change-gated internally, so calling it here costs
 	// nothing when nothing moved.
 	PushSurfaceWet();
+	SenseFog();                             // the fog's gates, same law (patch aa)
+	PushFog();
+	PushBaseLights();
+	SenseVCNight();                         // the cabin at night, same law (patch ad)
+	PushVCNight();
 	return false;                           // never consume - see the note above
 }
 
@@ -4057,6 +4236,86 @@ void OroModule::UpdateVCShadows()
 	vcShadowLastOn  = want;
 	vcShadowLastRad = rad;
 	vcShadowLastDep = dep;
+}
+
+// ----------------------------------------------------------------------------
+// THE CABIN AT NIGHT (client patch ad, 2026-09-05). MAIN thread, EVERY frame - it senses
+// the world (the sun at the camera), so it runs from the keyboard tick too and stays
+// true while paused (invariant 1's law). ORO renders nothing: the client scales the VC's
+// ambient + emissive fill in its cockpit pass; this decides by how much.
+//
+// THE RAMP IS THE SUN AT THE CAMERA against the LOCAL horizon, which dips with altitude
+// (sin h = -sqrt(1 - (R/r)^2)): on the ground that is the real horizon, in orbit it is
+// the planet's shadow - one formula, no orbit/ground special case. With an atmosphere
+// the light fades across TWILIGHT (full by +3 deg, gone by -8 deg on the ground -
+// nautical twilight, when a real cockpit is dark; the band narrows with altitude because
+// the air thins); without one it is a sharp flip. A solar eclipse the ECLIPSE effect is
+// tracking darkens it too (the client only knows the primary's own shadow).
+// ----------------------------------------------------------------------------
+void OroModule::SenseVCNight()
+{
+	vcNightK = 1.0f;
+	g_fx.vcNightLive = 1.0f;
+	if (!vcNightSupported || !g_fx.vcNight || !g_fx.masterArmed) return;
+	OBJHANDLE hS   = OroFindStar();
+	OBJHANDLE hRef = oapiCameraProxyGbody();
+	if (!hS || !hRef) return;
+	VECTOR3 cam; oapiCameraGlobalPos(&cam);
+	VECTOR3 pC;  oapiGetGlobalPos(hRef, &pC);
+	VECTOR3 sp;  oapiGetGlobalPos(hS, &sp);
+	const VECTOR3 rel = cam - pC;
+	const double r = length(rel);
+	const double R = oapiGetSize(hRef);
+	if (r < 1.0 || R < 1.0) return;
+	const VECTOR3 up = rel / r;
+	const double sinE  = dotp(unit(sp - cam), up);               // sun elevation, sine
+	const double ratio = (R < r) ? (R / r) : 1.0;
+	double dip = 1.0 - ratio * ratio; if (dip < 0.0) dip = 0.0;
+	const double sinH  = -sqrt(dip);                             // the dipped horizon
+	const double e     = sinE - sinH;                            // 0 at that horizon
+	double hi = 0.012, lo = -0.012;                              // vacuum: a flip
+	if (oapiPlanetHasAtmosphere(hRef)) {
+		const ATMCONST* ac = oapiGetPlanetAtmConstants(hRef);
+		const double altLim = (ac && ac->altlimit > 1000.0) ? ac->altlimit : 100000.0;
+		double f = (r - R) / altLim; f = (f < 0.0) ? 0.0 : (f > 1.0 ? 1.0 : f);   // 0 ground .. 1 above the air
+		hi =  0.052 + ( 0.012 - 0.052) * f;                      // +3.0 deg -> +0.7 deg
+		lo = -0.139 + (-0.017 + 0.139) * f;                      // -8.0 deg -> -1.0 deg
+	}
+	double x = (e - lo) / (hi - lo);
+	x = (x < 0.0) ? 0.0 : (x > 1.0 ? 1.0 : x);
+	double ramp = x * x * (3.0 - 2.0 * x);
+	ramp *= (1.0 - 0.92 * (double)g_fx.eclipseObsc * (double)g_fx.eclipseObsc);   // totality is night
+	const double fl = (double)((g_fx.vcNightFloor < 0.0f) ? 0.0f : (g_fx.vcNightFloor > 1.0f ? 1.0f : g_fx.vcNightFloor));
+	// THE SKY OVERHEAD (his rain report, 2026-09-05: "the whole world has dimmed ... but the
+	// VC is bright as day"). The fill stands in for the light coming in through the windows,
+	// so it follows what the weather leaves of it: the storm light collapses the sun (the
+	// very factor the client is running), and the fog's sun column above the camera thins
+	// it - mildly, because thick fog is a BRIGHT white sky, not a dark one. Full storm at
+	// noon leaves about a quarter of the fill: dim, shadowless, matching the world outside.
+	// WEATHER DIM (his second test: gloom 1 was "a bit more bright than I'd like") scales
+	// the darkening, not the weather: gloom and visibility still decide how much sun is
+	// left, this decides how much of THAT loss the cabin shows. At 1, gloom 1 leaves ~37%
+	// and a full storm ~10%; at 2 the storm is near-black; the pill off = the weather
+	// leaves the cabin alone.
+	const double wx     = g_fx.vcWxDimOn ? (double)((g_fx.vcWxDim < 0.0f) ? 0.0f : (g_fx.vcWxDim > 2.0f ? 2.0f : g_fx.vcWxDim)) : 0.0;
+	const double storm  = (stormPushed > 0.0f) ? (double)stormPushed : 0.0;
+	const double sunSin = (sinE > 0.08) ? sinE : 0.08;
+	const double fogSun = exp(-(double)fogSunColumn / sunSin);
+	double stormDim = storm * wx * 1.4; if (stormDim > 1.0) stormDim = 1.0;
+	double fogDim   = (1.0 - fogSun) * wx * 0.25; if (fogDim > 0.6) fogDim = 0.6;
+	const double sky    = (1.0 - 0.9 * stormDim) * (1.0 - fogDim);
+	vcNightK = (float)(fl + (1.0 - fl) * ramp * sky);
+	g_fx.vcNightLive = vcNightK;
+}
+
+// PushVCNight - wherever the sensing ran; change-gated, so it costs nothing when the sun
+// has not moved. Off, disarmed or unsupported all sense as 1.0 = stock.
+void OroModule::PushVCNight()
+{
+	if (!pCore || !vcNightSupported) return;
+	if (vcNightPushed >= 0.0f && fabsf(vcNightK - vcNightPushed) < 0.004f) return;
+	pCore->SetVCNightLight(vcNightK);
+	vcNightPushed = vcNightK;
 }
 
 void OroModule::EnsureFrameTex()
@@ -4344,6 +4603,8 @@ void OroModule::UpdateShimmerPlumes()
 {
 	plumeCount = 0;
 	plmShimStr = 0.0f;
+	plmShimWave = plmShimFreq = 1.0f;      // sane defaults when nothing contributes
+	                                       //   (fShimmer 0 makes the pass a no-op anyway)
 	if (!extGate || !g_fx.masterArmed) return;                    // EXTERNAL view only
 	if (viewW == 0 || viewH == 0) return;
 	if (plmModelN <= 0) return;                                   // nothing burning
@@ -4384,7 +4645,20 @@ void OroModule::UpdateShimmerPlumes()
 	// 2026-07-30 and untouched).
 	const double rho = plmRho;                                    // model-published
 	if (rho < 1.0e-4) return;
-	const float atmW = (float)(rho > 0.02 ? 1.0 : rho / 0.02);
+	// DENSITY RESPONSE (2026-09-04, his call - DENSITY, not pressure: refractivity
+	// is proportional to rho (Gladstone-Dale) and the waver IS the turbulent mixing
+	// layer, which needs ambient air to entrain). Two halves:
+	//  - the RAMP: linear in rho to full at 0.3 kg/m3 (~9 km on Earth). The old
+	//    saturation at 0.02 (~35 km) meant the last 60x of an ascent's density
+	//    change did nothing - the haze never visibly thinned until it abruptly
+	//    started dying in the stratosphere.
+	//  - the OVERDRIVE: above EARTH-SEA-LEVEL density the response keeps growing,
+	//    logarithmically, capped at 2.5x (his Venus question: the jet-vs-ambient
+	//    density CONTRAST there is ~45x Earth's, but 45x a full-frame UV warp is
+	//    not a look, it is a broken frame). Venus surface ~1.95x, Titan ~1.35x,
+	//    Earth sea level EXACTLY 1.0 - the tuned look is the identity case.
+	const float atmW = (float)(min(1.0, rho / 0.3)
+	                 * min(2.5, 1.0 + 0.55 * log10(max(1.0, rho / 1.225))));
 
 	// THE RENDER CAMERA (2026-08-15). This runs in the render path now: the capsules are
 	// SCREEN-SPACE, so under pause they used to keep warping wherever the plumes were when
@@ -4406,7 +4680,16 @@ void OroModule::UpdateShimmerPlumes()
 		// now reads effective per-thruster, per-class values - the same rule, finer.
 		const OroThrusterFx& T = OroThr_EffC(e.cls, e.grp, e.thrIdx, ORO_FAM_EXH);
 		if (!T.shimmerEnabled || T.shimmer <= 0.001f) continue;   // this plume hazes nothing
-		if (T.shimmer > plmShimStr) plmShimStr = T.shimmer;       // strongest contributor
+		// THE STRONGEST CONTRIBUTOR now selects only the frame's WAVE TEXTURE
+		// (wavelength + churn live inside the shared phase math and stay frame
+		// uniforms). STRENGTH stopped being a frame uniform on 2026-09-04, his
+		// call: each capsule folds its own block's strength below, so a weak
+		// hover haze and a strong main haze coexist honestly in one frame.
+		if (T.shimmer > plmShimStr) {
+			plmShimStr  = T.shimmer;
+			plmShimWave = T.shimmerWave;
+			plmShimFreq = T.shimmerFreq;
+		}
 
 		const VECTOR3 rootR = e.rootG + RenderEpochShift(e.hOwn, e.ownCg);
 		VECTOR3 groot = rootR + e.dirG * T.shimmerOfs;
@@ -4462,7 +4745,15 @@ void OroModule::UpdateShimmerPlumes()
 		s.rad = rad;
 		// Strength SATURATES with thrust (even an idling engine bends light hard);
 		// the turbulence peak migrates aft as thrust rises. Both lab-tuned laws.
-		s.str = atmW * (float)(vis * pow(e.level, 0.40));
+		// PER-PLUME STRENGTH FOLD (2026-09-04, his call): the dialog strength rides
+		// each capsule's own vPlumeP slot instead of a frame master - the shader's
+		// contribution is linear in s, so with ONE group active this is arithmetic-
+		// identical to the old fShimmer multiply, and with several it is the fix
+		// (a weak group's capsule used to warp at the strongest group's strength).
+		// Clamped here because the old path saturate()d the master in the shader
+		// and a hand-edited cfg above 1.0 must not overdrive the warp now.
+		s.str = atmW * (float)(vis * pow(e.level, 0.40))
+		      * min(1.0f, max(0.0f, T.shimmer));
 		s.hpk = (float)(0.15 + 0.45 * e.level);
 	}
 	for (int i = plumeCount; i < SHIM_PLUMES; i++) plumes[i] = PlumeScr{};   // unused: str = 0
@@ -4799,7 +5090,11 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 				}
 				pIPIShimmer->SetTexture("tSrc", hFrameTex, IPF_CLAMP_U | IPF_CLAMP_V | IPF_LINEAR);
 				pIPIShimmer->SetOutput(0, hBB);
-				pIPIShimmer->SetFloat("fShimmer", plmShimStr);   // strongest contributing group
+				// fShimmer is GONE (2026-09-04): strength rides each capsule's own
+				// vPlumeP slot now - only the wave texture is still frame-wide,
+				// from the strongest contributor's block.
+				pIPIShimmer->SetFloat("fShimWave", plmShimWave);
+				pIPIShimmer->SetFloat("fShimFreq", plmShimFreq);
 				pIPIShimmer->SetFloat("fAspect", (float)viewW / (float)viewH);
 				pIPIShimmer->SetFloat("fTime", animT);       // real-time clock, streams the ripple
 				pIPIShimmer->SetFloat("vPlume",  axes, sizeof(axes));
@@ -5298,6 +5593,13 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 
 static OroModule* g_oro = nullptr;
 static DWORD g_customCmd = 0;   // Custom Functions (Ctrl+F4) entry id
+
+// RAINSURFACES free wrappers - the dialog speaks through these (declared in
+// OroState.h); the members live beside the pick thunk above.
+bool OroRs_PickAvail()      { return g_oro && g_oro->RsPickAvail(); }
+bool OroRs_PickArm(bool on) { return g_oro && g_oro->RsPickArm(on); }
+bool OroRs_ApplyAvail()     { return g_oro && g_oro->RsApplyAvail(); }
+bool OroRs_ApplyNow()       { return g_oro && g_oro->RsApplyNow(); }
 static HINSTANCE g_hInstDLL = NULL;
 
 // Ctrl+F4 "Custom Functions" callback: open the ORO control dialog.

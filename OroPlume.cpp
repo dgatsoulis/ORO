@@ -74,7 +74,7 @@ namespace {
 	const double PLM_FR_BLO    = 0.50;   // bloom ramp, fraction of the window (bottom)
 
 	const int    PLM_NCELL_DEF = 7;      // default shock-cell count (the Diamonds
-	                                     //   slider owns it now, 1..12)
+	                                     //   slider owns it now, 0..12; 0 = none)
 	const double PLM_NODE0     = 0.75;   // first Mach disc, in cell-spacings from the exit
 	const double PLM_CELL_DECAY= 0.80;   // per-cell brightness/modulation decay
 	const double PLM_SPACE_W   = 2.0;    // cell spacing = this x wsize x the Spacing slider
@@ -511,7 +511,11 @@ void OroModule::BuildPlumeModel()
 		const float  kWidth = clampf(T.plumeWidth, 0.05f, 3.0f);
 		const float  kLen   = clampf(T.plumeLen,   0.05f, 3.0f);
 		const float  kSpace = clampf(T.plumeSpacing, 0.15f, 3.0f);
-		const int    nCell  = (int)(clampf(T.plumeCells, 1.0f, 12.0f) + 0.5f);
+		const int    nCell  = (int)(clampf(T.plumeCells, 0.0f, 12.0f) + 0.5f);  // 0 = NO
+		                                                    // diamonds (floor dropped
+		                                                    // 2026-09-04); L_sea below
+		                                                    // shortens continuously with
+		                                                    // the count, no cliff at 0
 		const bool   phys   = T.plumePhysics;
 		// THE NOZZLE, from whichever source this candidate came from. Everything below
 		// this block is source-agnostic on purpose: a synthesised nozzle is a normal
@@ -715,9 +719,9 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 	                   float x1, float y1, DWORD c1, float d1,
 	                   float x2, float y2, DWORD c2, float d2) {
 		if (plmVtxN + 3 > PLM_MAX_TRI * 3) return;               // full: drop silently
-		plmVtx[plmVtxN].x = x0; plmVtx[plmVtxN].y = y0; plmVtx[plmVtxN].c = c0; plmDepth[plmVtxN] = d0; plmVtxN++;
-		plmVtx[plmVtxN].x = x1; plmVtx[plmVtxN].y = y1; plmVtx[plmVtxN].c = c1; plmDepth[plmVtxN] = d1; plmVtxN++;
-		plmVtx[plmVtxN].x = x2; plmVtx[plmVtxN].y = y2; plmVtx[plmVtxN].c = c2; plmDepth[plmVtxN] = d2; plmVtxN++;
+		plmVtx[plmVtxN].x = x0; plmVtx[plmVtxN].y = y0; plmVtx[plmVtxN].c = FogColNear(c0, d0); plmDepth[plmVtxN] = d0; plmVtxN++;
+		plmVtx[plmVtxN].x = x1; plmVtx[plmVtxN].y = y1; plmVtx[plmVtxN].c = FogColNear(c1, d1); plmDepth[plmVtxN] = d1; plmVtxN++;
+		plmVtx[plmVtxN].x = x2; plmVtx[plmVtxN].y = y2; plmVtx[plmVtxN].c = FogColNear(c2, d2); plmDepth[plmVtxN] = d2; plmVtxN++;
 	};
 
 	// Colour picks (COLORREF 0x00BBGGRR). Jet = the core + diamond body; Bloom = the
@@ -732,9 +736,9 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 	                  float x1, float y1, DWORD c1, float d1,
 	                  float x2, float y2, DWORD c2, float d2) {
 		if (plmDkVtxN + 3 > PLM_DK_MAX_TRI * 3) return;          // full: drop silently
-		plmDkVtx[plmDkVtxN].x = x0; plmDkVtx[plmDkVtxN].y = y0; plmDkVtx[plmDkVtxN].c = c0; plmDkDepth[plmDkVtxN] = d0; plmDkVtxN++;
-		plmDkVtx[plmDkVtxN].x = x1; plmDkVtx[plmDkVtxN].y = y1; plmDkVtx[plmDkVtxN].c = c1; plmDkDepth[plmDkVtxN] = d1; plmDkVtxN++;
-		plmDkVtx[plmDkVtxN].x = x2; plmDkVtx[plmDkVtxN].y = y2; plmDkVtx[plmDkVtxN].c = c2; plmDkDepth[plmDkVtxN] = d2; plmDkVtxN++;
+		plmDkVtx[plmDkVtxN].x = x0; plmDkVtx[plmDkVtxN].y = y0; plmDkVtx[plmDkVtxN].c = FogColNear(c0, d0); plmDkDepth[plmDkVtxN] = d0; plmDkVtxN++;
+		plmDkVtx[plmDkVtxN].x = x1; plmDkVtx[plmDkVtxN].y = y1; plmDkVtx[plmDkVtxN].c = FogColNear(c1, d1); plmDkDepth[plmDkVtxN] = d1; plmDkVtxN++;
+		plmDkVtx[plmDkVtxN].x = x2; plmDkVtx[plmDkVtxN].y = y2; plmDkVtx[plmDkVtxN].c = FogColNear(c2, d2); plmDkDepth[plmDkVtxN] = d2; plmDkVtxN++;
 	};
 
 	// ---- THE NOZZLE MARKER (Phase B, 2026-08-30) ---------------------------
@@ -811,12 +815,24 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 		// render-path read stays legal and LIVE: paused tuning keeps whatever
 		// responsiveness it has today, and a CLEAR landing mid-frame self-heals.
 		const OroThrusterFx& T = OroThr_EffC(e.cls, e.grp, e.thrIdx, ORO_FAM_EXH);
-		int jR, jG, jB, bR, bG, bB;
+		int jR, jG, jB, bR, bG, bB, dR, dG, dB;
 		UnpackCR(T.plumeColJet,   jR, jG, jB);   // core + diamond body
 		UnpackCR(T.plumeColBloom, bR, bG, bB);   // the vacuum halo
+		UnpackCR(T.plumeColDia,   dR, dG, dB);   // the diamonds' whitening TARGET
+		                                         //   (white = the classic look)
 		const float master  = clampf(T.plume, 0.0f, 1.0f);
-		const int   nCell   = (int)(clampf(T.plumeCells, 1.0f, 12.0f) + 0.5f);
+		const int   nCell   = (int)(clampf(T.plumeCells, 0.0f, 12.0f) + 0.5f);  // 0 = no diamonds
 		const float kDia    = clampf(T.plumeDiamond,  0.0f, 2.0f);
+		const float kShape  = clampf(T.plumeDiaShape, -1.0f, 1.0f);  // lozenge peak position
+		const float kDiaW   = clampf(T.plumeDiaSize,   0.0f, 2.0f);  // lozenge radial width
+		                                                             //   (key predates the
+		                                                             //   length/width split)
+		const float kDiaL   = clampf(T.plumeDiaLen,    0.05f, 2.0f); // lozenge axial extent;
+		                                                             //   floor 0.05 = a thin
+		                                                             //   slab at the peak
+		                                                             //   (pure Mach discs),
+		                                                             //   never a div-by-0
+		const float kDiaOfs = clampf(T.plumeDiaOfs,   -2.0f, 5.0f);  // train slide [m]
 		const float kBloomW = clampf(T.plumeBloomWid, 0.0f, 2.0f);
 		const float kBloomB = clampf(T.plumeBloomBri, 0.0f, 2.0f);
 		const float kThroat = clampf(T.plumeThroat,   0.0f, 4.0f);
@@ -917,12 +933,15 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 		// Sub-pixel cull: if even the sheath is a hairline, skip the slot.
 		if (pxAt(rz, w0 * PLM_SHEATH_X + L * spreadTan) < 1.0f && Lpx < 8.0f) continue;
 
-		// Diamond-layer colour is constant per plume: the jet pick pushed hard toward
-		// white (0.85) - the lozenges are the white-hot part of the jet, and the fp16
-		// bloom finishes the job.
-		const int diaR = jR + (int)((255 - jR) * 0.85f);
-		const int diaG = jG + (int)((255 - jG) * 0.85f);
-		const int diaB = jB + (int)((255 - jB) * 0.85f);
+		// Diamond-layer colour is the DIA pick, VERBATIM - his rule, same day the
+		// swatch landed: "the color the swatch uses is the color the user sees in
+		// the diamonds" (15b's pick-a-colour-get-that-colour, which the first cut
+		// violated with a 15% jet-remnant blend). White default = within a hair of
+		// the classic look (the old formula was 85% of the way to white anyway);
+		// the fp16 bloom still whitens the hottest cores, because light does.
+		const int diaR = dR;
+		const int diaG = dG;
+		const int diaB = dB;
 
 		// --- stations ---------------------------------------------------------
 		float  sx[PLM_NS], sy[PLM_NS], sed[PLM_NS], nfv[PLM_NS];
@@ -968,15 +987,30 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 			// sepShift breathes the whole train coherently when separation is live.
 			// The decay base comes from the MODEL (washout: 0.80 at sea level,
 			// steeper as the diamond band fades with altitude).
-			const double s  = t / spacing - PLM_NODE0 + sepShift;
+			// The Diamond offset knob slides the WHOLE structure in metres - waists,
+			// glints and lozenges together, one coordinate, so they cannot separate
+			// (negative = toward the bell; with the throat section off nothing draws
+			// upstream of the lip, so a deep negative just parks the first cell there).
+			const double s  = (t - (double)kDiaOfs) / spacing - PLM_NODE0 + sepShift;
 			const double kf = floor(s + 0.5);
 			const int    k  = (int)kf;
 			const double ds = s - kf;                            // -0.5..0.5, 0 at a node
 			float cellDecay = 0.0f, nodeBump = 0.0f;
-			if (k >= 0 && k <= nCell) {
+			if (nCell > 0 && k >= 0 && k <= nCell) {   // nCell 0 = no discs at all: no
+			                                           //   waists, no glints, no white push
 				cellDecay = (float)pow((double)e.decay, (double)k);
 				const float bb = (float)(1.0 - fabs(ds) / 0.30);
 				if (bb > 0.0f) nodeBump = sstepf(bb);
+				// WHOLE CELLS ONLY (2026-09-04, his call, and it is the physics - a
+				// standing wave is coherent or gone, never fractional): a disc beyond
+				// the train's physical length L fades out WHOLE, by alpha, over half a
+				// cell of length growth. This gates the waist and the glint; the
+				// lozenge below runs the same rule on the same coordinate, so the
+				// structure agrees about where it ends. At full sea-level throttle the
+				// last disc sits 0.75 spacings inside L (NODE0), past the ramp - the
+				// approved look is untouched at full power.
+				nodeBump *= sstepf((float)((L - ((kf + PLM_NODE0 - sepShift) * spacing + (double)kDiaOfs))
+				                           / (0.5 * spacing)));
 			}
 
 			// THE LOZENGE ("more diamond-y", user report 2026-08-09). The first build
@@ -987,16 +1021,71 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 			// smoothed, because the straight Gouraud edges between stations are what
 			// draw the pointed ends. Brightness is front-loaded (the gas glows
 			// hottest just after the disc reheats it) and decays per cell.
-			const int    kL = (int)floor(s);                     // lozenge index: node k -> k+1
-			const double u  = s - floor(s);                      // 0..1 across the lozenge
+			const int kL = (int)floor(s);                        // lozenge index: node k -> k+1
 			float lozW = 0.0f, lozA = 0.0f;
-			if (dW > 0.02f && kL >= 0 && kL < nCell) {
-				const float dec    = (float)pow((double)e.decay, (double)kL);
-				const float flickL = 0.88f + 0.12f * sinf(t_anim * 23.0f + (float)kL * 2.63f + (float)p * 1.91f);
-				lozW = (float)(1.0 - fabs(2.0 * u - 1.0));       // triangular: tips at the discs
-				lozA = PLM_A_DIA * dW * dec * kDia * flickL * (float)(1.0 - 0.55 * u)
-				     * e.diaF * sepPulse;                        // throttle coupling + the
-				                                                 //   separation pulse
+			if (dW > 0.02f && kDia > 0.001f) {
+				// THE SHAPE KNOB (bipolar, 2026-09-04, his spec): the tent's PEAK slides
+				// along the cell. m = 0.5 at shape 0 IS the old symmetric triangle bit
+				// for bit (x/0.5 and (1-x)/0.5 = the 1-|2u-1| it replaces); m -> 0 leans
+				// the whole width onto the UPSTREAM disc - a half diamond, cone base
+				// facing the bell, which is his RS-25 observation and real physics (the
+				// first cell's diverging half is inside the nozzle, so only the
+				// converging cone ever shows); m -> 1 is the mirror, an expansion fan
+				// opening downstream.
+				// THE LENGTH KNOB (same day): the tent is stretched about that peak in
+				// the cell coordinate - x is the UNSTRETCHED 0..1 position, so shape,
+				// front-load and identity all live in x. Below 1 the tips pull in from
+				// the discs (down to a thin slab at the peak = pure Mach discs); above 1
+				// the tent SPILLS into the flanking cells, so both neighbours are
+				// evaluated too and combined by MAX - the flash law: the same structure
+				// re-lit, never a sum (kDiaL <= 2 spills at most one full cell, so
+				// kL +/- 1 covers every contributor). At kDiaL = 1 a neighbour's x
+				// lands outside (0,1) by construction and only j = kL survives with
+				// x == u: the pre-knob tent bit for bit.
+				// The brightness front-load (1 - 0.55x) is deliberately untouched: the
+				// gas glows hottest just after the disc reheats it regardless of where
+				// the width bulges, and identity-at-0 is the hard requirement.
+				const double m = 0.5 * (1.0 + (double)kShape);
+				for (int j = kL - 1; j <= kL + 1; j++) {
+					if (j < 0 || j >= nCell) continue;
+					// WHOLE CELLS ONLY (2026-09-04, his call - the throttle ramp was
+					// slicing the last diamond into a growing fraction, which no real
+					// train can show: cells dissolve into turbulence in sequence, each
+					// one complete). A cell participates only while its DRAWN
+					// downstream end (the stretched tent's x -> 1 boundary, so the
+					// length knob cannot re-slice it) fits inside the train's physical
+					// length L, fading in WHOLE by ALPHA over half a cell of length
+					// growth - never popping, so a hovering throttle cannot strobe it.
+					// The geometry is always the complete tent; only brightness ramps.
+					// An invisible cell is SKIPPED before the max-combine, or it could
+					// win the width contest with ~zero alpha and blank a visible
+					// neighbour. The near-plane clamp stays exempt: the camera cutting
+					// the train mid-cell is viewport occlusion, not the structure
+					// ending. The sheath and core keep their continuous length ramp -
+					// the flame body genuinely grows smoothly; only the periodic
+					// structure quantises (the reference footage shows exactly that:
+					// bare glowing jet briefly outruns the last coherent diamond).
+					const double sEnd = (double)j + m + (1.0 - m) * (double)kDiaL;
+					const float  visJ = sstepf((float)((L - ((sEnd + PLM_NODE0 - sepShift) * spacing + (double)kDiaOfs))
+					                                   / (0.5 * spacing)));
+					if (visJ <= 0.01f) continue;
+					const double uj = s - (double)j;             // this cell's own u (may
+					                                             //   fall outside 0..1)
+					const double x  = m + (uj - m) / (double)kDiaL;
+					if (x <= 0.0 || x >= 1.0) continue;
+					float w;
+					if      (m <= 0.001) w = (float)(1.0 - x);
+					else if (m >= 0.999) w = (float)x;
+					else                 w = (float)((x <= m) ? (x / m) : ((1.0 - x) / (1.0 - m)));
+					if (w <= lozW) continue;
+					const float dec    = (float)pow((double)e.decay, (double)j);
+					const float flickL = 0.88f + 0.12f * sinf(t_anim * 23.0f + (float)j * 2.63f + (float)p * 1.91f);
+					lozW = w;
+					lozA = PLM_A_DIA * dW * dec * kDia * flickL * (float)(1.0 - 0.55 * x)
+					     * e.diaF * sepPulse * visJ;             // throttle coupling, the
+					                                             //   separation pulse + the
+					                                             //   whole-cell fade-in
+				}
 			}
 
 			// Widths [m]: the sheath opens with the bloom; the core keeps a third
@@ -1013,9 +1102,11 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 			if (ws < 0.0) ws = 0.0;
 			wCor[i] = pxAt(z, wc);
 			wShe[i] = pxAt(z, ws);
-			wDia[i] = pxAt(z, w0 * 0.85 * lozW);                 // the lozenge: tips at
-			                                                     //   the discs, widest
-			                                                     //   mid-cell
+			wDia[i] = pxAt(z, w0 * 0.85 * kDiaW * lozW);         // the lozenge: axial span
+			                                                     //   from the length knob,
+			                                                     //   peak where the shape
+			                                                     //   knob put it, radial
+			                                                     //   width x the width knob
 
 			// Brightness. Body fades downstream; at each disc the core keeps only a
 			// small GLINT now (the Mach disc itself) - the lozenge layer carries the
@@ -1033,13 +1124,24 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 			const float sheA  = (PLM_A_SHEATH * (1.0f - 0.35f * dW) + PLM_A_BLOOM * bW * kBloomB) * bodyFade
 			                  * (1.0f + 1.6f * e.puff) * cupSheath;
 
-			// Colours. Core = jet pick, nudged toward white at the disc glints (the
-			// lozenges carry the real white push); sheath = jet -> bloom pick as the
-			// vacuum takes over. Edge columns share the rgb at ALPHA 0 - the feather.
-			const float wf = clampf(0.40f * nodeBump * cellDecay * dW + cupWhite, 0.0f, 1.0f);
-			const int cr = (int)(jR + (255 - jR) * wf);
-			const int cg = (int)(jG + (255 - jG) * wf);
-			const int cb = (int)(jB + (255 - jB) * wf);
+			// Colours. Core = jet pick, nudged toward the DIA pick at the disc glints
+			// (the lozenges carry the real push - one whitening target, so glint and
+			// lozenge cannot disagree); the CUP fire then whitens toward true WHITE
+			// on top, because the throat is the JET family (23h), not the diamonds'.
+			// Split from the old single clamped sum on 2026-09-04 with the swatch:
+			// with offset 0 the two regions never overlap, so at the default white
+			// pick this is the old formula bit for bit; a negative Diamond offset can
+			// now park a node inside the cup, where the two pushes compound instead
+			// of clamp-summing - both end near white, invisible either way.
+			// Sheath = jet -> bloom pick as the vacuum takes over. Edge columns share
+			// the rgb at ALPHA 0 - the feather.
+			const float wfN = clampf(0.40f * nodeBump * cellDecay * dW, 0.0f, 1.0f);
+			int cr = (int)(jR + (dR - jR) * wfN);
+			int cg = (int)(jG + (dG - jG) * wfN);
+			int cb = (int)(jB + (dB - jB) * wfN);
+			cr += (int)((255 - cr) * cupWhite);
+			cg += (int)((255 - cg) * cupWhite);
+			cb += (int)((255 - cb) * cupWhite);
 			const int sr = (int)(jR + (bR - jR) * bW);
 			const int sg = (int)(jG + (bG - jG) * bW);
 			const int sb = (int)(jB + (bB - jB) * bW);
@@ -1057,7 +1159,8 @@ void OroModule::UpdatePlumeFx(DWORD ovW, DWORD ovH)
 		// feathering the width for free. The lozenge layer only exists in the
 		// diamond regime - skipping it entirely keeps the vacuum bloom at two
 		// layers and the pool honest.
-		const int nLay = (dW > 0.02f) ? 3 : 2;
+		const int nLay = (dW > 0.02f && nCell > 0) ? 3 : 2;   // Diamonds 0 = no lozenge
+		                                                      //   layer, same as no regime
 		for (int layer = 0; layer < nLay; layer++) {
 			const float* w   = (layer == 0) ? wShe  : (layer == 1) ? wCor  : wDia;
 			const DWORD* cc_ = (layer == 0) ? cShe  : (layer == 1) ? cCor  : cDia;

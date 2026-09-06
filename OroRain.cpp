@@ -229,6 +229,11 @@ namespace {
 		OBJHANDLE hV;          // the focus vessel - the SECOND splash field centres on it
 		VECTOR3   vPos;        // its position, PRE-STEP (k2 overrides in the build)
 		float     dayF;        // 0..1 daylight at the camera - the deck is lit by the sky
+		float     lightF;      // 0..1 LIGHT ON THE RAIN near the camera (2026-09-05, his
+		                       //   note: "falling raindrops are not visible at night unless
+		                       //   you shine a light on them") - the sky's daylight plus
+		                       //   the focus vessel's own lamps sampled along the view; the
+		                       //   storm's flashes join in the build (the pure scheduler)
 		double    vSize;       // hull bounding radius - the splash footprint mask (a hull
 		                       //   is an umbrella; the ground under it stays mostly dry)
 		VECTOR3   pax1;        // the planet's OWN x axis, global - with `axis` it gives a
@@ -527,6 +532,69 @@ void OroModule::SenseRain()
 		}
 	}
 
+	// LIGHT ON THE RAIN (2026-09-05, his note). The sheet and the splashes are lit by
+	// whatever lights the air a few metres in front of the eye: the sky by day, and at
+	// night only what the focus vessel's own LAMPS put there - a landing light aims
+	// down the runway, a docking light ahead, the cabin flood barely reaches the glass.
+	// Each active emitter this VIEW can see (VIS_COCKPIT inside, VIS_EXTERNAL outside,
+	// ALWAYS both) is evaluated with Orbiter's own attenuation (1/(a0 + a1 d + a2 d^2),
+	// range-cut) and the spot's cone at three points along the view direction - 2, 6
+	// and 14 m, where the three parallax layers actually sit - and the brightest wins.
+	// The storm's own flash light is skipped here: the build reads the flash from the
+	// pure scheduler, so it lights the rain paused too, and from the VC as well (the
+	// borrowed scene light is VIS_EXTERNAL).
+	float lightF = dayF;
+	{
+		VECTOR3 cdir; oapiCameraGlobalDir(&cdir);
+		MATRIX3 vR; v->GetRotationMatrix(vR);
+		const bool inside = oapiCameraInternal();
+		const DWORD nle = v->LightEmitterCount();
+		float best = 0.0f;
+		for (DWORD i = 0; i < nle; i++) {
+			const LightEmitter* le = v->GetLightEmitter(i);
+			if (!le || le == rainLtgLight || !le->IsActive()) continue;
+			const int vis = (int)le->GetVisibility();
+			if (inside  && !(vis & LightEmitter::VIS_COCKPIT))  continue;
+			if (!inside && !(vis & LightEmitter::VIS_EXTERNAL)) continue;
+			const LightEmitter::TYPE ty = le->GetType();
+			if (ty != LightEmitter::LT_POINT && ty != LightEmitter::LT_SPOT) continue;
+			const PointLight* pl = (const PointLight*)le;
+			const COLOUR4& cd = le->GetDiffuseColour();
+			float cmax = cd.r; if (cd.g > cmax) cmax = cd.g; if (cd.b > cmax) cmax = cd.b;
+			const float I0 = (float)le->GetIntensity() * cmax;
+			if (I0 <= 0.001f) continue;
+			const double* att = pl->GetAttenuation();
+			const double range = pl->GetRange();
+			const VECTOR3 lp = vp + mul(vR, le->GetPosition());
+			VECTOR3 ld = _V(0, 0, 1);
+			double cosU = -2.0, cosP = -2.0;
+			if (ty == LightEmitter::LT_SPOT) {
+				const SpotLight* sl = (const SpotLight*)le;
+				ld = unit(mul(vR, sl->GetDirection()));
+				cosU = cos(sl->GetUmbra() * 0.5);
+				cosP = cos(sl->GetPenumbra() * 0.5);
+			}
+			static const double PROBE[3] = { 2.0, 6.0, 14.0 };
+			for (int k = 0; k < 3; k++) {
+				const VECTOR3 P = cam + cdir * PROBE[k];
+				const VECTOR3 dv = P - lp;
+				const double d = length(dv);
+				if (d < 1e-3 || (range > 0.0 && d > range)) continue;
+				double f = 1.0 / (att[0] + att[1] * d + att[2] * d * d);
+				if (range > 0.0 && d > 0.8 * range) f *= (range - d) / (0.2 * range);
+				if (ty == LightEmitter::LT_SPOT) {
+					const double c = dotp(dv / d, ld);
+					if (c <= cosP) continue;
+					if (c < cosU && cosU > cosP) f *= (c - cosP) / (cosU - cosP);
+				}
+				const float L = I0 * (float)f;
+				if (L > best) best = L;
+			}
+		}
+		lightF += best * 0.6f;
+		if (lightF > 1.0f) lightF = 1.0f;
+	}
+
 	s_rn.hV        = v->GetHandle();
 	s_rn.vPos      = vp;
 	v->GetRotationMatrix(s_rn.vRot);
@@ -543,6 +611,7 @@ void OroModule::SenseRain()
 		s_rn.cloudAGL = (cAGL < 2500.0f) ? 2500.0f : cAGL;
 	}
 	s_rn.dayF      = dayF;
+	s_rn.lightF    = lightF;
 	s_rn.hRef      = hRef;
 	s_rn.pC        = pC;
 	s_rn.axis      = _V(prot.m12, prot.m22, prot.m32);   // planet +Y in global = spin axis
@@ -859,7 +928,13 @@ void OroModule::UpdateRainSound()
 
 	const float dt = (float)oapiGetSysStep();     // REAL time (invariant 4)
 	const float e  = clampf(rainIntensityLive, 0.0f, 1.0f);
-	const float uv = clampf(g_fx.rainSoundVol, 0.0f, 2.0f);
+	const float uv = clampf(g_fx.rainSoundVol, 0.0f, 2.0f);   // the OUTSIDE mix (RAIN page)
+	// THE CABIN HAS ITS OWN VOLUME (2026-09-06, his design): inside you hear the VIRTUAL
+	// COCKPIT page's Rain in cabin, and only that - the outside slider does not reach
+	// the seat, so a silent cabin in a storm you can still hear from outside is one
+	// slider at 0. Each family below carries its own volume now; `overall` is the
+	// envelope alone. At 1/1/1 the mix is bit-identical to before the split.
+	const float iv = clampf(g_fx.vcRainSound, 0.0f, 2.0f);   // the INSIDE mix (VC page)
 
 	// Crossfade weights over the envelope. They deliberately overlap (noise
 	// powers add as sqrt of squares, so the hand-off holds roughly constant
@@ -880,10 +955,10 @@ void OroModule::UpdateRainSound()
 	// behind them they read more distinct at the same volume, for free.
 	const bool  interior = !extGate;   // e > 0 while internal = the rainVC case
 	const bool  useIn    = interior && rainSndInLoaded;
-	const float exGain   = useIn ? 0.0f : (interior ? 0.45f : 1.0f);
+	const float exGain   = useIn ? 0.0f : (interior ? 0.45f * iv : uv);
 	// The _in files are levelled at 62% of the exterior RMS by the tool, so the
 	// runtime factor is nearly neutral - the FILES carry the muffle, this only trims.
-	const float inGain   = useIn ? 0.85f : 0.0f;
+	const float inGain   = useIn ? 0.85f * iv : 0.0f;
 	float tier[3];
 	tier[0] = 1.0f - sstep(0.30f, 0.65f, e);                          // light
 	tier[1] = sstep(0.12f, 0.45f, e) * (1.0f - sstep(0.60f, 0.92f, e)); // medium
@@ -893,15 +968,16 @@ void OroModule::UpdateRainSound()
 	// ⚠️ THE HULL LOOP CARRIES ITS OWN VOLUME (2026-08-25, a tester's ask). It is the
 	// one layer that is about the SHIP rather than the weather - some people want the
 	// storm without the drumming - and folding it into Rain sound meant the whole
-	// outside mix had to move to quiet it. Divided by the shared uv below so the knob
-	// is genuinely independent rather than multiplying the storm volume twice.
-	const float hv = (uv > 0.001f) ? clampf(g_fx.rainHullVol, 0.0f, 2.0f) / uv : 0.0f;
+	// outside mix had to move to quiet it. Its own volume outright since the 2026-09-06
+	// split (0..3 - his range; it lives on the VIRTUAL COCKPIT page now).
+	const float hv = clampf(g_fx.rainHullVol, 0.0f, 3.0f);
 	w[3] = interior ? (0.55f + 0.45f * sstep(0.10f, 0.60f, e)) * hv : 0.0f;   // hull taps
 
 	// ^0.7 so the patter is audibly present early in the build-up (a linear map
 	// leaves the first seconds inaudible); 0.65 is the designed full-storm
-	// volume at slider 1, leaving slider headroom up to XRSound's 1.0 cap.
-	const float overall = powf(e, 0.7f) * uv * 0.65f;
+	// volume at slider 1, leaving slider headroom up to XRSound's 1.0 cap. The
+	// volumes themselves ride the family gains above since the cabin split.
+	const float overall = powf(e, 0.7f) * 0.65f;
 
 	for (int i = 0; i < SND_RAIN_CH; i++) {
 		// channel -> XRSound id: 0-3 are the original set, 4-6 the interior twins
@@ -1083,6 +1159,29 @@ void OroModule::BuildRainGeometry()
 	const float I = s_rn.intensity;
 	if (I <= 0.002f) return;
 
+	// LIGHT ON THE RAIN (2026-09-05, his note: "the rain streak glow should also be
+	// dependent on the slider + the light"). The sky and the ship's own lamps were
+	// sensed (s_rn.lightF); the storm's flashes join here from the pure scheduler, so a
+	// flash lights the falling rain paused too and from the VC (the borrowed scene light
+	// is VIS_EXTERNAL). Floored just above zero so an unlit night keeps a hint that it
+	// is raining at all. Scales the sheet's streaks and the splash rings; the deck and
+	// the bolts have their own light.
+	float lightNow = s_rn.lightF;
+	{
+		const float lrate = clampf(g_fx.rainLtg, 0.0f, 2.0f)
+		                  * clampf((I - 0.2f) / 0.6f, 0.0f, 1.0f);
+		float fI = 0.0f;
+		for (int s2 = 0; s2 < 6 && lrate > 0.01f; s2++) {
+			RainLtgEv ev;
+			if (RainLtgFlash(animT, s2, lrate, &ev) > fI) fI = ev.I;
+		}
+		if (g_fx.boltTestSlot >= 0) {
+			const float ei = RainLtgTestEnv((float)(animT - boltTestT0));
+			if (ei > fI) fI = ei;
+		}
+		lightNow = clampf(lightNow + fI * 1.4f, 0.04f, 1.0f);
+	}
+
 	CamCtx cc;
 	if (!FillProjCam(cc.pos, cc.rot, cc.tanAp)) return;
 
@@ -1155,11 +1254,11 @@ void OroModule::BuildRainGeometry()
 	                float bx, float by, float bz, DWORD bc,
 	                float cx, float cy, float cz, DWORD ccol) {
 		if (rainVtxN + 3 > RAIN_MAX_TRI * 3) return;
-		rainVtx[rainVtxN].x = ax; rainVtx[rainVtxN].y = ay; rainVtx[rainVtxN].c = ac;
+		rainVtx[rainVtxN].x = ax; rainVtx[rainVtxN].y = ay; rainVtx[rainVtxN].c = FogColNear(ac, az);
 		rainDepth[rainVtxN] = az; rainVtxN++;
-		rainVtx[rainVtxN].x = bx; rainVtx[rainVtxN].y = by; rainVtx[rainVtxN].c = bc;
+		rainVtx[rainVtxN].x = bx; rainVtx[rainVtxN].y = by; rainVtx[rainVtxN].c = FogColNear(bc, bz);
 		rainDepth[rainVtxN] = bz; rainVtxN++;
-		rainVtx[rainVtxN].x = cx; rainVtx[rainVtxN].y = cy; rainVtx[rainVtxN].c = ccol;
+		rainVtx[rainVtxN].x = cx; rainVtx[rainVtxN].y = cy; rainVtx[rainVtxN].c = FogColNear(ccol, cz);
 		rainDepth[rainVtxN] = cz; rainVtxN++;
 	};
 	// the GROUND poly's emitter - the storm deck. Separate buffer, separate 65535
@@ -1168,13 +1267,19 @@ void OroModule::BuildRainGeometry()
 	                 float bx, float by, float bz, DWORD bc,
 	                 float cx, float cy, float cz, DWORD ccol) {
 		if (gndVtxN + 3 > RAIN_GND_TRI * 3) return;
-		gndVtx[gndVtxN].x = ax; gndVtx[gndVtxN].y = ay; gndVtx[gndVtxN].c = ac;
+		gndVtx[gndVtxN].x = ax; gndVtx[gndVtxN].y = ay; gndVtx[gndVtxN].c = FogColNearGround(ac, az);
 		gndDepth[gndVtxN] = az; gndVtxN++;
-		gndVtx[gndVtxN].x = bx; gndVtx[gndVtxN].y = by; gndVtx[gndVtxN].c = bc;
+		gndVtx[gndVtxN].x = bx; gndVtx[gndVtxN].y = by; gndVtx[gndVtxN].c = FogColNearGround(bc, bz);
 		gndDepth[gndVtxN] = bz; gndVtxN++;
-		gndVtx[gndVtxN].x = cx; gndVtx[gndVtxN].y = cy; gndVtx[gndVtxN].c = ccol;
+		gndVtx[gndVtxN].x = cx; gndVtx[gndVtxN].y = cy; gndVtx[gndVtxN].c = FogColNearGround(ccol, cz);
 		gndDepth[gndVtxN] = cz; gndVtxN++;
 	};
+	// ORO 2026-09-05 (client patch ab): TERRAIN WRITES THE DEPTH BUFFER NOW, and the rings
+	// lie ON the ground - a ring published at its true distance z-fights the tile it
+	// sits on at every bump and the pad's per-pixel clip eats it. Published 4% nearer:
+	// at 50 m that is 2 m of slack over the terrain mesh, and nothing else is ever
+	// within 4% of a ring's distance. The bolts' feet get the same treatment below.
+	const float RING_DEPTH_K = 0.96f;
 	// the SPLASH-RING emitters - one poly per field (the more-groups trick: the
 	// 65,535-vertex ceiling is per HPOLY, and LOD-by-screen-size makes a ring's cost
 	// camera-dependent, so each field gets its own generous cap).
@@ -1183,20 +1288,20 @@ void OroModule::BuildRainGeometry()
 	                    float cx, float cy, float cz, DWORD ccol) {
 		if (f == 0) {
 			if (ringCN + 3 > RAIN_RINGP_TRI * 3) return;
-			ringVtxC[ringCN].x = ax; ringVtxC[ringCN].y = ay; ringVtxC[ringCN].c = ac;
-			ringDepC[ringCN] = az; ringCN++;
-			ringVtxC[ringCN].x = bx; ringVtxC[ringCN].y = by; ringVtxC[ringCN].c = bc;
-			ringDepC[ringCN] = bz; ringCN++;
-			ringVtxC[ringCN].x = cx; ringVtxC[ringCN].y = cy; ringVtxC[ringCN].c = ccol;
-			ringDepC[ringCN] = cz; ringCN++;
+			ringVtxC[ringCN].x = ax; ringVtxC[ringCN].y = ay; ringVtxC[ringCN].c = FogColNear(ac, az);
+			ringDepC[ringCN] = az * RING_DEPTH_K; ringCN++;
+			ringVtxC[ringCN].x = bx; ringVtxC[ringCN].y = by; ringVtxC[ringCN].c = FogColNear(bc, bz);
+			ringDepC[ringCN] = bz * RING_DEPTH_K; ringCN++;
+			ringVtxC[ringCN].x = cx; ringVtxC[ringCN].y = cy; ringVtxC[ringCN].c = FogColNear(ccol, cz);
+			ringDepC[ringCN] = cz * RING_DEPTH_K; ringCN++;
 		} else {
 			if (ringVN + 3 > RAIN_RINGP_TRI * 3) return;
-			ringVtxV[ringVN].x = ax; ringVtxV[ringVN].y = ay; ringVtxV[ringVN].c = ac;
-			ringDepV[ringVN] = az; ringVN++;
-			ringVtxV[ringVN].x = bx; ringVtxV[ringVN].y = by; ringVtxV[ringVN].c = bc;
-			ringDepV[ringVN] = bz; ringVN++;
-			ringVtxV[ringVN].x = cx; ringVtxV[ringVN].y = cy; ringVtxV[ringVN].c = ccol;
-			ringDepV[ringVN] = cz; ringVN++;
+			ringVtxV[ringVN].x = ax; ringVtxV[ringVN].y = ay; ringVtxV[ringVN].c = FogColNear(ac, az);
+			ringDepV[ringVN] = az * RING_DEPTH_K; ringVN++;
+			ringVtxV[ringVN].x = bx; ringVtxV[ringVN].y = by; ringVtxV[ringVN].c = FogColNear(bc, bz);
+			ringDepV[ringVN] = bz * RING_DEPTH_K; ringVN++;
+			ringVtxV[ringVN].x = cx; ringVtxV[ringVN].y = cy; ringVtxV[ringVN].c = FogColNear(ccol, cz);
+			ringDepV[ringVN] = cz * RING_DEPTH_K; ringVN++;
 		}
 	};
 
@@ -1265,11 +1370,11 @@ void OroModule::BuildRainGeometry()
 			if (useTex) {
 				if (deckN + 3 > RAIN_GND_TRI * 3) return;
 				deckVtx[deckN].x = x1; deckVtx[deckN].y = y1; deckVtx[deckN].u = u1;
-				deckVtx[deckN].v = v1; deckVtx[deckN].c = c1; deckDepth[deckN] = d1; deckN++;
+				deckVtx[deckN].v = v1; deckVtx[deckN].c = FogColNearGround(c1, d1); deckDepth[deckN] = d1; deckN++;
 				deckVtx[deckN].x = x2; deckVtx[deckN].y = y2; deckVtx[deckN].u = u2;
-				deckVtx[deckN].v = v2; deckVtx[deckN].c = c2; deckDepth[deckN] = d2; deckN++;
+				deckVtx[deckN].v = v2; deckVtx[deckN].c = FogColNearGround(c2, d2); deckDepth[deckN] = d2; deckN++;
 				deckVtx[deckN].x = x3; deckVtx[deckN].y = y3; deckVtx[deckN].u = u3;
-				deckVtx[deckN].v = v3; deckVtx[deckN].c = c3; deckDepth[deckN] = d3; deckN++;
+				deckVtx[deckN].v = v3; deckVtx[deckN].c = FogColNearGround(c3, d3); deckDepth[deckN] = d3; deckN++;
 			} else {
 				emitG(x1, y1, d1, c1, x2, y2, d2, c2, x3, y3, d3, c3);
 			}
@@ -1497,11 +1602,11 @@ void OroModule::BuildRainGeometry()
 			                 float x3f, float y3f, float d3f, float uu3, float vv3) {
 				if (boltN + 3 > RAIN_BOLT_TRI * 3) return;
 				boltVtx[boltN].x = x1f; boltVtx[boltN].y = y1f; boltVtx[boltN].u = uu1;
-				boltVtx[boltN].v = vv1; boltVtx[boltN].c = boltCol; boltDepth[boltN] = d1f; boltN++;
+				boltVtx[boltN].v = vv1; boltVtx[boltN].c = FogColNearGround(boltCol, d1f); boltDepth[boltN] = d1f * 0.95f; boltN++;
 				boltVtx[boltN].x = x2f; boltVtx[boltN].y = y2f; boltVtx[boltN].u = uu2;
-				boltVtx[boltN].v = vv2; boltVtx[boltN].c = boltCol; boltDepth[boltN] = d2f; boltN++;
+				boltVtx[boltN].v = vv2; boltVtx[boltN].c = FogColNearGround(boltCol, d2f); boltDepth[boltN] = d2f * 0.95f; boltN++;
 				boltVtx[boltN].x = x3f; boltVtx[boltN].y = y3f; boltVtx[boltN].u = uu3;
-				boltVtx[boltN].v = vv3; boltVtx[boltN].c = boltCol; boltDepth[boltN] = d3f; boltN++;
+				boltVtx[boltN].v = vv3; boltVtx[boltN].c = FogColNearGround(boltCol, d3f); boltDepth[boltN] = d3f * 0.95f; boltN++;   // (ab): the foot on the ground
 			};
 			// FIVE PASSES (round 4 - the WIDENED copies fanned apart, because a
 			// leaning bolt's filament sits off-centre in its slot, and scaling the
@@ -1744,7 +1849,7 @@ void OroModule::BuildRainGeometry()
 			const float uf = (u < 0.10f) ? u * 10.0f
 			               : ((u > 0.90f) ? (1.0f - u) * 10.0f : 1.0f);
 
-			const float A = 190.0f * I * LAY[L].alpha * glowK * uf * vpMask;
+			const float A = 190.0f * I * LAY[L].alpha * glowK * lightNow * uf * vpMask;   // lightNow: the light on the rain
 			if (A < 1.5f) continue;
 
 			// Rain reads LIGHT against a dark sky and merely grey against a bright one,
@@ -1940,7 +2045,7 @@ void OroModule::BuildRainGeometry()
 			else                 { NSEG = 3; NB = 2; }
 
 			const float a = powf(1.0f - tt, 1.6f) * 150.0f * I * sizeF
-			              * clampf(g_fx.rainPuddle, 0.0f, 2.0f);
+			              * clampf(g_fx.rainPuddle, 0.0f, 2.0f) * lightNow;   // unlit ground shows no rings
 			if (a < 2.0f) continue;
 
 			// ⚠️ A SPLASH IS A CONTRAST FEATURE, NOT A BRIGHT ONE - round 2, and the first

@@ -117,7 +117,9 @@ enum {
 	// LEAF pages - one subject each, plus its scoped SAVE/REVERT row.
 	PG_GFORCES, PG_SCENARIOS, PG_VC,                                  // PILOT
 	PG_EXHAUST, PG_PARTICLES, PG_PLASMA, PG_VAPOUR, PG_FLIGHTAID,     // VESSEL
-	PG_RAIN, PG_LIGHTNING, PG_AURORA, PG_ECLIPSE, PG_GODRAYS,         // WORLD
+	PG_RAIN, PG_LIGHTNING, PG_AURORA, PG_ECLIPSE, PG_GODRAYS, PG_FOG, // WORLD (FOG 2026-09-05)
+	PG_RAINSURF,   // the RAINSURFACES popup (2026-09-01) - reached from the RAIN page's
+	               // windscreen group, not from any menu. APPENDED, never inserted.
 	PG_COUNT
 };
 static const char* PageName(int pg)
@@ -126,11 +128,16 @@ static const char* PageName(int pg)
 		"MAIN MENU", "WORLD", "WEATHER", "VESSEL", "THRUSTERS", "REENTRY", "PILOT",
 		"G-FORCES", "SCENARIOS", "VIRTUAL COCKPIT",
 		"EXHAUST", "PARTICLES", "PLASMA", "VAPOUR CONES", "FLIGHT AID",
-		"RAIN", "LIGHTNING", "AURORA", "ECLIPSE", "GOD RAYS"
+		"RAIN", "LIGHTNING", "AURORA", "ECLIPSE", "GOD RAYS", "FOG",
+		"RAINSURFACES"
 	};
 	return (pg >= 0 && pg < PG_COUNT) ? n[pg] : n[0];
 }
 static bool IsMenuPage(int pg)    { return pg <= PG_PILOT; }
+// The RAINSURFACES popup is the one leaf WITHOUT the standard SAVE/REVERT chrome:
+// its SAVE writes Config\ORO\VesselsRainSurfaces.cfg, which is none of the three
+// scopes, so the fixed leaf-save row would be a claim about files it never touches.
+static bool PageHasLeafSave(int pg) { return !IsMenuPage(pg) && pg != PG_RAINSURF; }
 // The engine-group cycler heads EXHAUST and PARTICLES as a FIXED row: it changes
 // what every control on those pages MEANS, so it may not scroll out of reach
 // (the reason it used to live in the ARMED strip, kept under its new roof).
@@ -164,7 +171,7 @@ static const MenuItem MENU_MAIN[] = {
 	{ "PILOT",  "the human - g-forces, scenarios, virtual cockpit",     PG_PILOT  },
 };
 static const MenuItem MENU_WORLD[] = {
-	{ "WEATHER",  "rain + lightning; snow and the weather model later", PG_WEATHER },
+	{ "WEATHER",  "rain, fog + lightning; snow and the model later",    PG_WEATHER },
 	{ "AURORA",   "curtains at the magnetic poles",                     PG_AURORA  },
 	{ "ECLIPSE",  "the eye inside another body's shadow",               PG_ECLIPSE },
 	{ "GOD RAYS", "shafts through the air",                             PG_GODRAYS },
@@ -172,6 +179,7 @@ static const MenuItem MENU_WORLD[] = {
 static const MenuItem MENU_WEATHER[] = {
 	{ "RAIN",          "the storm - outside, windscreen, sounds",       PG_RAIN      },
 	{ "LIGHTNING",     "from orbit + inside the storm, with thunder",   PG_LIGHTNING },
+	{ "FOG",           "ground fog; the storm's mist rides the rain",   PG_FOG       },
 	{ "SNOW",          "coming soon",                                   -1           },
 	{ "WEATHER MODEL", "coming soon",                                   -1           },
 };
@@ -213,6 +221,7 @@ static int      g_dragMot = -1;           // index of the MOTION row slider bein
 static int      g_dragShake = -1;         // index of the CAM-SHAKE slider being dragged, -1 = none
 static int      g_dragEnv = -1;           // index of the WORLD row slider being dragged, -1 = none
 static int      g_dragEnvK = -1;          // index of the WORLD bipolar knob being dragged, -1 = none
+static int      g_dragShim = -1;          // SHIMMER wave slider: 0 Wavelength, 1 Frequency, -1 = none
 static int      g_dragPlume = -1;         // index of the PLUME EXPANSION slider being dragged, -1 = none
 static int      g_dragPlmBand = -1;       // EXPANSION BAND dual-slider handle: -1 none, 0 = LOW, 1 = HIGH
 static int      g_dragBgl = -1;           // BELL GLOW trim slider being dragged (0 = active), -1 = none
@@ -225,9 +234,12 @@ static int      g_dragAurK = -1;          // AURORA bipolar tilt knob being drag
 static int      g_dragLtg  = -1;          // LIGHTNING slider being dragged, -1 = none
 static int      g_dragGry  = -1;          // GOD RAYS slider being dragged, -1 = none
 static int      g_dragRain = -1;          // RAIN slider being dragged, -1 = none
+static int      g_dragFog  = -1;          // FOG slider being dragged, -1 = none (2026-09-05)
+static int      g_dragBlg  = -1;          // BASE LIGHTS glow slider (RAIN and FOG pages), -1 = none
 static int      g_dragRlt  = -1;          // STORM-LIGHTNING slider (LIGHTNING page's
                                           // in-the-storm group) being dragged, -1 = none
-static int      g_dragVcs  = -1;          // VC SHADOWS cabin-box slider being dragged, -1 = none
+static int      g_dragVcs  = -1;          // VC page slider being dragged: 0 cabin box, 1 depth, 2 night floor,
+                                          //   3 weather dim, 4 rain in cabin, 5 hull drum; -1 = none
 static int      g_dragVap  = -1;          // VAPOUR cone-1 slider being dragged, -1 = none
 static int      g_dragVap2 = -1;          // VAPOUR cone-2 slider being dragged, -1 = none
 static int      g_dragVapP = -1;          // VAPOUR apex knobs: -1 none; 1/2 = cone 1/2
@@ -288,11 +300,13 @@ static int      g_lastSavedH = 0;         // client height last written to windo
                                           // window MOVE (which also ends in WM_EXITSIZEMOVE)
                                           // does not rewrite the file for nothing
 
+static void OroHelp_Follow();             // fwd: page-push sites live above the help code
+
 static void ClearDrags()
 {
-	g_dragRow = g_dragMot = g_dragShake = g_dragEnv = g_dragEnvK = g_dragPlume = g_dragPlmBand
+	g_dragRow = g_dragMot = g_dragShake = g_dragEnv = g_dragEnvK = g_dragShim = g_dragPlume = g_dragPlmBand
 	          = g_dragBgl = g_dragPrt = g_dragPlas = g_dragEcl = g_dragAur = g_dragAurRib = g_dragAurK
-	          = g_dragLtg = g_dragGry = g_dragRain = g_dragRlt = g_dragVcs = g_dragVap = g_dragVap2
+	          = g_dragLtg = g_dragGry = g_dragRain = g_dragFog = g_dragBlg = g_dragRlt = g_dragVcs = g_dragVap = g_dragVap2
 	          = g_dragVapP = g_dragVapR = g_dragVapBand = g_dragVapBand2 = g_dragTol = g_dragCop = g_dragBar = -1;
 }
 
@@ -380,18 +394,41 @@ static const int NSHAKE = (int)(sizeof(g_shakeRows) / sizeof(g_shakeRows[0]));
 // (no driver column either: these never read zero-because-the-model-is-idle, so there is
 //  nothing for the PHYSICS readout to explain.)
 static FxRow g_envRows[] = {
-	{ "Exhaust shimmer", &g_fx.shimmerEnabled, &g_fx.shimmer, &g_fx.shimmer, NULL },
+	{ "Shimmer amplitude", &g_fx.shimmerEnabled, &g_fx.shimmer, &g_fx.shimmer, NULL },
+	                                          // was "Exhaust shimmer" until 2026-09-04:
+	                                          //   the slider always WAS the wave amplitude,
+	                                          //   and once Wavelength/Frequency got rows the
+	                                          //   honest set of names was his call. The pill
+	                                          //   is still the shimmer's enable.
 	{ "Reentry plasma",  &g_fx.reentryEnabled, &g_fx.reentry, &g_fx.reentry, NULL },
 	{ "Plume expansion", &g_fx.plumeEnabled,   &g_fx.plume,   &g_fx.plume,   NULL },
 };
 static const int NENV = (int)(sizeof(g_envRows) / sizeof(g_envRows[0]));
 
 // WORLD tuning knobs - refine the row(s) above, so no pill of their own (same idea
-// as the CAM-SHAKE sliders). These are BIPOLAR: the track maps 0..1 -> -vmax..+vmax with
-// ZERO AT CENTRE, the fill is drawn from the centre outward and a tick marks zero.
-struct EnvKnob { const char* label; float* value; float vmax; };
+// as the CAM-SHAKE sliders). BIPOLAR, and since 2026-09-04 the range is vmin..vmax
+// with the zero tick anchored at TRUE zero (DrawBipolar's zeroFrac), because the one
+// knob in this table is asymmetric now.
+struct EnvKnob { const char* label; float* value; float vmax; float vmin; };
 static EnvKnob g_envKnobs[] = {
-	{ "Offset (m)", &g_fx.shimmerOfs, 1.0f },
+	{ "Offset (m)", &g_fx.shimmerOfs, 10.0f, -2.0f },
+	                                             // +/-1 until 2026-09-04 - "cramped,
+	                                             //   especially on fictional large
+	                                             //   vessels" (his words). METRES kept
+	                                             //   over hull-relative deliberately:
+	                                             //   the error this corrects is a mesh
+	                                             //   authoring fact in metres, per-class
+	                                             //   saving already isolates hull scale,
+	                                             //   and an inherited RELATIVE offset on
+	                                             //   an untuned giant would be a 100 m
+	                                             //   shift reading as a bug.
+	                                             // ASYMMETRIC (-2..+10, his call): the
+	                                             //   spec-vs-visual-nozzle error needing
+	                                             //   a NEGATIVE fix is a metre or two;
+	                                             //   further upstream the depth-less
+	                                             //   warp sits over the HULL and ripples
+	                                             //   the ship itself (the facing-fade's
+	                                             //   own failure mode, handed to a knob).
 };
 static const int NENVK = (int)(sizeof(g_envKnobs) / sizeof(g_envKnobs[0]));
 
@@ -470,12 +507,32 @@ static PlasRow g_plumeRows[] = {
 	{ "Length",         &g_fx.plumeLen,      3.0f, 2 },  //   ours replaces stock, so the
 	                                                     //   overlay owns the jet's shape
 	                                                     //   (per hull, like Shell dist)
-	{ "Diamonds",       &g_fx.plumeCells,   12.0f, 0, 1.0f },  // COUNT of discs (1..12,
+	{ "Diamonds",       &g_fx.plumeCells,   12.0f, 0 },  // COUNT of discs (0..12,
 	                                                     //   integer readout; spacing
-	                                                     //   moves them, this adds them)
+	                                                     //   moves them, this adds them;
+	                                                     //   0 = NO diamonds - floor
+	                                                     //   dropped 2026-09-04)
 	{ "Diamond bright", &g_fx.plumeDiamond,  2.0f, 2 },  // Mach-disc peak brightness
 	{ "Diamond spacing",&g_fx.plumeSpacing,  3.0f, 2 },  // shock-cell length, x2 nozzle
 	                                                     //   widths at 1.0
+	{ "Diamond shape",  &g_fx.plumeDiaShape, 1.0f, 2, -1.0f }, // BIPOLAR (his spec): -1 =
+	                                                     //   half diamond, base facing the
+	                                                     //   BELL (the RS-25 first cell);
+	                                                     //   0 = the classic full diamond
+	                                                     //   (pre-knob look, bit-exact);
+	                                                     //   +1 = the mirrored half
+	{ "Diamond length", &g_fx.plumeDiaLen,   2.0f, 2 },  // x axial extent about the
+	                                                     //   shape knob's peak; 1 = tips
+	                                                     //   AT the discs, low = pure
+	                                                     //   Mach discs, high spills into
+	                                                     //   the flanking cells (MAX'd)
+	{ "Diamond width",  &g_fx.plumeDiaSize,  2.0f, 2 },  // x lozenge radial width (the
+	                                                     //   KEY is still PlumeDiaSize -
+	                                                     //   it predates the split)
+	{ "Diamond offset", &g_fx.plumeDiaOfs,   5.0f, 1, -2.0f }, // METRES (his spec, -2..+5):
+	                                                     //   slides the whole train -
+	                                                     //   negative = toward the bell,
+	                                                     //   positive = downstream
 	{ "Bloom width",    &g_fx.plumeBloomWid, 2.0f, 2 },  // vacuum opening half-angle
 	{ "Bloom bright",   &g_fx.plumeBloomBri, 2.0f, 2 },  // vacuum halo brightness
 	{ "Throat glow",    &g_fx.plumeThroat,   4.0f, 2 },  // the fire inside the bell cup
@@ -489,6 +546,20 @@ static PlasRow g_plumeRows[] = {
 	                                                     //   3 = frantic shedding
 };
 static const int NPLM = (int)(sizeof(g_plumeRows) / sizeof(g_plumeRows[0]));
+
+// SHIMMER WAVE TEXTURE (2026-09-04, his spec: Wavelength / Amplitude / Frequency -
+// "Frequency is the most honest fitting name" beside the other two, overriding the
+// panel's churn convention). Amplitude is the pill row's own slider, relabelled;
+// these are the other two wave parameters, hardcoded lab constants until today.
+// Both default to 1 = the 2026-07-30 look bit for bit; Frequency 0 freezes the
+// pattern (the Soot-churn behaviour, whatever the label says).
+static PlasRow g_shimRows[] = {
+	{ "Wavelength",  &g_fx.shimmerWave, 4.0f, 2, 0.25f },  // x spatial scale of the ripples
+	                                                       //   (along-plume + cross together;
+	                                                       //   octave ratios preserved)
+	{ "Frequency",   &g_fx.shimmerFreq, 3.0f, 2 },         // x temporal churn; 0 = frozen
+};
+static const int NSHIM = (int)(sizeof(g_shimRows) / sizeof(g_shimRows[0]));
 
 // EXHAUST PARTICLES (the THRUSTER tab's PARTICLES sub-tab, 2026-08-09). These are
 // PARTICLESTREAMSPEC's own fields in PARTICLESTREAMSPEC's own units - not
@@ -653,14 +724,17 @@ static PlasRow g_rainRows[] = {
 	                                               // 1 = ignore the depth mask,
 	                                               // 2 = show the mask (green=window,
 	                                               //     blue=interior, plain=nothing)
-	// (the Rain view cycler rides this group too, drawn after the last row)
+	// (the Rain view cycler AND the RAINSURFACES button ride this group too,
+	//  drawn after the last row - RainRowY opens TWO extra rows before SOUNDS)
 	// --- group 2: SOUNDS --------------------------------------------------------
 	{ "Rain sound", &g_fx.rainSoundVol,2.0f, 2 },  // the three generated loops crossfading
 	                                               // with the envelope; 0 = silent (the
-	                                               // opt-out - no pill, 17b's law)
-	{ "Hull drum",  &g_fx.rainHullVol, 2.0f, 2 },  // the fourth loop - drops on the skin,
-	                                               // INTERIOR ONLY; its own volume since
-	                                               // 2026-08-25 (a tester's ask)
+	                                               // opt-out - no pill, 17b's law). THE
+	                                               // OUTSIDE mix since 2026-09-06: the
+	                                               // cabin has its own on the VIRTUAL
+	                                               // COCKPIT page, with the Hull drum
+	                                               // (moved there the same day - both are
+	                                               // about the HULL, the VC block's law)
 };
 static const int NRAIN = (int)(sizeof(g_rainRows) / sizeof(g_rainRows[0]));
 static const int RAIN_EXT_N = 18;   // rows in THE STORM OUTSIDE
@@ -680,6 +754,20 @@ static PlasRow g_rltRows[] = {
 	                                               // each flash's own distance; 0 = silent
 };
 static const int NRLT = (int)(sizeof(g_rltRows) / sizeof(g_rltRows[0]));
+
+// FOG (2026-09-05, client patch aa) - the FOG leaf under WEATHER. ORO draws none of it
+// (OroFog.cpp): the page is the event, layer 0's shape, and two taste gains; the client
+// owns the colour. Visibility and top are in METRES with integer readouts (dec 0 snaps
+// the store, the rain table's convention); the storm's mist is layer 1 and rides the
+// RAIN page's Gloom - no row here.
+static PlasRow g_fogRows[] = {
+	{ "Visibility (m)", &g_fx.fogVis,    3000.0f, 0, 20.0f },  // how far you see at ground level
+	{ "Fog top (m)",    &g_fx.fogTop,    1500.0f, 0, 20.0f },  // the layer's thickness over the ground
+	{ "Fade",           &g_fx.fogFade,      2.0f, 2 },         // 0 = a hard ceiling, 2 = wispy
+	{ "Brightness",     &g_fx.fogBright,    2.0f, 2 },         // x the lit fog colour (client's own)
+	{ "Sun glow",       &g_fx.fogGlow,      2.0f, 2 },         // x the forward-scatter lobe
+};
+static const int NFOG = (int)(sizeof(g_fogRows) / sizeof(g_fogRows[0]));
 
 // THE VAPOUR CONE - transonic condensation. TWO unit sliders and one bipolar knob, and
 // the short list is the design rather than an omission: the shroud's LENGTH is not here
@@ -729,6 +817,13 @@ static PlasRow g_vapRows2[] = {
 // Pitch/Yaw are the axis tilt, degrees, his spec: -30..+30, default 0 (the middle).
 static const float VAP_POS_MAX = 2.0f;
 static const float VAP_ROT_MAX = 30.0f;
+// BASE FILL OFFSET (2026-09-04, promised to Buck Rogers on the thread): the cap's
+// centre displaced axially as a fraction of the cone's own reach. -1 = pushed fully
+// in (an inner second face of the cone), 0 = the flat disc, +0.5 = bulged outward -
+// the positive side capped by design ("maybe we cap the offset at +0.5"). Asymmetric,
+// so every consumer computes the zero anchor (the diamond-offset rule).
+static const float VAP_BOFS_LO = -1.0f;
+static const float VAP_BOFS_HI =  0.5f;
 
 // THE MACH BAND dual slider (his design, round 3). Track fraction <-> Mach over
 // [0.5 .. 1.5]: the handles are where the shroud starts and stops existing, so the window
@@ -850,8 +945,8 @@ static const int LEAFSAVE_H = 34;
 static int ContentY()
 {
 	int y = PANE_Y + NAV_H;
-	if (PageHasGrpRow(CurPage())) y += THRGRP_H;
-	if (!IsMenuPage(CurPage()))   y += LEAFSAVE_H;
+	if (PageHasGrpRow(CurPage()))   y += THRGRP_H;
+	if (PageHasLeafSave(CurPage())) y += LEAFSAVE_H;
 	return y;
 }
 static int LeafSaveY()                                    // FIXED save row centreline
@@ -929,8 +1024,11 @@ static int ThrHdrY()      { return LeafTopY(); }                           // ca
 static int ThrRowY()      { return ThrHdrY() + 34; }                       // shimmer row centreline
 static int ThrCapY()      { return ThrRowY() + 11; }                       // caption text top
 static int ThrOfsY()      { return ThrCapY() + 24; }                       // offset knob centreline
+static int ThrWavY(int i) { return ThrOfsY() + ROW_DY + i * ROW_DY; }      // wave rows (2026-09-04)
 // PLUME EXPANSION (2026-08-09) - replaced the "more to come" caption it was promised in.
-static int PlmHdrY()      { return ThrOfsY() + 30; }                       // section caption top
+static int PlmHdrY()      { return ThrWavY(NSHIM - 1) + 30; }              // section caption top
+                                                                           //   (chained through the
+                                                                           //   wave rows - 13b's law)
 static int PlmRowY()      { return PlmHdrY() + 34; }                       // pill + master slider
 static int PlmCapY()      { return PlmRowY() + 11; }                       // regime readout caption
 static int PlmCopyY()     { return PlmCapY() + 24; }                       // COPY STOCK row (stock-flame preset)
@@ -1049,9 +1147,10 @@ static int VapC1CapY()    { return VapPillY() + 22; }                      // "C
 static int VapRowY(int i) { return VapC1CapY() + 26 + i * ROW_DY; }        // cone-1 slider centreline
 static int VapColY()      { return VapRowY(NVAP - 1) + ROW_DY; }           // cone-1 swatch pair
 static int VapBaseY()     { return VapColY() + ROW_DY; }                   // cone-1 Base fill pill
+static int VapBOfsY()     { return VapBaseY() + ROW_DY; }                  // cone-1 Base fill offset
 // FULL PLACEMENT (2026-08-30, his fix round): Position x/y above the renamed
 // Position z, in Orbiter's x-y-z order, then Pitch/Yaw. All bipolar knobs.
-static int VapPosXY()     { return VapBaseY() + ROW_DY; }                  // cone-1 apex x
+static int VapPosXY()     { return VapBOfsY() + ROW_DY; }                  // cone-1 apex x
 static int VapPosYY()     { return VapPosXY() + ROW_DY; }                  // cone-1 apex y
 static int VapPosY()      { return VapPosYY() + ROW_DY; }                  // cone-1 apex z (the old knob)
 static int VapPitchY()    { return VapPosY() + ROW_DY; }                   // cone-1 axis pitch
@@ -1062,7 +1161,8 @@ static int VapC2CapY()    { return VapBandY() + ROW_DY + 6; }              // "C
 static int VapRow2Y(int i){ return VapC2CapY() + 26 + i * ROW_DY; }        // cone-2 slider centreline
 static int VapCol2Y()     { return VapRow2Y(NVAP - 1) + ROW_DY; }          // cone-2 swatch pair
 static int VapBase2Y()    { return VapCol2Y() + ROW_DY; }                  // cone-2 Base fill pill
-static int VapPosX2Y()    { return VapBase2Y() + ROW_DY; }                 // cone-2 apex x
+static int VapBOfs2Y()    { return VapBase2Y() + ROW_DY; }                 // cone-2 Base fill offset
+static int VapPosX2Y()    { return VapBOfs2Y() + ROW_DY; }                 // cone-2 apex x
 static int VapPosY2Y()    { return VapPosX2Y() + ROW_DY; }                 // cone-2 apex y
 static int VapPos2Y()     { return VapPosY2Y() + ROW_DY; }                 // cone-2 apex z (the old knob)
 static int VapPitch2Y()   { return VapPos2Y() + ROW_DY; }                  // cone-2 axis pitch
@@ -1133,13 +1233,114 @@ static int RainRowY(int i)
 {
 	int y = RainPillY() + 24 + RAIN_GRP + i * ROW_DY;         // group-0 caption above row 0
 	if (i >= RAIN_EXT_N)              y += RAIN_GRP;           // THE WINDSCREEN caption
-	if (i >= RAIN_EXT_N + RAIN_INT_N) y += RAIN_GRP + ROW_DY;  // SOUNDS caption + the view row
+	if (i >= RAIN_EXT_N + RAIN_INT_N) y += RAIN_GRP + ROW_DY * 2;  // SOUNDS caption + the view
+	                                                           // + RAINSURFACES rows
 	return y;
 }
 static int RainViewY()    { return RainRowY(RAIN_EXT_N + RAIN_INT_N - 1) + ROW_DY; } // view cycler
+static int RainSurfY()    { return RainViewY() + ROW_DY; }                 // RAINSURFACES button
                                                                            // (closes the VC group)
 static int RainWhyY()     { return RainRowY(NRAIN - 1) + ROW_DY + 2; }     // state readout
-static int RainBottom()   { return RainWhyY() + 24; }
+// BASE LIGHTS (patch ac): the same two rows close the RAIN and the FOG page - one
+// setting, two doors (his spec: low visibility is when an airfield lights up).
+static int RainBlY()      { return RainWhyY() + ROW_DY + 10; }             // Base lights pill
+static int RainGlowY()    { return RainBlY() + ROW_DY; }                   // Lights glow slider
+static int RainHaloY()    { return RainGlowY() + ROW_DY; }                 // Lights halo slider
+static int RainBottom()   { return RainHaloY() + 24; }
+
+// ===== LEAF: FOG (WORLD > WEATHER, 2026-09-05) ==============================
+static int FogHdrY()      { return LeafTopY(); }                           // caption text top
+static int FogPillY()     { return FogHdrY() + 32; }                       // pill + Test centreline
+static int FogRowY(int i) { return FogPillY() + 24 + i * ROW_DY; }         // slider centreline
+static int FogWhyY()      { return FogRowY(NFOG - 1) + ROW_DY + 2; }       // state readout
+static int FogBlY()       { return FogWhyY() + ROW_DY + 10; }              // Base lights pill (patch ac)
+static int FogGlowY()     { return FogBlY() + ROW_DY; }                    // Lights glow slider
+static int FogHaloY()     { return FogGlowY() + ROW_DY; }                  // Lights halo slider
+static int FogBottom()    { return FogHaloY() + 24; }
+
+// ===== LEAF: RAINSURFACES (2026-09-01, his spec) - the popup inside the panel =
+// Declares which VC mesh groups accept the windscreen drops WITHOUT editing the
+// mesh: one line per entry (mesh name + group index) in
+// Config\ORO\VesselsRainSurfaces.cfg, which the patched client's rain-glass scan
+// reads BESIDE the in-mesh RAIN 1 tokens (client patch (h) part 3). This is also
+// the shipping answer for stock ships - stock meshes are NEVER shipped (his ruling
+// 2026-08-31), but an ORO-owned cfg line is.
+// ADD borrows the Debug dialog's pick: GENERICPROC_PICK_VESSEL is a STOCK gcCore
+// slot - while a proc is registered the client runs its own scene pick (VC meshes
+// included) on every left click and calls back with mesh + group. The pick is
+// armed only while ADD is amber, so ordinary clicking costs nothing, and it only
+// works in VC view (his spec; enforced at arm time AND in the delivery).
+// A "popup" as a nav-stack leaf rather than a Windows popup - his words: "a
+// 'popup' inside the ORO dialog box". The pane's own scroll IS the scroll list.
+#define RS_MAX 96
+static struct { char mesh[192]; int grp; } g_rsList[RS_MAX];
+static int  g_rsN        = -1;      // -1 = cfg not read yet this dialog lifetime
+static bool g_rsAddArmed = false;   // ADD amber - the next sim click declares a group
+static bool g_rsRemArmed = false;   // REMOVE amber - the next LIST click picks a victim
+static int  g_rsConfirm  = -1;      // list index awaiting the Y/N answer
+static bool g_rsUnsaved  = false;   // SAVE amber - the list differs from the file
+static char g_rsMsg[160] = "";      // the message line at the bottom of the popup
+
+static const char* RS_CFG = "Config\\ORO\\VesselsRainSurfaces.cfg";
+
+// Parse mirrors the client's RainCfgMerge exactly (same sscanf, same bounds), so
+// what this page saves is what the client will read - no second grammar.
+static void RsLoad()
+{
+	if (g_rsN >= 0) return;             // once per dialog lifetime; SAVE keeps memory == disk
+	g_rsN = 0;
+	FILE* f = NULL;
+	if (fopen_s(&f, RS_CFG, "rt") == 0 && f) {
+		char ln[300];
+		while (fgets(ln, sizeof(ln), f) && g_rsN < RS_MAX) {
+			if (ln[0] == ';' || ln[0] == '\r' || ln[0] == '\n' || ln[0] == 0) continue;
+			char name[192]; int g = -1;
+			if (sscanf_s(ln, "%191s %d", name, (unsigned)_countof(name), &g) == 2
+			    && g >= 0 && g <= 0xFFFF) {
+				strcpy_s(g_rsList[g_rsN].mesh, name);
+				g_rsList[g_rsN].grp = g;
+				g_rsN++;
+			}
+		}
+		fclose(f);
+	}
+}
+
+static bool RsSave()
+{
+	FILE* f = NULL;
+	if (fopen_s(&f, RS_CFG, "wt") != 0 || !f) return false;
+	fprintf(f, "; ORO - mesh groups that accept rain drops on the glass, declared OUTSIDE the mesh.\n");
+	fprintf(f, "; One per line: <mesh name as the client loads it> <group index>. No spaces in names.\n");
+	fprintf(f, "; Written by WORLD / WEATHER / RAIN / RAINSURFACES; the in-mesh RAIN 1 token still works.\n");
+	fprintf(f, "; SAVE applies live on the ORO-patched client; otherwise a scenario (re)load picks it up.\n");
+	for (int i = 0; i < g_rsN; i++) fprintf(f, "%s %d\n", g_rsList[i].mesh, g_rsList[i].grp);
+	fclose(f);
+	return true;
+}
+
+// Layout - document coordinates like every leaf; the header, the list, then the
+// four-button row and the message line under it.
+static int RsHdrY()       { return LeafTopY(); }
+static int RsListY(int i) { return RsHdrY() + 48 + i * ROW_DY; }
+static int RsRows()       { return g_rsN > 0 ? g_rsN : 1; }        // "None" still takes a row
+static int RsBtnY()       { return RsListY(RsRows()) + 10; }       // ADD/REMOVE/SAVE/BACK centreline
+static int RsMsgY()       { return RsBtnY() + ROW_DY + 2; }        // message / Y-N line
+static int RsurfBottom()  { return RsMsgY() + 30; }
+static RECT RsBtnRect(const RECT& rc, int i)   // 0 ADD, 1 REMOVE, 2 SAVE, 3 BACK
+{
+	const int x0 = 16, gap = 10;
+	const int w = (rc.right - 16 - x0 - 3 * gap) / 4;
+	RECT r = { x0 + i * (w + gap), RsBtnY() - 11, x0 + i * (w + gap) + w, RsBtnY() + 11 };
+	return r;
+}
+static RECT RsYesNoRect(const RECT& rc, int i) // 0 = YES, 1 = NO, right-aligned pair
+{
+	const int w = 56, gap = 8;
+	const int right = rc.right - 16 - (1 - i) * (w + gap);
+	RECT r = { right - w, RsMsgY() - 11, right, RsMsgY() + 11 };
+	return r;
+}
 
 // ===== LEAF: VIRTUAL COCKPIT (PILOT) - shadows + cam-shake =================
 // ⚠️ ONE leaf, deliberately, and its SAVE TARGET sits ABOVE the first section, not
@@ -1156,7 +1357,22 @@ static int VcsRadY()      { return VcsPillY() + 24; }                      // ra
 // ambient and emissive - the floor that makes VC shadows read as a grey smudge.
 static int VcsDepY()      { return VcsRadY() + ROW_DY; }                   // depth slider centreline
 static int VcsCapY()      { return VcsDepY() + 12; }                       // caption text top
-static int CamShakeTop()  { return VcsCapY() + 30; }                       // subsection header centreline
+// THE CABIN AT NIGHT (patch ad, 2026-09-05): its own small section between the shadows
+// and the shake - pill + the night floor. Everything below shifts by construction (13b).
+static int VcnHdrY()      { return VcsCapY() + 30; }                       // section header
+static int VcnPillY()     { return VcnHdrY() + 32; }                       // pill centreline
+static int VcnFlrY()      { return VcnPillY() + 24; }                      // night floor slider centreline
+static int VcnWxPillY()   { return VcnFlrY() + 24; }                       // WEATHER DIM pill centreline
+static int VcnWxY()       { return VcnWxPillY() + 24; }                    // weather dim slider centreline
+static int VcnCapY()      { return VcnWxY() + 12; }                        // caption text top
+// CABIN SOUNDS (2026-09-06, his design): the storm as heard from the seat - the cabin's
+// own rain volume (independent of the RAIN page's outside mix) and the hull drum, moved
+// here from the RAIN page because both are about the HULL, not the weather.
+static int VcSndHdrY()    { return VcnCapY() + 30; }                       // section header
+static int VcSndRainY()   { return VcSndHdrY() + 30; }                     // Rain in cabin slider centreline
+static int VcSndHullY()   { return VcSndRainY() + ROW_DY; }                // Hull drum slider centreline
+static int VcSndCapY()    { return VcSndHullY() + 12; }                    // caption text top
+static int CamShakeTop()  { return VcSndCapY() + 30; }                     // subsection header centreline
 static int ShakeRowY(int i){ return CamShakeTop() + 16 + i * ROW_DY; }
 static int MotCapY()      { return ShakeRowY(NSHAKE - 1) + 14; }           // caption text top
 static int VcBottom()     { return MotCapY() + 36; }                       // two caption lines
@@ -1173,6 +1389,8 @@ static int ContentBottom(){
 	case PG_VAPOUR:    return VapourBottom();
 	case PG_FLIGHTAID: return AidBottom();
 	case PG_RAIN:      return RainBottom();
+	case PG_FOG:       return FogBottom();
+	case PG_RAINSURF:  return RsurfBottom();
 	case PG_LIGHTNING: return LightningBottom();
 	case PG_AURORA:    return AuroraBottom();
 	case PG_ECLIPSE:   return EclipseBottom();
@@ -1499,6 +1717,18 @@ static float EnvKnobValueFromX(const RECT& rc, int x, float vmax)
 	return (v > -0.03f * vmax && v < 0.03f * vmax) ? 0.0f : v;
 }
 
+// ASYMMETRIC bipolar variant (2026-09-04, the shimmer Offset's -2..+10): vmin..vmax
+// linear, zero wherever it truly falls on the track (paired with DrawBipolar's
+// zeroFrac so the tick cannot lie), and the same snap-to-exact-zero so 0 stays
+// reachable by dragging near the tick - his "minding that 0 offset bug" note.
+// The symmetric callers above keep the +/-vmax form; do not fold them together.
+static float EnvKnobValueFromXA(const RECT& rc, int x, float vmin, float vmax)
+{
+	const float v    = vmin + TrackValueFromX(rc, x) * (vmax - vmin);
+	const float snap = 0.015f * (vmax - vmin);
+	return (v > -snap && v < snap) ? 0.0f : v;
+}
+
 // ----------------------------------------------------------------------------
 // Scrolling. The pane shows [g_scroll, g_scroll + paneH) of a ContentHeight()
 // tall document; the scrollbar only exists when there is overflow.
@@ -1642,10 +1872,14 @@ static void DrawSlider(HDC dc, const RECT& rt, float frac, bool en)
 
 // Bipolar knob: fill runs from the CENTRE of the track toward the thumb, and a
 // tick marks zero - the sign is the whole point of these.
-static void DrawBipolar(HDC dc, const RECT& rt, float frac, bool en)
+// zeroFrac: where VALUE ZERO sits on the track (0..1). Defaults to the centre,
+// which is exact for every symmetric +/-vmax row - but an ASYMMETRIC range
+// (prt Offset -5..+15, Diamond offset -2..+5) must pass its true zero
+// (-vmin/span), or the tick claims "zero here" at a point that reads +1.5.
+static void DrawBipolar(HDC dc, const RECT& rt, float frac, bool en, float zeroFrac = 0.5f)
 {
 	FillSolid(dc, rt, CLR_TRACK);
-	const int cx = (rt.left + rt.right) / 2;
+	const int cx = rt.left + (int)((rt.right - rt.left) * zeroFrac + 0.5f);
 	const int tx = rt.left + (int)((rt.right - rt.left) * frac + 0.5f);
 	if (en && tx != cx) {
 		RECT rf = rt;
@@ -2063,8 +2297,12 @@ static int LeafSaveMask(int pg)
 	case PG_AURORA: case PG_LIGHTNING:
 		return ORO_SCOPE_GLOBAL | ORO_SCOPE_BODY;
 	// The eye, the pilot's taste, the (v1, one-world) storm, the scenario sound toggle.
-	case PG_ECLIPSE: case PG_GODRAYS: case PG_RAIN: case PG_SCENARIOS:
+	case PG_ECLIPSE: case PG_GODRAYS: case PG_RAIN: case PG_FOG: case PG_SCENARIOS:
 		return ORO_SCOPE_GLOBAL;
+	// RAINSURFACES saves to its OWN file (VesselsRainSurfaces.cfg) through its own
+	// SAVE button - none of the three scopes, so nothing here for the amber to claim.
+	case PG_RAINSURF:
+		return 0;
 	// VC: the Save target moves the shadow on/off + shake block between scopes, but the
 	// cabin box and shadow depth are per class either way - both scopes, always.
 	case PG_VC:
@@ -2133,6 +2371,9 @@ static void LeafSaveCaption(int pg, char* out, int cap)
 		strcpy_s(out, cap, "saves globally - the pilot's taste at any world");
 		break;
 	case PG_RAIN:
+		strcpy_s(out, cap, "saves globally - per-world files arrive with the weather model");
+		break;
+	case PG_FOG:
 		strcpy_s(out, cap, "saves globally - per-world files arrive with the weather model");
 		break;
 	case PG_SCENARIOS:
@@ -2476,8 +2717,10 @@ static void PaintParticles(HDC dc, const RECT& rc)
 		DrawRowLabel(dc, cy, pr.label, pen);
 		// Offset is the one signed row: a bipolar track, so "back into the bell"
 		// reads as the opposite of "further downstream" rather than just a smaller
-		// number (the trail-start row's lesson).
-		if (i == 0) DrawBipolar(dc, TrackRectAt(rc, cy), f, pen);
+		// number (the trail-start row's lesson). The range is ASYMMETRIC (-5..+15),
+		// so the zero anchor is computed - see DrawBipolar's zeroFrac.
+		if (i == 0) DrawBipolar(dc, TrackRectAt(rc, cy), f, pen,
+		                        (span > 0.0f) ? (-pr.vmin / span) : 0.5f);
 		else        DrawSlider (dc, TrackRectAt(rc, cy), f, pen);
 		if      (pr.dec == 0) sprintf_s(val, "%.0f", *pr.value);
 		else if (pr.dec == 1) sprintf_s(val, i == 0 ? "%+.1f" : "%.1f", *pr.value);
@@ -2590,14 +2833,29 @@ static void PaintThruster(HDC dc, const RECT& rc)
 	DrawCaption(dc, LABEL_X, ThrCapY(), g_envCaps[0]);
 
 	const bool ken = g_fx.shimmerEnabled;
-	const EnvKnob& kn = g_envKnobs[0];                          // Offset (bipolar)
+	const EnvKnob& kn = g_envKnobs[0];                          // Offset (bipolar, -2..+10)
 	const int cy = ThrOfsY();
-	const float frac = (kn.vmax > 0.0f) ? (0.5f + 0.5f * (*kn.value / kn.vmax)) : 0.5f;
+	const float span = kn.vmax - kn.vmin;
+	const float frac = (span > 0.0f) ? ((*kn.value - kn.vmin) / span) : 0.5f;
 	char val[16];
 	DrawRowLabel(dc, cy, kn.label, ken);
-	DrawBipolar(dc, TrackRectAt(rc, cy), frac, ken);
+	DrawBipolar(dc, TrackRectAt(rc, cy), frac, ken,             // true-zero tick: the range
+	            (span > 0.0f) ? (-kn.vmin / span) : 0.5f);      //   is asymmetric now
 	sprintf_s(val, "%+.2f", *kn.value);                        // signed: the sign is the point
 	DrawValue(dc, rc, cy, val, ken);
+
+	// The wave texture's other two parameters (2026-09-04): the pill row's slider is
+	// the AMPLITUDE (relabelled to say so); these scale the ripple's spatial period
+	// and its churn rate. Grey with the pill like the Offset knob above.
+	for (int i = 0; i < NSHIM; i++) {
+		const PlasRow& sr = g_shimRows[i];
+		const int   sy   = ThrWavY(i);
+		const float sf   = (sr.vmax > sr.vmin) ? ((*sr.value - sr.vmin) / (sr.vmax - sr.vmin)) : 0.0f;
+		DrawRowLabel(dc, sy, sr.label, ken);
+		DrawSlider(dc, TrackRectAt(rc, sy), sf, ken);
+		sprintf_s(val, "%.2f", *sr.value);
+		DrawValue(dc, rc, sy, val, ken);
+	}
 
 	// PLUME EXPANSION. The caption is the REGIME READOUT (the reentryHeat discipline):
 	// the model's pressure blend must be visible, or "no diamonds at altitude" is
@@ -2645,17 +2903,26 @@ static void PaintThruster(HDC dc, const RECT& rc)
 		const float span = pr.vmax - pr.vmin;
 		const float pf   = (span > 0.0f) ? ((*pr.value - pr.vmin) / span) : 0.0f;
 		DrawRowLabel(dc, py, pr.label, pen);
-		DrawSlider(dc, TrackRectAt(rc, py), pf, pen);
+		// vmin < 0 = a signed row (Diamond shape / Diamond offset): bipolar track +
+		// signed readout, the prt Offset row's convention, so "toward the bell"
+		// reads as the OPPOSITE of "away" rather than just a smaller number. The
+		// zero anchor is computed - Diamond offset's range is asymmetric (-2..+5).
+		if (pr.vmin < 0.0f) DrawBipolar(dc, TrackRectAt(rc, py), pf, pen,
+		                                (span > 0.0f) ? (-pr.vmin / span) : 0.5f);
+		else                DrawSlider (dc, TrackRectAt(rc, py), pf, pen);
 		// dec 0 = an integer COUNT (the Diamonds row): show what the build rounds to.
-		if (pr.dec == 0) sprintf_s(val, "%.0f", floorf(*pr.value + 0.5f));
-		else             sprintf_s(val, pr.dec == 1 ? "%.1f" : "%.2f", *pr.value);
+		if      (pr.dec == 0)     sprintf_s(val, "%.0f", floorf(*pr.value + 0.5f));
+		else if (pr.vmin < 0.0f)  sprintf_s(val, pr.dec == 1 ? "%+.1f" : "%+.2f", *pr.value);
+		else                      sprintf_s(val, pr.dec == 1 ? "%.1f"  : "%.2f",  *pr.value);
 		DrawValue(dc, rc, py, val, pen);
 	}
-	// The two colour picks: JET (core + diamond body - the diamonds whiten via the
-	// fp16 bloom, never via the palette) and BLOOM (the vacuum halo).
-	DrawRowLabel(dc, PlmColY(), "Jet / Bloom", pen);
+	// The three colour picks: JET (the core body), BLOOM (the vacuum halo) and DIA
+	// (2026-09-04) - the colour the diamonds ARE, verbatim (his rule: what the swatch
+	// shows is what you see; the fp16 bloom still whitens the hottest cores).
+	DrawRowLabel(dc, PlmColY(), "Jet / Bloom / Dia", pen);
 	DrawSwatch(dc, SwatchRect(PlmColY(), 0), g_fx.plumeColJet,   pen);
 	DrawSwatch(dc, SwatchRect(PlmColY(), 1), g_fx.plumeColBloom, pen);
+	DrawSwatch(dc, SwatchRect(PlmColY(), 2), g_fx.plumeColDia,   pen);
 
 	// BELL GLOW: the incandescent nozzle shells - pill + strength, then the two
 	// thermal timescales (per class: they are facts about the nozzle hardware).
@@ -3055,6 +3322,52 @@ static void PaintGodRays(HDC dc, const RECT& rc)
 	DrawTextA(dc, val, -1, &rv3, DT_RIGHT | DT_TOP | DT_SINGLELINE);
 }
 
+// BASE LIGHTS (2026-09-05, client patch ac) - shared by the RAIN and FOG pages. The
+// pill forces every base's night state (night textures, runway + taxiway lights) on;
+// off is stock (on at night, off by day). Lights glow scales the lit result - past 1
+// the excess reaches the client's bloom, which is how the lights get their halo.
+// Greys out wholesale without the patch (18b). Always clickable: it is configuration
+// of the world, not part of the storm or the fog.
+static void PaintBaseLights(HDC dc, const RECT& rc, int yPill, int yGlow, int yHalo)
+{
+	const bool sup = OroBaseLightsSupported();
+	char val[32];
+	DrawPill(dc, PillRectAt(yPill), sup && g_fx.baseLightsOn);
+	DrawRowLabel(dc, yPill, "Base lights", sup);
+	DrawValue(dc, rc, yPill, !sup ? "no patch" : (g_fx.baseLightsOn ? "forced on" : "auto"), sup);
+	DrawRowLabel(dc, yGlow, "Lights glow", sup);
+	DrawSlider(dc, TrackRectAt(rc, yGlow), (g_fx.baseLightsGlow - 0.25f) / 2.75f, sup);
+	sprintf_s(val, "%.2f", g_fx.baseLightsGlow);
+	DrawValue(dc, rc, yGlow, val, sup);
+	// the HALO (his reference photo): the aureole round each lamp in fog - the fog
+	// between lamp and eye sizes it, this scales it
+	DrawRowLabel(dc, yHalo, "Lights halo", sup);
+	DrawSlider(dc, TrackRectAt(rc, yHalo), g_fx.baseLightsHalo / 3.0f, sup);
+	sprintf_s(val, "%.2f", g_fx.baseLightsHalo);
+	DrawValue(dc, rc, yHalo, val, sup);
+}
+static BOOL ClickBaseLights(HWND hDlg, const RECT& rc, int x, int y, int yPill, int yGlow, int yHalo)
+{
+	if (!OroBaseLightsSupported()) return FALSE;
+	if (PtIn(PillRectAt(yPill), x, y, 4)) {
+		g_fx.baseLightsOn = !g_fx.baseLightsOn;
+		return TRUE;
+	}
+	if (PtIn(TrackRectAt(rc, yGlow), x, y, 8)) {
+		g_dragBlg = 0;                       // 0 = glow, 1 = halo (one flag, two rows)
+		SetCapture(hDlg);
+		g_fx.baseLightsGlow = 0.25f + TrackValueFromX(rc, x) * 2.75f;
+		return TRUE;
+	}
+	if (PtIn(TrackRectAt(rc, yHalo), x, y, 8)) {
+		g_dragBlg = 1;
+		SetCapture(hDlg);
+		g_fx.baseLightsHalo = TrackValueFromX(rc, x) * 3.0f;
+		return TRUE;
+	}
+	return FALSE;
+}
+
 // RAIN Test toggle - summon a storm where you are. It RAMPS UP AND HOLDS (the INDUCE
 // scenario idiom, invariant 8) rather than running a fixed cycle, because the thing you
 // mostly want it for is tuning; releasing it ramps back down and the ground dries slowly.
@@ -3113,6 +3426,13 @@ static void PaintRain(HDC dc, const RECT& rc)
 	DrawRowLabel(dc, RainViewY(), "Rain view", en);
 	DrawButton(dc, RowBtnRect(rc, RainViewY()), RVIEW[rvm], false, CLR_ACCENT);
 
+	// RAINSURFACES (2026-09-01, his spec) - declare which mesh groups take the drops
+	// by clicking them in the sim. Deliberately live even with the pill off: it edits
+	// CONFIGURATION, not the storm, and greying it behind the pill would hide the one
+	// control that makes the drops possible on an undeclared ship.
+	DrawRowLabel(dc, RainSurfY(), "Rain surfaces", true);
+	DrawButton(dc, RowBtnRect(rc, RainSurfY()), "RAINSURFACES", false, CLR_ACCENT);
+
 	const bool active = en || g_fx.rainTest;
 	DrawRowLabel(dc, RainWhyY(), "Rain", active);
 	if      (!active)              strcpy_s(val, "-");
@@ -3126,6 +3446,7 @@ static void PaintRain(HDC dc, const RECT& rc)
 	                         : (g_fx.rainI > 0.004f ? CLR_ACCENT : CLR_TEXT_HI));
 	RECT rv4 = ReadRectAt(rc, RainWhyY());
 	DrawTextA(dc, val, -1, &rv4, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+	PaintBaseLights(dc, rc, RainBlY(), RainGlowY(), RainHaloY());   // patch (ac) - mirrored on FOG
 }
 
 static BOOL ClickRain(HWND hDlg, const RECT& rc, int x, int y)
@@ -3148,6 +3469,16 @@ static BOOL ClickRain(HWND hDlg, const RECT& rc, int x, int y)
 		g_clickWasEdit = false;             // a preview, not a setting
 		return TRUE;
 	}
+	// RAINSURFACES opens its popup regardless of the pill (configuration, not effect).
+	if (PtIn(RowBtnRect(rc, RainSurfY()), x, y, 2)) {
+		g_clickWasEdit = false;             // navigation, not an edit
+		RsLoad();
+		NavPush(PG_RAINSURF);
+		ClearDrags();
+		OroHelp_Follow();                   // an open help window walks with you
+		InvalidateRect(hDlg, NULL, FALSE);
+		return TRUE;
+	}
 	if (g_fx.rainEnabled || g_fx.rainTest) {
 		if (PtIn(RowBtnRect(rc, RainViewY()), x, y, 2)) {
 			g_fx.rainViewMode = (g_fx.rainViewMode + 1) % 3;
@@ -3168,7 +3499,235 @@ static BOOL ClickRain(HWND hDlg, const RECT& rc, int x, int y)
 			}
 		}
 	}
+	if (ClickBaseLights(hDlg, rc, x, y, RainBlY(), RainGlowY(), RainHaloY())) return TRUE;   // patch (ac)
 	return FALSE;
+}
+
+// ===== LEAF: FOG (WORLD > WEATHER, 2026-09-05, client patch aa) ==============
+// FOG Test toggle - summon a fog bank where you are. Ramps up and HOLDS (the rain's
+// idiom); releasing it clears over ~20 s, the pill going off is instant.
+static RECT FogTestBtnRect(const RECT& rc)
+{
+	const int cy = FogPillY();
+	RECT r = { rc.right - TRACK_RPAD - 78, cy - 11, rc.right - TRACK_RPAD - 6, cy + 11 };
+	return r;
+}
+
+// FOG. Two height-fog layers the client integrates in every shader family (patch aa).
+// This page owns layer 0, the ground fog; layer 1 is the storm's mist and rides the
+// RAIN page's Gloom. The readout names the gate stopping it, as the rain's does.
+static void PaintFog(HDC dc, const RECT& rc)
+{
+	DrawSectionHdrNote(dc, rc, FogHdrY(), "F O G", "the storm's own mist rides RAIN / Gloom");
+	const bool en = g_fx.fogEnabled;
+	char val[48];
+
+	DrawPill(dc, PillRectAt(FogPillY()), en);
+	DrawCaption(dc, LABEL_X, FogPillY() - 7, "G R O U N D   F O G");
+	DrawButton(dc, FogTestBtnRect(rc), "Test", g_fx.fogTest, CLR_ACCENT);
+
+	for (int i = 0; i < NFOG; i++) {
+		const PlasRow& rr = g_fogRows[i];
+		const int   cy   = FogRowY(i);
+		const float span = rr.vmax - rr.vmin;
+		const float frac = (span > 0.0f) ? ((*rr.value - rr.vmin) / span) : 0.0f;
+		DrawRowLabel(dc, cy, rr.label, en);
+		DrawSlider(dc, TrackRectAt(rc, cy), frac, en);
+		sprintf_s(val, rr.dec == 0 ? "%.0f" : "%.2f", *rr.value);   // dec 0 = integer metres
+		DrawValue(dc, rc, cy, val, en);
+	}
+
+	const bool active = en || g_fx.fogTest;
+	DrawRowLabel(dc, FogWhyY(), "Fog", active);
+	if      (!active)              strcpy_s(val, "-");
+	else if (g_fx.fogWhy[0])       sprintf_s(val, "%s", g_fx.fogWhy);
+	else if (g_fx.fogI > 0.004f)   sprintf_s(val, "%s%.0f%%", g_fx.fogTest ? "TEST " : "", g_fx.fogI * 100.0f);
+	else                           strcpy_s(val, "clear");
+	SelectObject(dc, g_fontMono);
+	SetTextColor(dc, !active ? CLR_TEXT_DIM : (g_fx.fogI > 0.004f ? CLR_ACCENT : CLR_TEXT_HI));
+	RECT rv = ReadRectAt(rc, FogWhyY());
+	DrawTextA(dc, val, -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+	PaintBaseLights(dc, rc, FogBlY(), FogGlowY(), FogHaloY());     // patch (ac) - mirrored on RAIN
+}
+
+static BOOL ClickFog(HWND hDlg, const RECT& rc, int x, int y)
+{
+	if (PtIn(PillRectAt(FogPillY()), x, y, 4)) {
+		g_fx.fogEnabled = !g_fx.fogEnabled;
+		if (!g_fx.fogEnabled) g_fx.fogTest = false;   // the rain's rule: OFF means off
+		return TRUE;
+	}
+	if (PtIn(FogTestBtnRect(rc), x, y)) {
+		g_fx.fogTest = !g_fx.fogTest;
+		g_clickWasEdit = false;             // a preview, not a setting
+		return TRUE;
+	}
+	if (g_fx.fogEnabled || g_fx.fogTest) {
+		for (int i = 0; i < NFOG; i++) {
+			if (PtIn(TrackRectAt(rc, FogRowY(i)), x, y, 8)) {
+				g_dragFog = i;
+				SetCapture(hDlg);
+				*g_fogRows[i].value = g_fogRows[i].vmin + TrackValueFromX(rc, x)
+				                      * (g_fogRows[i].vmax - g_fogRows[i].vmin);
+				if (g_fogRows[i].dec == 0)   // integer metres: the STORE snaps, not just the readout
+					*g_fogRows[i].value = floorf(*g_fogRows[i].value + 0.5f);
+				return TRUE;
+			}
+		}
+	}
+	if (ClickBaseLights(hDlg, rc, x, y, FogBlY(), FogGlowY(), FogHaloY())) return TRUE;     // patch (ac)
+	return FALSE;
+}
+
+// ===== The RAINSURFACES popup (PG_RAINSURF) =================================
+// Header, the declared-groups list ("None" when empty), ADD / REMOVE / SAVE /
+// BACK, and a message line - his spec verbatim. Amber = armed (ADD/REMOVE) or
+// unsaved (SAVE), the panel's one colour for "this is waiting on you".
+static void PaintRsurf(HDC dc, const RECT& rc)
+{
+	if (g_rsN < 0) RsLoad();               // reached by a route that skipped ClickRain
+	DrawSectionHdr(dc, rc, RsHdrY(), "R A I N S U R F A C E S");
+	DrawCaption(dc, 16, RsHdrY() + 22,
+	            "mesh groups that take drops on the glass - saved for every vessel");
+
+	if (g_rsN <= 0) {
+		DrawRowLabel(dc, RsListY(0), "None", false);
+	} else {
+		for (int i = 0; i < g_rsN; i++) {
+			char lbl[32];
+			sprintf_s(lbl, "Group %d", g_rsList[i].grp);
+			// the remove target brightens to accent; while REMOVE is armed the whole
+			// list lifts so it reads as clickable
+			SelectObject(dc, g_fontText);
+			SetTextColor(dc, g_rsConfirm == i ? CLR_ACCENT
+			                                  : (g_rsRemArmed ? CLR_TEXT_HI : CLR_TEXT));
+			TextOutA(dc, LABEL_X, RsListY(i) - 9, lbl, (int)strlen(lbl));
+			SelectObject(dc, g_fontSmall);
+			SetTextColor(dc, CLR_TEXT_DIM);
+			RECT rm = ReadRectAt(rc, RsListY(i));
+			DrawTextA(dc, g_rsList[i].mesh, -1, &rm,
+			          DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+		}
+	}
+
+	DrawButton(dc, RsBtnRect(rc, 0), "ADD",    g_rsAddArmed, CLR_MSG_REVRT);
+	DrawButton(dc, RsBtnRect(rc, 1), "REMOVE", g_rsRemArmed, CLR_MSG_REVRT);
+	DrawButton(dc, RsBtnRect(rc, 2), "SAVE",   g_rsUnsaved,  CLR_MSG_REVRT);
+	DrawButton(dc, RsBtnRect(rc, 3), "BACK",   false,        CLR_PILL_ON);
+
+	if (g_rsConfirm >= 0 && g_rsConfirm < g_rsN) {
+		char q[256];
+		_snprintf_s(q, sizeof(q), _TRUNCATE, "Remove Group %d (%s)?",
+		            g_rsList[g_rsConfirm].grp, g_rsList[g_rsConfirm].mesh);
+		SelectObject(dc, g_fontText);
+		SetTextColor(dc, CLR_TEXT_HI);
+		RECT rq = { 16, RsMsgY() - 9, RsYesNoRect(rc, 0).left - 8, RsMsgY() + 11 };
+		DrawTextA(dc, q, -1, &rq, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+		DrawButton(dc, RsYesNoRect(rc, 0), "YES", false, CLR_ACCENT);
+		DrawButton(dc, RsYesNoRect(rc, 1), "NO",  false, CLR_PILL_ON);
+	} else {
+		const char* msg = g_rsMsg;
+		if      (!OroRs_PickAvail()) msg = "needs the ORO-patched client - ADD is unavailable";
+		else if (g_rsAddArmed)       msg = "Click on a meshgroup to declare it as a rain surface";
+		else if (g_rsRemArmed)       msg = "Click a group in the list above, then confirm";
+		else if (!msg[0])            msg = OroRs_ApplyAvail()
+		                                 ? "SAVE applies immediately - no reload needed"
+		                                 : "changes take effect on the next scenario (re)load";
+		DrawCaption(dc, 16, RsMsgY() - 7, msg);
+	}
+}
+
+static BOOL ClickRsurf(HWND hDlg, const RECT& rc, int x, int y)
+{
+	g_clickWasEdit = false;   // nothing here lives in a GLOBAL/CLASS/BODY scope - the
+	                          // popup's own SAVE amber (g_rsUnsaved) is the indicator
+	// The Y/N answer outranks everything while it is up.
+	if (g_rsConfirm >= 0) {
+		if (PtIn(RsYesNoRect(rc, 0), x, y)) {
+			for (int i = g_rsConfirm; i + 1 < g_rsN; i++) g_rsList[i] = g_rsList[i + 1];
+			g_rsN--; g_rsConfirm = -1; g_rsUnsaved = true;
+			strcpy_s(g_rsMsg, "removed - SAVE to keep it removed");
+			return TRUE;
+		}
+		if (PtIn(RsYesNoRect(rc, 1), x, y)) { g_rsConfirm = -1; g_rsMsg[0] = 0; return TRUE; }
+	}
+	if (PtIn(RsBtnRect(rc, 0), x, y)) {                            // ADD
+		if (g_rsAddArmed) {                                        // pressing again disarms
+			g_rsAddArmed = false; OroRs_PickArm(false); g_rsMsg[0] = 0; return TRUE;
+		}
+		if (!OroRs_PickAvail()) { strcpy_s(g_rsMsg, "needs the ORO-patched client"); return TRUE; }
+		// Only works in VC view (his spec) - checked again at delivery, but arming
+		// from an external view would arm a click that can never land.
+		if (!oapiCameraInternal() || oapiCockpitMode() != COCKPIT_VIRTUAL) {
+			strcpy_s(g_rsMsg, "only works in VC view - switch to the virtual cockpit first");
+			return TRUE;
+		}
+		if (g_rsN >= RS_MAX) { strcpy_s(g_rsMsg, "the list is full"); return TRUE; }
+		if (!OroRs_PickArm(true)) { strcpy_s(g_rsMsg, "could not arm the pick"); return TRUE; }
+		g_rsAddArmed = true; g_rsRemArmed = false; g_rsConfirm = -1; g_rsMsg[0] = 0;
+		return TRUE;
+	}
+	if (PtIn(RsBtnRect(rc, 1), x, y)) {                            // REMOVE
+		g_rsRemArmed = !g_rsRemArmed;
+		if (g_rsRemArmed) { g_rsAddArmed = false; OroRs_PickArm(false); g_rsConfirm = -1; }
+		g_rsMsg[0] = 0;
+		return TRUE;
+	}
+	if (PtIn(RsBtnRect(rc, 2), x, y)) {                            // SAVE
+		if (!RsSave()) { strcpy_s(g_rsMsg, "could not write Config\\ORO\\VesselsRainSurfaces.cfg"); return TRUE; }
+		g_rsUnsaved = false;
+		// Patch (h) part 4 (his ask): the client re-applies the cfg to the LIVE meshes,
+		// so adds AND removals take effect on the next frame - no scenario reload.
+		if (OroRs_ApplyNow()) strcpy_s(g_rsMsg, "saved and applied - the glass responds now");
+		else                  strcpy_s(g_rsMsg, "saved - reload the scenario to apply");
+		return TRUE;
+	}
+	if (PtIn(RsBtnRect(rc, 3), x, y)) {                            // BACK
+		g_rsAddArmed = g_rsRemArmed = false; g_rsConfirm = -1; g_rsMsg[0] = 0;
+		OroRs_PickArm(false);
+		NavBack();
+		ClearDrags();
+		OroHelp_Follow();
+		return TRUE;
+	}
+	if (g_rsRemArmed) {                                            // pick the victim off the list
+		for (int i = 0; i < g_rsN; i++) {
+			RECT r = { 16, RsListY(i) - 11, rc.right - 16, RsListY(i) + 11 };
+			if (PtIn(r, x, y)) { g_rsConfirm = i; g_rsRemArmed = false; return TRUE; }
+		}
+	}
+	return FALSE;
+}
+
+// Module -> dialog: a pick landed while ADD was armed (declared in OroState.h;
+// called from OroModule::RsPickDeliver on the main thread). One pick per arm -
+// the amber clears, the group joins the list, SAVE goes amber. His spec.
+void OroDlg_RsPickResult(const char* mesh, int grp)
+{
+	if (!g_rsAddArmed) return;
+	g_rsAddArmed = false;
+	OroRs_PickArm(false);
+	if (!g_hDlg || !IsWindow(g_hDlg) || CurPage() != PG_RAINSURF) return;
+	for (int i = 0; i < g_rsN; i++) {
+		if (g_rsList[i].grp == grp && _stricmp(g_rsList[i].mesh, mesh) == 0) {
+			_snprintf_s(g_rsMsg, sizeof(g_rsMsg), _TRUNCATE,
+			            "Group %d is already declared", grp);
+			InvalidateRect(g_hDlg, NULL, FALSE);
+			return;
+		}
+	}
+	if (g_rsN >= RS_MAX) {
+		strcpy_s(g_rsMsg, "the list is full");
+		InvalidateRect(g_hDlg, NULL, FALSE);
+		return;
+	}
+	strcpy_s(g_rsList[g_rsN].mesh, mesh);
+	g_rsList[g_rsN].grp = grp;
+	g_rsN++;
+	g_rsUnsaved = true;
+	_snprintf_s(g_rsMsg, sizeof(g_rsMsg), _TRUNCATE,
+	            "Group %d added (%s) - SAVE to keep it", grp, mesh);
+	InvalidateRect(g_hDlg, NULL, FALSE);
 }
 
 // VC SHADOWS - the one section where ORO draws NOTHING. Both controls drive the
@@ -3219,6 +3778,69 @@ static void PaintVCShadows(HDC dc, const RECT& rc)
 	RECT rw = { 16, VcsCapY(), rc.right - SEC_RPAD, VcsCapY() + 20 };
 	DrawTextA(dc, have ? "box: smaller = sharper. depth: 0 = stock, 1 = only emissive survives"
 	                   : "the client renders these - ORO only sets them",
+	          -1, &rw, DT_LEFT | DT_TOP | DT_SINGLELINE);
+}
+
+// THE CABIN AT NIGHT - patch (ad). ORO draws nothing; it tells the client how much of
+// the VC's ambient + emissive FILL to keep, from the sun at the camera (SenseVCNight).
+static void PaintVCNight(HDC dc, const RECT& rc)
+{
+	DrawSectionHdr(dc, rc, VcnHdrY(), "C A B I N   A T   N I G H T");
+	const bool have = OroVCNightSupported();
+	const bool en   = have && g_fx.vcNight;
+	char val[32];
+
+	DrawPill(dc, PillRectAt(VcnPillY()), en);
+	DrawCaption(dc, LABEL_X, VcnPillY() - 7,
+	            have ? "D A R K   W H E N   T H E   S U N   I S   D O W N"
+	                 : "R E Q U I R E S   A   P A T C H E D   C L I E N T");
+
+	DrawRowLabel(dc, VcnFlrY(), "Night floor", en);
+	DrawSlider(dc, TrackRectAt(rc, VcnFlrY()), g_fx.vcNightFloor, en);
+	sprintf_s(val, "%.2f", g_fx.vcNightFloor);
+	DrawValue(dc, rc, VcnFlrY(), val, en);
+
+	// WEATHER DIM (2026-09-06): its own pill + gain. It rides the RAIN page's Gloom and
+	// the FOG page's visibility; this only scales how much of their darkening reaches
+	// the cabin. Greyed with the section's pill: no night, no weather either.
+	const bool wen = en && g_fx.vcWxDimOn;
+	DrawPill(dc, PillRectAt(VcnWxPillY()), wen);
+	DrawCaption(dc, LABEL_X, VcnWxPillY() - 7, "D I M   U N D E R   R A I N   A N D   F O G");
+	DrawRowLabel(dc, VcnWxY(), "Weather dim", wen);
+	DrawSlider(dc, TrackRectAt(rc, VcnWxY()), g_fx.vcWxDim * 0.5f, wen);
+	sprintf_s(val, "%.2f", g_fx.vcWxDim);
+	DrawValue(dc, rc, VcnWxY(), val, wen);
+
+	SelectObject(dc, g_fontSmall);
+	SetTextColor(dc, CLR_TEXT_DIM);
+	RECT rw = { 16, VcnCapY(), rc.right - SEC_RPAD, VcnCapY() + 20 };
+	char cap[96];
+	if (have) sprintf_s(cap, "floor: 0 = black without a lamp, 1 = stock  -  cabin fill now %d%%",
+	                    (int)(g_fx.vcNightLive * 100.0f + 0.5f));
+	else      strcpy_s(cap, "the client scales the cabin - ORO only says how much");
+	DrawTextA(dc, cap, -1, &rw, DT_LEFT | DT_TOP | DT_SINGLELINE);
+}
+
+// CABIN SOUNDS (2026-09-06, his design). The rain loops heard from the seat have their
+// own volume - the RAIN page's slider is the OUTSIDE mix and does not reach in here -
+// and the hull drum lives beside it (moved from the RAIN page: it is about the hull).
+static void PaintVCSounds(HDC dc, const RECT& rc)
+{
+	DrawSectionHdr(dc, rc, VcSndHdrY(), "C A B I N   S O U N D S");
+	char val[32];
+	DrawRowLabel(dc, VcSndRainY(), "Rain in cabin", true);
+	DrawSlider(dc, TrackRectAt(rc, VcSndRainY()), g_fx.vcRainSound * 0.5f, true);
+	sprintf_s(val, "%.2f", g_fx.vcRainSound);
+	DrawValue(dc, rc, VcSndRainY(), val, true);
+	DrawRowLabel(dc, VcSndHullY(), "Hull drum", true);
+	DrawSlider(dc, TrackRectAt(rc, VcSndHullY()), g_fx.rainHullVol / 3.0f, true);
+	sprintf_s(val, "%.2f", g_fx.rainHullVol);
+	DrawValue(dc, rc, VcSndHullY(), val, true);
+
+	SelectObject(dc, g_fontSmall);
+	SetTextColor(dc, CLR_TEXT_DIM);
+	RECT rw = { 16, VcSndCapY(), rc.right - SEC_RPAD, VcSndCapY() + 20 };
+	DrawTextA(dc, "heard from the seat only - the outside mix is WEATHER / RAIN's Rain sound",
 	          -1, &rw, DT_LEFT | DT_TOP | DT_SINGLELINE);
 }
 
@@ -3345,9 +3967,9 @@ static void PaintVapour(HDC dc, const RECT& rc)
 	// each cone's Opacity is its own visibility, and every control exists twice
 	// with completely separate numbers - the colours included.
 	auto drawCone = [&](const char* name, const PlasRow* rows, int capY, int rowY0,
-	                    int colY, int baseY, int posXY, int posYY, int posY,
+	                    int colY, int baseY, int bofsY, int posXY, int posYY, int posY,
 	                    int pitchY, int yawY, int bandY, DWORD cVap, DWORD cStk,
-	                    bool baseOn, float posX, float posYv, float pos,
+	                    bool baseOn, float baseOfs, float posX, float posYv, float pos,
 	                    float pitch, float yaw, float mLo, float mHi) {
 		DrawCaption(dc, 16, capY, name);
 		for (int i = 0; i < NVAP; i++) {
@@ -3366,6 +3988,21 @@ static void PaintVapour(HDC dc, const RECT& rc)
 		// BASE FILL - the disc closing this cone's wide end; off = the open loft.
 		DrawPill(dc, PillRectAt(baseY), en && baseOn);
 		DrawRowLabel(dc, baseY, "Base fill", en);
+		// BASE FILL OFFSET (2026-09-04, Buck Rogers's ask, promised on the thread):
+		// -1 pushes the cap's centre to the apex (an inner second face of the cone),
+		// 0 = the flat disc bit for bit, +0.5 bulges it half the cone's depth
+		// outward. Asymmetric range, so the zero tick is computed (zeroFrac). Greys
+		// with the pill it modifies - an offset on a base that is not drawn is a
+		// control that lies (18b).
+		{
+			const bool ben  = en && baseOn;
+			const float bsp = VAP_BOFS_HI - VAP_BOFS_LO;
+			DrawRowLabel(dc, bofsY, "Base fill offset", ben);
+			DrawBipolar(dc, TrackRectAt(rc, bofsY), (baseOfs - VAP_BOFS_LO) / bsp, ben,
+			            -VAP_BOFS_LO / bsp);
+			sprintf_s(val, "%+.2f", baseOfs);
+			DrawValue(dc, rc, bofsY, val, ben);
+		}
 		// FULL PLACEMENT (2026-08-30, his fix round). Position x/y/z in Orbiter's
 		// order: x/y nudge the apex along the vessel's own axes, z is the old knob
 		// renamed - it still slides along the FLOW axis, which is what he tuned and
@@ -3393,13 +4030,15 @@ static void PaintVapour(HDC dc, const RECT& rc)
 		DrawValue(dc, rc, bandY, val, en);
 	};
 	drawCone("C O N E   1", g_vapRows,  VapC1CapY(), VapRowY(0),  VapColY(),  VapBaseY(),
-	         VapPosXY(),  VapPosYY(),  VapPosY(),  VapPitchY(),  VapYawY(),  VapBandY(),
-	         g_fx.vapColour,  g_fx.vapStreakCol,  g_fx.vapBaseOn,
+	         VapBOfsY(),  VapPosXY(),  VapPosYY(),  VapPosY(),  VapPitchY(),  VapYawY(),
+	         VapBandY(),
+	         g_fx.vapColour,  g_fx.vapStreakCol,  g_fx.vapBaseOn,  g_fx.vapBaseOfs,
 	         g_fx.vapPosX,  g_fx.vapPosY,  g_fx.vapPos,  g_fx.vapPitch,  g_fx.vapYaw,
 	         g_fx.vapMachMin,  g_fx.vapMachMax);
 	drawCone("C O N E   2", g_vapRows2, VapC2CapY(), VapRow2Y(0), VapCol2Y(), VapBase2Y(),
-	         VapPosX2Y(), VapPosY2Y(), VapPos2Y(), VapPitch2Y(), VapYaw2Y(), VapBand2Y(),
-	         g_fx.vapColour2, g_fx.vapStreakCol2, g_fx.vapBaseOn2,
+	         VapBOfs2Y(), VapPosX2Y(), VapPosY2Y(), VapPos2Y(), VapPitch2Y(), VapYaw2Y(),
+	         VapBand2Y(),
+	         g_fx.vapColour2, g_fx.vapStreakCol2, g_fx.vapBaseOn2, g_fx.vapBaseOfs2,
 	         g_fx.vapPosX2, g_fx.vapPosY2, g_fx.vapPos2, g_fx.vapPitch2, g_fx.vapYaw2,
 	         g_fx.vapMachMin2, g_fx.vapMachMax2);
 
@@ -3562,7 +4201,7 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 	if (PageHasGrpRow(CurPage())) PaintGrpRow(dc, rc);
 	// The leaf's SAVE/REVERT row is FIXED chrome (visual pass 2026-08-29): however
 	// far the page scrolls, the way to save it stays on screen.
-	if (!IsMenuPage(CurPage())) PaintLeafSave(dc, rc);
+	if (PageHasLeafSave(CurPage())) PaintLeafSave(dc, rc);
 
 	// --- The scrolling content pane -----------------------------------------
 	// Clip to the pane FIRST (viewport origin still 0), then shift the origin so
@@ -3576,13 +4215,15 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 	} else {
 		switch (CurPage()) {
 		case PG_SCENARIOS: PaintScenarios(dc, rc); break;
-		case PG_VC:        PaintVcTarget(dc, rc); PaintVCShadows(dc, rc); PaintCamShake(dc, rc); break;
+		case PG_VC:        PaintVcTarget(dc, rc); PaintVCShadows(dc, rc); PaintVCNight(dc, rc); PaintVCSounds(dc, rc); PaintCamShake(dc, rc); break;
 		case PG_EXHAUST:   PaintThruster(dc, rc); break;
 		case PG_PARTICLES: PaintParticles(dc, rc); break;
 		case PG_PLASMA:    PaintReentry(dc, rc); break;
 		case PG_VAPOUR:    PaintVapour(dc, rc); break;
 		case PG_FLIGHTAID: PaintFlightAid(dc, rc); break;
 		case PG_RAIN:      PaintRain(dc, rc); break;
+		case PG_FOG:       PaintFog(dc, rc); break;
+		case PG_RAINSURF:  PaintRsurf(dc, rc); break;
 		case PG_LIGHTNING: PaintLightning(dc, rc); break;
 		case PG_AURORA:    PaintAurora(dc, rc); break;
 		case PG_ECLIPSE:   PaintEclipse(dc, rc); break;
@@ -3866,6 +4507,10 @@ static void ClickPlmCopyStock()
 	g_fx.plumeWidth    = 1.0f;
 	g_fx.plumeLen      = 1.0f;
 	g_fx.plumeDiamond  = 0.0f;
+	g_fx.plumeDiaShape = 0.0f;   // the 2026-09-04 diamond knobs back to neutral, so the
+	g_fx.plumeDiaSize  = 1.0f;   //   preset is complete (brightness 0 already hides them)
+	g_fx.plumeDiaLen   = 1.0f;
+	g_fx.plumeDiaOfs   = 0.0f;
 	g_fx.plumeBloomBri = 0.0f;
 	g_fx.plumeThroat   = 0.0f;
 	g_fx.plumeSoot     = 0.0f;
@@ -3962,8 +4607,20 @@ static BOOL ClickThruster(HWND hDlg, const RECT& rc, int x, int y)
 	if (g_fx.shimmerEnabled && PtIn(TrackRectAt(rc, ThrOfsY()), x, y, 8)) {
 		g_dragEnvK = 0;
 		SetCapture(hDlg);
-		*g_envKnobs[0].value = EnvKnobValueFromX(rc, x, g_envKnobs[0].vmax);
+		*g_envKnobs[0].value = EnvKnobValueFromXA(rc, x, g_envKnobs[0].vmin, g_envKnobs[0].vmax);
 		return TRUE;
+	}
+	// The two wave rows (2026-09-04) - gated with the pill like the Offset knob.
+	if (g_fx.shimmerEnabled) {
+		for (int i = 0; i < NSHIM; i++) {
+			if (PtIn(TrackRectAt(rc, ThrWavY(i)), x, y, 8)) {
+				g_dragShim = i;
+				SetCapture(hDlg);
+				*g_shimRows[i].value = g_shimRows[i].vmin
+				                     + TrackValueFromX(rc, x) * (g_shimRows[i].vmax - g_shimRows[i].vmin);
+				return TRUE;
+			}
+		}
 	}
 	// PLUME EXPANSION.
 	// The LAB | PHYSICS switch - clickable regardless of the pill (mode is a
@@ -4004,9 +4661,10 @@ static BOOL ClickThruster(HWND hDlg, const RECT& rc, int x, int y)
 				return TRUE;
 			}
 		}
-		// Jet / Bloom swatches -> native picker (modal).
+		// Jet / Bloom / Dia swatches -> native picker (modal).
 		if (PtIn(SwatchRect(PlmColY(), 0), x, y)) { OpenColourPicker(hDlg, g_fx.plumeColJet,   PlmColY()); return TRUE; }
 		if (PtIn(SwatchRect(PlmColY(), 1), x, y)) { OpenColourPicker(hDlg, g_fx.plumeColBloom, PlmColY()); return TRUE; }
+		if (PtIn(SwatchRect(PlmColY(), 2), x, y)) { OpenColourPicker(hDlg, g_fx.plumeColDia,   PlmColY()); return TRUE; }
 	}
 	// BELL GLOW - the pill, then the three sliders (strength + the two thermal
 	// timescales), all inert while the pill is off. Independent of the plume
@@ -4270,6 +4928,51 @@ static BOOL ClickVCShadows(HWND hDlg, const RECT& rc, int x, int y)
 	return FALSE;
 }
 
+// THE CABIN AT NIGHT - patch (ad). The pill and the floor; the floor rides g_dragVcs = 2.
+static BOOL ClickVCNight(HWND hDlg, const RECT& rc, int x, int y)
+{
+	if (!OroVCNightSupported()) return FALSE;
+	if (PtIn(PillRectAt(VcnPillY()), x, y, 4)) {
+		g_fx.vcNight = !g_fx.vcNight;
+		return TRUE;
+	}
+	if (g_fx.vcNight && PtIn(TrackRectAt(rc, VcnFlrY()), x, y, 8)) {
+		g_dragVcs = 2;
+		SetCapture(hDlg);
+		g_fx.vcNightFloor = TrackValueFromX(rc, x);
+		return TRUE;
+	}
+	if (g_fx.vcNight && PtIn(PillRectAt(VcnWxPillY()), x, y, 4)) {
+		g_fx.vcWxDimOn = !g_fx.vcWxDimOn;
+		return TRUE;
+	}
+	if (g_fx.vcNight && g_fx.vcWxDimOn && PtIn(TrackRectAt(rc, VcnWxY()), x, y, 8)) {
+		g_dragVcs = 3;
+		SetCapture(hDlg);
+		g_fx.vcWxDim = TrackValueFromX(rc, x) * 2.0f;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+// CABIN SOUNDS - the two volumes; codes 4 and 5 on g_dragVcs.
+static BOOL ClickVCSounds(HWND hDlg, const RECT& rc, int x, int y)
+{
+	if (PtIn(TrackRectAt(rc, VcSndRainY()), x, y, 8)) {
+		g_dragVcs = 4;
+		SetCapture(hDlg);
+		g_fx.vcRainSound = TrackValueFromX(rc, x) * 2.0f;
+		return TRUE;
+	}
+	if (PtIn(TrackRectAt(rc, VcSndHullY()), x, y, 8)) {
+		g_dragVcs = 5;
+		SetCapture(hDlg);
+		g_fx.rainHullVol = TrackValueFromX(rc, x) * 3.0f;
+		return TRUE;
+	}
+	return FALSE;
+}
+
 // PILOT. The mode switch and the model's assumptions stay live at all times - you must
 // be able to get out of PHYSICS mode without first waiting for something to finish.
 static BOOL ClickPilot(HWND hDlg, const RECT& rc, int x, int y)
@@ -4353,6 +5056,16 @@ static BOOL ClickVapour(HWND hDlg, const RECT& rc, int x, int y)
 			g_fx.vapBaseOn = !g_fx.vapBaseOn;
 			return TRUE;
 		}
+		// BASE FILL OFFSET (2026-09-04): gated on the pill like its greyed row - a
+		// draggable track under a greyed label would be a control that lies. Rides
+		// g_dragVapP (code 7; cone 2 is 8) so the ClearDrags / release-guard /
+		// move-chain trio needs no new member.
+		if (g_fx.vapBaseOn && PtIn(TrackRectAt(rc, VapBOfsY()), x, y, 8)) {
+			g_dragVapP = 7;
+			SetCapture(hDlg);
+			g_fx.vapBaseOfs = EnvKnobValueFromXA(rc, x, VAP_BOFS_LO, VAP_BOFS_HI);
+			return TRUE;
+		}
 		// FULL PLACEMENT (2026-08-30): the three position knobs in x-y-z order, then
 		// the axis tilt. Each gets its own drag id - the VC section's bare-flag
 		// collision, not repeated (the comment above this function's name).
@@ -4411,6 +5124,12 @@ static BOOL ClickVapour(HWND hDlg, const RECT& rc, int x, int y)
 		if (PtIn(SwatchRect(VapCol2Y(), 1), x, y)) { OpenColourPicker(hDlg, g_fx.vapStreakCol2, VapCol2Y()); return TRUE; }
 		if (PtIn(PillRectAt(VapBase2Y()), x, y, 4)) {
 			g_fx.vapBaseOn2 = !g_fx.vapBaseOn2;
+			return TRUE;
+		}
+		if (g_fx.vapBaseOn2 && PtIn(TrackRectAt(rc, VapBOfs2Y()), x, y, 8)) {
+			g_dragVapP = 8;
+			SetCapture(hDlg);
+			g_fx.vapBaseOfs2 = EnvKnobValueFromXA(rc, x, VAP_BOFS_LO, VAP_BOFS_HI);
 			return TRUE;
 		}
 		if (PtIn(TrackRectAt(rc, VapPosX2Y()), x, y, 8)) {
@@ -4635,6 +5354,9 @@ static const HelpItem HELP_M_WEATHER[] = {
           "in a planet's cloud deck seen FROM ORBIT (per world), and the flashes, bolts and "
           "thunder INSIDE the rain storm you are standing in (global). They are independent "
           "systems - the page says which rows belong to which." },
+{ HK_ROW, "FOG",       "A ground fog where you are, rendered by the client inside every "
+          "surface so ground, hulls and sky fade into one grey. The storm's own mist "
+          "rides the RAIN page's Gloom and clears as you climb through the deck." },
 { HK_ROW, "SNOW",          "Coming soon." },
 { HK_ROW, "WEATHER MODEL", "Coming soon: weather found from the planet's own cloud map, so "
           "a storm is something you arrive in rather than summon." },
@@ -4962,13 +5684,27 @@ static const HelpItem HELP_EXH[] = {
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "SHIMMER", NULL },
-{ HK_ROW, "Exhaust shimmer", "Heat haze bending the view behind the plume. Needs atmosphere "
-          "and lit engines, and it is EXTERNAL VIEW ONLY - from the cockpit the engines are "
-          "behind you, and a screen-space warp indoors would smear the panel and the window "
-          "frame along with the plume." },
-{ HK_ROW, "Offset (m)", "Slides the haze along the flow axis. Bipolar - it snaps to zero at "
-          "the centre. The nozzle a vessel DEFINES and the nozzle you can SEE do not always "
-          "agree, and this is the fix." },
+{ HK_ROW, "Shimmer amplitude", "Heat haze bending the view behind the plume - the slider is "
+          "the wave's AMPLITUDE, how far the image is displaced. Needs atmosphere and lit "
+          "engines, and it is EXTERNAL VIEW ONLY - from the cockpit the engines are behind "
+          "you, and a screen-space warp indoors would smear the panel and the window frame "
+          "along with the plume. Each engine group's (or overridden thruster's) own strength "
+          "drives its own jets, so a weak hover haze and a strong main haze coexist." },
+{ HK_ROW, "Offset (m)", "Slides the haze along EACH JET'S OWN flow direction, -2 to +10 m - "
+          "positive is downstream for a main, a hover and a retro alike, whatever way they "
+          "point. The tick marks true zero and the knob snaps to it. The nozzle a vessel "
+          "DEFINES and the nozzle you can SEE do not always agree, and this is the fix; the "
+          "negative side stays short because further upstream the warp would sit over the "
+          "hull and ripple the ship itself." },
+{ HK_ROW, "Wavelength", "The size of the ripples, as a multiplier - high is broad and lazy, "
+          "low is fine frying-pan heat. 1.00 is the original look." },
+{ HK_ROW, "Frequency", "How fast the waver churns. 1.00 is the original pace; 0 freezes the "
+          "pattern. When several groups haze at once, the ripple TEXTURE (wavelength and "
+          "frequency) comes from the strongest one - the strengths stay individual." },
+{ HK_P,   "The haze answers to AIR DENSITY, automatically: full in the lower atmosphere, "
+          "visibly thinning through a climb, gone in vacuum - and on a truly dense world "
+          "like Venus it runs up to about twice Earth strength. Nothing to set; the sim "
+          "already knows how much air there is.", NULL },
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "PLUME EXPANSION", NULL },
@@ -4992,10 +5728,29 @@ static const HelpItem HELP_EXH[] = {
           "duly shudders and pinches at sea level. The fade between them lives inside "
           "whatever window you set, so the two ramps can never overlap." },
 { HK_ROW, "Width / Length", "The jet's overall size." },
-{ HK_ROW, "Diamonds", "How many shock cells in the train. A whole number." },
+{ HK_ROW, "Diamonds", "How many shock cells in the train, 0 to 12 - 0 is a clean jet with no "
+          "cells at all. The sea-level train's length follows the count, so fewer diamonds is "
+          "also a shorter train (the Length knob corrects that per hull). Successive cells "
+          "are always fainter than the one before - brightest at the nozzle, dissolving into "
+          "haze at the tail - and under throttle the train grows and shrinks by WHOLE "
+          "diamonds, in sequence, each fading in complete: a real shock pattern is coherent "
+          "or gone, never a fraction of a cell." },
 { HK_ROW, "Diamond bright / spacing", "Contrast and pitch of the cells. In PHYSICS both are "
           "already being driven - spacing stretches as you climb and tightens as you throttle "
           "down - so these trim that, they do not set it." },
+{ HK_ROW, "Diamond shape", "Where each cell bulges, -1 to +1. At 0 the classic symmetric "
+          "diamond; at -1 a HALF diamond with its base toward the bell - the bright "
+          "converging cone an RS-25 shows at the lip, because the first cell's other half is "
+          "inside the nozzle; at +1 the mirror, an expansion fan opening downstream. The "
+          "tips stay pinned to the discs at every setting." },
+{ HK_ROW, "Diamond length / width", "Each cell's size, separately per axis. Length 1 puts "
+          "the tips exactly at the discs; shorter pulls them in until only thin bright discs "
+          "remain (a pure Mach-disc train), longer spills each cell over its neighbours "
+          "without stacking brightness. Width is the radial size." },
+{ HK_ROW, "Diamond offset", "Slides the whole train along the jet, -2 to +5 m - negative "
+          "toward the bell, positive downstream. Cells, waists and disc glints move as one "
+          "structure. Useful when the visible nozzle and the defined exhaust point disagree, "
+          "or to park the first half-diamond right at the lip." },
 { HK_ROW, "Bloom width / bright", "The wide faint vacuum halo, the other end of the regime." },
 { HK_P,   "On wet ground the jet also appears in the REFLECTION, drawn from under the "
           "water alongside the hull and its lights. It costs nothing while the ground is "
@@ -5008,9 +5763,11 @@ static const HelpItem HELP_EXH[] = {
 { HK_ROW, "Soot streaks", "Dark ablative streaks shedding off the lip. 0 = off. They are "
           "drawn dark OVER the jet, because soot is in the flame and must dim it." },
 { HK_ROW, "Soot churn", "How fast they move. 0 freezes them." },
-{ HK_ROW, "Jet / Bloom", "Two colour swatches. The jet core reaches white through the "
-          "client's bloom, not through the palette - so with post-processing off it can only "
-          "get brighter, never whiter." },
+{ HK_ROW, "Jet / Bloom / Dia", "Three colour swatches: the jet core, the vacuum halo, and "
+          "the diamonds. The diamond swatch is exactly the colour the diamonds render - "
+          "what you pick is what you see, white being the classic near-white look. The jet "
+          "core reaches white through the client's bloom, not through the palette - so with "
+          "post-processing off it can only get brighter, never whiter." },
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "BELL GLOW", NULL },
@@ -5262,6 +6019,11 @@ static const HelpItem HELP_VAP[] = {
 { HK_ROW, "Base fill", "The filled disc closing this cone's wide end - what gives it a "
           "back, and at high opacity the face that actually hides the hull. Off returns "
           "the open shell." },
+{ HK_ROW, "Base fill offset", "Slides the base's centre along the cone's axis, as a "
+          "fraction of the cone's own depth. At -1 it is pushed all the way in and becomes "
+          "a second, inner face of the cone; 0 is the flat disc; +0.5 bulges it outward. "
+          "The rim never moves, so base and cone always stay joined. With Size z at 0 "
+          "there is no depth to offset, so on a flat collar the slider rests." },
 { HK_ROW, "Position x / y / z", "Where this cone sits, in hull sizes, in Orbiter's own axis "
           "convention: x along the wing line, y vertical, z along the flight direction. All "
           "three bipolar, snapping to zero. Per cone - z is what separates the two collars "
@@ -5473,6 +6235,53 @@ static const HelpItem HELP_GRY[] = {
 };
 
 // --- PAGE: RAIN (WORLD > WEATHER) -------------------------------------------
+// --- LEAF: FOG (2026-09-05, client patch aa) - first-flight text, to be revised
+//     after his look round (workflow 3b) ------------------------------------------
+static const HelpItem HELP_FOGP[] = {
+{ HK_H,   "FOG - the air at ground level", NULL },
+{ HK_P,   "A ground fog where you are, rendered by the patched client inside every "
+          "surface - terrain, the apron, hulls, exhaust particles, runway lights, the "
+          "sky - so a ship, the ground it stands on and the horizon behind it all fade "
+          "into the same grey. The colour is the client's own: the sky's light plus the "
+          "sun seen through the fog, so it is warm at dawn, grey under a storm deck and "
+          "dark at night. The sun weakens through the layer and every shadow softens "
+          "with it - the ground shadows and the cabin's own - the runway lights wear a "
+          "halo, and the cockpit interior stays clear.", NULL },
+{ HK_P,   "The pill summons the fog; TEST previews the same event with the pill off. "
+          "Both build over about twenty seconds. Turning the pill off clears it at once "
+          "(for A/B); releasing TEST lets it thin out over twenty seconds.", NULL },
+{ HK_ROW, "Visibility (m)", "How far you can see at ground level, in metres. 300 is a real "
+          "fog; 50 is a wall; 2000 is a haze." },
+{ HK_ROW, "Fog top (m)",    "How thick the layer is over the ground. The layer sits on the "
+          "terrain under your vessel; climb out of it and you look down on a blanket." },
+{ HK_ROW, "Fade",           "How the top thins: 0 is a solid slab with a hard ceiling, 1 has "
+          "thinned to a few percent by the top, 2 is a wispy layer mostly gone halfway up." },
+{ HK_ROW, "Brightness",     "A gain on the lit fog colour. 1 is the client's own. The colour "
+          "AND its brightness already follow the sun - dim at dawn and dusk, dark at "
+          "night, grey under a storm - so this scales a look that tracks the day; it "
+          "is not a picker." },
+{ HK_ROW, "Sun glow",       "The bright lobe around the sun's direction - fog scatters "
+          "forward, so looking toward the sun the fog glows. 0 removes it." },
+{ HK_ROW, "Fog",            "Readout: the fog's build-up, or the honest reason there is none "
+          "(no air on this world, the camera at another world, too high)." },
+{ HK_GAP, NULL, NULL },
+{ HK_ROW, "Base lights",    "Switches every base's NIGHT state on now - the night textures on "
+          "hangars and tiles, the runway and taxiway lights - the way a real airfield "
+          "lights up when the visibility drops. Off is Orbiter's own behaviour: on at "
+          "night, off by day. The same switch sits at the bottom of the RAIN page - one "
+          "setting, two doors." },
+{ HK_ROW, "Lights glow",    "A gain on everything those lights emit, 1 = stock. Past 1 the "
+          "excess reaches the client's Light glow post-process and the lights bloom - "
+          "needs Light glow enabled in the D3D9 video settings." },
+{ HK_ROW, "Lights halo",    "The aureole round each runway light in fog: the air near the lamp "
+          "scatters its light toward you, so a lamp in fog is a soft disc that GROWS with "
+          "the fog between you and it. 1 is the designed halo, 0 a plain lamp that merely "
+          "dims with distance." },
+{ HK_P,   "The RAIN page's Gloom drives a second layer, the storm's mist, up to the "
+          "storm deck - climb through the deck and it clears. Saves GLOBALLY; per-world "
+          "files arrive with the weather model.", NULL },
+};
+
 static const HelpItem HELP_RAINP[] = {
 { HK_H,   "WHAT THIS PAGE IS", NULL },
 { HK_P,   "A storm you summon at the surface. The build-up ramps over ten seconds or so - "
@@ -5508,7 +6317,10 @@ static const HelpItem HELP_RAINP[] = {
 { HK_ROW, "Density", "How many streaks are in the falling sheet." },
 { HK_ROW, "Fall speed", "How fast they fall." },
 { HK_ROW, "Streak length", "How long each streak draws." },
-{ HK_ROW, "Streak glow", "How brightly the streaks catch the light." },
+{ HK_ROW, "Streak glow", "How brightly the streaks catch the light - and there has to be "
+          "light. Rain is lit by the sky, by your own lamps (a landing or docking light "
+          "lights the rain in its beam) and by the storm's flashes; at night with nothing "
+          "on, the drops all but vanish, which is what real rain does." },
 { HK_ROW, "Slant (deg)", "Wind. Tilts the whole sheet up to fifteen degrees either way." },
 { HK_ROW, "Splashes", "Rings where drops land, on ground and on water. Two fields - one "
           "around the camera, one around the ship - so a chase view still sees the ground "
@@ -5571,34 +6383,73 @@ static const HelpItem HELP_RAINP[] = {
           "window mask), 2 paints the mask itself - green where the client sees authored "
           "window glass, blue where it sees interior. Leave at 0." },
 { HK_ROW, "Rain view", "Which INTERNAL views the rain is drawn in. VC ONLY is the default and the strictest: in a virtual cockpit every streak is cut at the window frame per pixel, so the cabin stays dry - that needs Sun glare enabled for the depth buffer, and without it the VC stays dry rather than showing drops indoors. VC + PANEL and ALL VIEWS add the 2D panel and the glass cockpit, where no depth is needed: those panels are painted over the rain by Orbiter itself, so they hide it for free. Outside views are always wet and are not affected by this." },
+{ HK_ROW, "Rain surfaces", "Opens the RAINSURFACES popup: declare which mesh groups take "
+          "drops on the glass by CLICKING them in the sim - no mesh editing. Works with "
+          "the rain pill off (it edits configuration, not the storm); the popup has its "
+          "own help." },
 { HK_GAP, NULL, NULL },
 { HK_H,   "SOUNDS", NULL },
-{ HK_ROW, "Rain sound", "The storm's sound: three rain loops (patter / steady / downpour) "
-          "crossfading as the storm builds, played through XRSound. This is the volume - "
+{ HK_ROW, "Rain sound", "The storm's sound heard from OUTSIDE: three rain loops (patter / "
+          "steady / downpour) crossfading as the storm builds, played through XRSound. "
           "1 is the designed mix against Orbiter's other ambient sounds, 0 is silent. It "
-          "follows the storm's own gates, so it fades out above the weather. In the "
-          "virtual cockpit the storm drops to a muffled 45% and a fourth loop takes its "
-          "place: raindrops drumming on the hull itself. Needs XRSound.dll - absent, "
-          "the row does nothing and the rain stays visual only. (Thunder lives with the "
-          "bolts, on the LIGHTNING page.)" },
-{ HK_ROW, "Hull drum", "Rain drumming on the SKIN of your ship - a fourth loop that plays only from inside a virtual cockpit, and the sound you actually notice in there. It has its own volume because it is about the vessel rather than the weather: turn it down for the storm without the drumming, and the outside mix does not move. 0 is silent." },
+          "follows the storm's own gates, so it fades out above the weather. Inside a "
+          "cockpit you hear a DIFFERENT volume - Rain in cabin on the VIRTUAL COCKPIT "
+          "page, with the hull drum beside it - so the two are set independently. Needs "
+          "XRSound.dll - absent, the row does nothing and the rain stays visual only. "
+          "(Thunder lives with the bolts, on the LIGHTNING page.)" },
 { HK_GAP, NULL, NULL },
 { HK_ROW, "Rain", "Readout: the storm's build-up and how wet the ground is, or the honest "
           "reason nothing is drawn - external only (and the virtual cockpit, which sees "
           "the storm through its windows and stays dry inside), Earth only, above the "
           "weather. Vessels with large interiors can seal them with an authored roof "
           "mesh, Meshes\\ORO\\<class>_rainshield.msh - see the docs." },
+{ HK_GAP, NULL, NULL },
+{ HK_ROW, "Base lights",    "Switches every base's NIGHT state on now - the night textures on "
+          "hangars and tiles, the runway and taxiway lights - the way a real airfield "
+          "lights up when the visibility drops. Off is Orbiter's own behaviour: on at "
+          "night, off by day. The same switch sits at the bottom of the FOG page - one "
+          "setting, two doors." },
+{ HK_ROW, "Lights glow",    "A gain on everything those lights emit, 1 = stock. Past 1 the "
+          "excess reaches the client's Light glow post-process and the lights bloom - "
+          "needs Light glow enabled in the D3D9 video settings." },
+{ HK_ROW, "Lights halo",    "The aureole round each runway light in fog: the air near the lamp "
+          "scatters its light toward you, so a lamp in fog is a soft disc that GROWS with "
+          "the fog between you and it. 1 is the designed halo, 0 a plain lamp that merely "
+          "dims with distance." },
 { HK_P,   "Saves GLOBALLY - per-world rain files arrive with the weather model.", NULL },
+};
+
+// --- POPUP: RAINSURFACES (reached from the RAIN page's windscreen group) ----
+static const HelpItem HELP_RSURF[] = {
+{ HK_H,   "WHAT THIS POPUP IS", NULL },
+{ HK_P,   "Declares which mesh groups accept rain drops on the glass WITHOUT editing the "
+          "mesh: each entry is one line (mesh name + group index) in "
+          "Config\\ORO\\VesselsRainSurfaces.cfg, which the patched client reads beside "
+          "the in-mesh RAIN 1 tokens. The list applies to every vessel - the mesh name "
+          "says whose glass each group is. SAVE applies immediately on the ORO-patched "
+          "client; an older client needs a scenario (re)load.", NULL },
+{ HK_ROW, "ADD",    "Goes amber; your next click in the sim declares the mesh group you "
+                    "clicked as a rain surface - it lights up green for as long as you "
+                    "hold the mouse button, so you can see exactly what you picked. "
+                    "Only works in VC view - sit in the virtual cockpit and click your "
+                    "own windscreen. Press again to cancel." },
+{ HK_ROW, "REMOVE", "Goes amber; click an entry in the list, answer YES, and it is gone "
+                    "from the list. SAVE to keep it removed." },
+{ HK_ROW, "SAVE",   "Writes the list to the cfg AND applies it to the running sim - "
+                    "adds and removals take effect at once. Amber while the list "
+                    "differs from the file; unsaved changes are dropped when the panel "
+                    "closes." },
+{ HK_ROW, "BACK",   "Closes the popup (back to the RAIN page)." },
 };
 
 // --- PAGE: VIRTUAL COCKPIT (PILOT) ------------------------------------------
 static const HelpItem HELP_VC[] = {
 { HK_H,   "WHAT THIS PAGE IS", NULL },
 { HK_P,   "The cockpit itself: light coming into it, and the seat you are sitting in.", NULL },
-{ HK_P,   "VC SHADOWS is the one section where ORO DRAWS NOTHING. It hands the patched "
-          "client two numbers and the client's own shadow pass does the work - which is why "
-          "the whole section greys out on a client that cannot do it. A switch that cannot "
-          "do anything is worse than no switch.", NULL },
+{ HK_P,   "VC SHADOWS and CABIN AT NIGHT are sections where ORO DRAWS NOTHING. They hand "
+          "the patched client a few numbers and the client's own passes do the work - which "
+          "is why they grey out on a client that cannot do it. A switch that cannot do "
+          "anything is worse than no switch.", NULL },
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "VC SHADOWS", NULL },
@@ -5624,6 +6475,45 @@ static const HelpItem HELP_VC[] = {
           "Launchpad D3D9 setup.", NULL },
 { HK_GAP, NULL, NULL },
 
+{ HK_H,   "CABIN AT NIGHT", NULL },
+{ HK_P,   "Stock Orbiter keeps a virtual cockpit fully readable at midnight: its authors "
+          "fill it with a flat emissive light (the stock DeltaGlider has it on nearly every "
+          "cabin surface) and the Launchpad ambient sits on top, so the sun going down "
+          "changes nothing inside. With this on, both scale down as the sun sets AT THE "
+          "CAMERA - a twilight ramp on a world with air, a sharp flip without one, and the "
+          "horizon dips with altitude so an orbital night is the planet's shadow. What "
+          "survives is what really gives light: MFD screens, self-lit instruments, emission "
+          "maps, and every cockpit lamp - so switching the cabin light on finally means "
+          "something.", NULL },
+{ HK_ROW, "Night floor", "What is left of the fill at full night. 0 is black without a lamp "
+          "on, 1 is stock. The caption reads out the live value." },
+{ HK_ROW, "Dim under rain and fog", "The second pill: the weather takes light out of the "
+          "cabin too. A storm collapses the sun (the RAIN page's Gloom) and a thick fog "
+          "thins it (the FOG page's Visibility), and the fill follows what they leave. "
+          "Off, the weather leaves the cabin alone." },
+{ HK_ROW, "Weather dim", "How much of THAT loss the cabin shows. It does not change the "
+          "weather - Gloom and Visibility still decide how much sun is left - it scales the "
+          "darkening they cause. At 1 a full storm at noon leaves about a tenth of the fill "
+          "and Gloom 1 about a third; at 2 a storm is near black; 0 is the pill off." },
+{ HK_P,   "One compromise to know: a lit button or label an author painted with the same "
+          "flat emissive as the walls dims with the walls. A real self-lit display (black "
+          "diffuse, the MFDs) does not.", NULL },
+{ HK_GAP, NULL, NULL },
+
+{ HK_H,   "CABIN SOUNDS", NULL },
+{ HK_P,   "The storm as heard from the seat. Both live here rather than on the RAIN page "
+          "because both are about the HULL - what it lets through and what drums on it - "
+          "and both move with the VC block when a hull owns its settings.", NULL },
+{ HK_ROW, "Rain in cabin", "The rain loops heard INSIDE, muffled through the hull. "
+          "Independent of the RAIN page's Rain sound, which is the outside mix and does not "
+          "reach in here: set this to 0 and the cabin is silent in a storm you can still "
+          "hear from an external view. 1 is the designed level." },
+{ HK_ROW, "Hull drum", "Rain on the SKIN of your ship, heard from inside: a metal roof "
+          "under rain - dull thumps over a low panel rumble, no hiss - structure-borne, so "
+          "it is never muffled. Its own volume, up to 3: turn it down for the storm without "
+          "the drumming and nothing else moves. 0 is silent." },
+{ HK_GAP, NULL, NULL },
+
 { HK_H,   "CAM-SHAKE", NULL },
 { HK_P,   "The one effect whose STRENGTH is not a slider. It is driven by thrust, dynamic "
           "pressure and ground contact - the sliders here shape the LOOK, not the amount. "
@@ -5644,8 +6534,9 @@ static const HelpItem HELP_VC[] = {
 { HK_H,   "SAVING", NULL },
 { HK_P,   "This page writes to TWO scopes. The cabin box and the shadow depth are always PER "
           "VESSEL CLASS, because the right value depends on how big that cockpit is and how "
-          "its materials were authored, not on who is flying it. The shadow on/off and the "
-          "whole cam-shake section are GLOBAL by default - but the SAVE TARGET button at "
+          "its materials were authored, not on who is flying it. The shadow on/off, CABIN "
+          "AT NIGHT, CABIN SOUNDS and the whole cam-shake section are GLOBAL by default - "
+          "but the SAVE TARGET button at "
           "the top of the page moves them into the hull's file when you want that.", NULL },
 { HK_ROW, "Save target",  "Cam-shake is the reason this is here. A big heavy ship should "
                           "not rattle and shake like a tiny one, and the amplitude and "
@@ -5675,6 +6566,8 @@ static const HelpItem* HelpText(int pg, int& n)
 	case PG_VAPOUR:    HT(HELP_VAP);
 	case PG_FLIGHTAID: HT(HELP_AID);
 	case PG_RAIN:      HT(HELP_RAINP);
+	case PG_FOG:       HT(HELP_FOGP);
+	case PG_RAINSURF:  HT(HELP_RSURF);
 	case PG_LIGHTNING: HT(HELP_LTG);
 	case PG_AURORA:    HT(HELP_AUR);
 	case PG_ECLIPSE:   HT(HELP_ECL);
@@ -6249,7 +7142,7 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		// tested in RAW client coordinates like everything above, and reachable at any
 		// scroll depth. SAVE writes only the scopes this page can have changed, and the
 		// status line names the files, same as the global one.
-		if (!IsMenuPage(CurPage()) && PtIn(LeafSaveBtnRect(rc), x, y)) {
+		if (PageHasLeafSave(CurPage()) && PtIn(LeafSaveBtnRect(rc), x, y)) {
 			g_saveMask = LeafSaveMask(CurPage());
 			g_saveOk = OroSettings_SaveScope(g_saveMask);
 			g_saveWasRevert = false;
@@ -6267,7 +7160,7 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		// hull, LoadBody restores the built-in DEFAULTS. Both are the right answer to
 		// "revert", because both are what you would have had if you had never touched
 		// anything - so this hands the question straight to them rather than second-guessing.
-		if (!IsMenuPage(CurPage()) && PtIn(LeafRevBtnRect(rc), x, y)) {
+		if (PageHasLeafSave(CurPage()) && PtIn(LeafRevBtnRect(rc), x, y)) {
 			const int m = LeafSaveMask(CurPage());
 			OroSettings_Revert(m);
 			g_saveMask = m;
@@ -6327,6 +7220,12 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		case PG_RAIN:
 			handled = ClickRain(hDlg, rc, x, dy);
 			break;
+		case PG_FOG:
+			handled = ClickFog(hDlg, rc, x, dy);
+			break;
+		case PG_RAINSURF: // configuration, not an effect - never behind the scenario lock
+			handled = ClickRsurf(hDlg, rc, x, dy);
+			break;
 		case PG_LIGHTNING:
 			handled = ClickLightning(hDlg, rc, x, dy);
 			break;
@@ -6345,7 +7244,8 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 				handled = TRUE;
 				break;
 			}
-			handled = ClickVCShadows(hDlg, rc, x, dy) || ClickCamShake(hDlg, rc, x, dy);
+			handled = ClickVCShadows(hDlg, rc, x, dy) || ClickVCNight(hDlg, rc, x, dy)
+			       || ClickVCSounds(hDlg, rc, x, dy) || ClickCamShake(hDlg, rc, x, dy);
 			break;
 		case PG_SCENARIOS:
 			// Never behind the scenario lock: stopping or muting a running scenario is
@@ -6397,7 +7297,9 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		else if (g_dragMot   >= 0) *RowKnob(g_motRows[g_dragMot])  = TrackValueFromX(rc, x);
 		else if (g_dragShake >= 0) *g_shakeRows[g_dragShake].value = TrackValueFromX(rc, x) * g_shakeRows[g_dragShake].vmax;
 		else if (g_dragEnv   >= 0) *RowKnob(g_envRows[g_dragEnv])  = TrackValueFromX(rc, x);
-		else if (g_dragEnvK  >= 0) *g_envKnobs[g_dragEnvK].value   = EnvKnobValueFromX(rc, x, g_envKnobs[g_dragEnvK].vmax);
+		else if (g_dragEnvK  >= 0) *g_envKnobs[g_dragEnvK].value   = EnvKnobValueFromXA(rc, x, g_envKnobs[g_dragEnvK].vmin, g_envKnobs[g_dragEnvK].vmax);
+		else if (g_dragShim  >= 0) *g_shimRows[g_dragShim].value   = g_shimRows[g_dragShim].vmin
+		                                                           + TrackValueFromX(rc, x) * (g_shimRows[g_dragShim].vmax - g_shimRows[g_dragShim].vmin);
 		else if (g_dragPlume >= 0) *g_plumeRows[g_dragPlume].value = g_plumeRows[g_dragPlume].vmin
 		                                                           + TrackValueFromX(rc, x) * (g_plumeRows[g_dragPlume].vmax - g_plumeRows[g_dragPlume].vmin);
 		else if (g_dragPlmBand >= 0) PlmBandDrag(TrackValueFromX(rc, x));
@@ -6429,6 +7331,14 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 			if (g_rainRows[g_dragRain].dec == 0)
 				*g_rainRows[g_dragRain].value = floorf(*g_rainRows[g_dragRain].value + 0.5f);
 		}
+		else if (g_dragBlg   == 0) g_fx.baseLightsGlow = 0.25f + TrackValueFromX(rc, x) * 2.75f;
+		else if (g_dragBlg   == 1) g_fx.baseLightsHalo = TrackValueFromX(rc, x) * 3.0f;
+		else if (g_dragFog   >= 0) {
+			*g_fogRows[g_dragFog].value = g_fogRows[g_dragFog].vmin
+			         + TrackValueFromX(rc, x) * (g_fogRows[g_dragFog].vmax - g_fogRows[g_dragFog].vmin);
+			if (g_fogRows[g_dragFog].dec == 0)   // the same snap as the press (the rain lesson)
+				*g_fogRows[g_dragFog].value = floorf(*g_fogRows[g_dragFog].value + 0.5f);
+		}
 		else if (g_dragVap   >= 0) *g_vapRows[g_dragVap].value     = TrackValueFromX(rc, x) * g_vapRows[g_dragVap].vmax;
 		else if (g_dragVap2  >= 0) *g_vapRows2[g_dragVap2].value  = TrackValueFromX(rc, x) * g_vapRows2[g_dragVap2].vmax;
 		else if (g_dragVapP  == 2) g_fx.vapPos2  = EnvKnobValueFromX(rc, x, VAP_POS_MAX);
@@ -6436,6 +7346,8 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		else if (g_dragVapP  == 4) g_fx.vapPosY  = EnvKnobValueFromX(rc, x, VAP_POS_MAX);
 		else if (g_dragVapP  == 5) g_fx.vapPosX2 = EnvKnobValueFromX(rc, x, VAP_POS_MAX);
 		else if (g_dragVapP  == 6) g_fx.vapPosY2 = EnvKnobValueFromX(rc, x, VAP_POS_MAX);
+		else if (g_dragVapP  == 7) g_fx.vapBaseOfs  = EnvKnobValueFromXA(rc, x, VAP_BOFS_LO, VAP_BOFS_HI);
+		else if (g_dragVapP  == 8) g_fx.vapBaseOfs2 = EnvKnobValueFromXA(rc, x, VAP_BOFS_LO, VAP_BOFS_HI);
 		else if (g_dragVapP  >= 0) g_fx.vapPos   = EnvKnobValueFromX(rc, x, VAP_POS_MAX);
 		else if (g_dragVapR  == 1) g_fx.vapPitch  = EnvKnobValueFromX(rc, x, VAP_ROT_MAX);
 		else if (g_dragVapR  == 2) g_fx.vapYaw    = EnvKnobValueFromX(rc, x, VAP_ROT_MAX);
@@ -6444,6 +7356,10 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		else if (g_dragVapBand >= 0) VapBandDrag(TrackValueFromX(rc, x));
 		else if (g_dragVapBand2 >= 0) VapBandDragC(TrackValueFromX(rc, x), g_dragVapBand2,
 		                                           g_fx.vapMachMin2, g_fx.vapMachMax2);
+		else if (g_dragVcs   == 5) g_fx.rainHullVol     = TrackValueFromX(rc, x) * 3.0f;   // cabin sounds (2026-09-06)
+		else if (g_dragVcs   == 4) g_fx.vcRainSound     = TrackValueFromX(rc, x) * 2.0f;
+		else if (g_dragVcs   == 3) g_fx.vcWxDim         = TrackValueFromX(rc, x) * 2.0f;   // weather dim
+		else if (g_dragVcs   == 2) g_fx.vcNightFloor    = TrackValueFromX(rc, x);   // patch (ad)
 		else if (g_dragVcs   == 1) g_fx.vcShadowDepth  = TrackValueFromX(rc, x);
 		else if (g_dragVcs   >= 0) g_fx.vcShadowRadius = VCS_RAD_MIN + TrackValueFromX(rc, x) * (VCS_RAD_MAX - VCS_RAD_MIN);
 		else return FALSE;
@@ -6458,12 +7374,19 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 			ReleaseCapture();
 			return TRUE;
 		}
+		// ⚠️ THIS LIST IS A CLAIM ABOUT EVERY DRAG FLAG - it must match ClearDrags()
+		// exactly, or the missing flag's slider keeps dragging after release AND
+		// steals every later drag (it sits earlier in the WM_MOUSEMOVE chain).
+		// g_dragShim proved it on 2026-09-04, on his first flight of the wave rows:
+		// added to ClearDrags and the move chain, missed here, and the guard fell
+		// through to FALSE so ClearDrags never ran. When a new flag is born, grep
+		// for one of these names and touch all THREE sites.
 		if (g_dragRow >= 0 || g_dragMot >= 0 || g_dragShake >= 0 || g_dragEnv >= 0
-		    || g_dragEnvK >= 0 || g_dragPlume >= 0 || g_dragPlmBand >= 0 || g_dragBgl >= 0
-		    || g_dragPrt >= 0 || g_dragPlas >= 0
+		    || g_dragEnvK >= 0 || g_dragShim >= 0 || g_dragPlume >= 0 || g_dragPlmBand >= 0
+		    || g_dragBgl >= 0 || g_dragPrt >= 0 || g_dragPlas >= 0
 		    || g_dragEcl >= 0 || g_dragAur >= 0 || g_dragAurRib >= 0
 		    || g_dragAurK >= 0 || g_dragLtg >= 0 || g_dragRlt >= 0 || g_dragGry >= 0
-		    || g_dragRain >= 0 || g_dragVcs >= 0 || g_dragTol >= 0
+		    || g_dragRain >= 0 || g_dragFog >= 0 || g_dragBlg >= 0 || g_dragVcs >= 0 || g_dragTol >= 0
 		    || g_dragVap >= 0 || g_dragVap2 >= 0 || g_dragVapP >= 0 || g_dragVapR >= 0
 		    || g_dragVapBand >= 0 || g_dragVapBand2 >= 0
 		    || g_dragCop >= 0 || g_dragBar >= 0) {
@@ -6490,6 +7413,14 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 	// solved upstream and we were the reason it did not work.)
 	case WM_TIMER:
 		if (wParam == 1) {                       // OUR ~10 Hz repaint, and only ours
+			// RAINSURFACES: leaving the popup by ANY route (nav BACK, BACK TO MAIN)
+			// stands the armed pick down within a tick - a registered proc costs the
+			// client a scene pick per sim click, and an amber ADD on a page you can
+			// no longer see would be a trap.
+			if (CurPage() != PG_RAINSURF && (g_rsAddArmed || g_rsRemArmed || g_rsConfirm >= 0)) {
+				g_rsAddArmed = g_rsRemArmed = false; g_rsConfirm = -1; g_rsMsg[0] = 0;
+				OroRs_PickArm(false);
+			}
 			InvalidateRect(hDlg, NULL, FALSE);   // keeps ENABLED live vs Ctrl+G
 			return TRUE;
 		}
@@ -6571,6 +7502,12 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		OroHelp_Close();                   // closing the panel from its own caption button
 		                                   // must not leave the help window behind either
 		ClearDrags();
+		// RAINSURFACES: stand the pick down and forget the in-memory list - the next
+		// dialog instance re-reads the cfg, so unsaved list edits die with the panel
+		// (honest: the popup's SAVE amber said so all along).
+		g_rsAddArmed = g_rsRemArmed = false; g_rsConfirm = -1;
+		g_rsN = -1; g_rsUnsaved = false; g_rsMsg[0] = 0;
+		OroRs_PickArm(false);
 		// The picker's gradient DIBs are window-lifetime resources; the open state
 		// must not survive into the next dialog instance either.
 		g_pickOpen = false; g_pickTarget = NULL; g_pickDrag = -1;

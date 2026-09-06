@@ -75,6 +75,8 @@ struct OroThrusterFx {
 	bool  shimmerEnabled  = true;
 	float shimmer         = 0.0f;
 	float shimmerOfs      = 0.0f;
+	float shimmerWave     = 1.0f;
+	float shimmerFreq     = 1.0f;
 	// Plume expansion (the long rationale for each is on the matching flat field below)
 	bool  plumeEnabled    = true;
 	float plume           = 1.0f;
@@ -86,6 +88,11 @@ struct OroThrusterFx {
 	float plumeCells      = 7.0f;
 	float plumeDiamond    = 1.0f;
 	float plumeSpacing    = 1.0f;
+	float plumeDiaShape   = 0.0f;
+	float plumeDiaSize    = 1.0f;   // = the WIDTH since the same-day split (label
+	                                //   "Diamond width"; field + key kept - Opacity's rule)
+	float plumeDiaLen     = 1.0f;
+	float plumeDiaOfs     = 0.0f;
 	float plumeBloomWid   = 1.0f;
 	float plumeBloomBri   = 1.0f;
 	float plumeThroatOfs  = 0.0f;
@@ -94,6 +101,7 @@ struct OroThrusterFx {
 	float plumeSoot       = 0.0f;
 	DWORD plumeColJet     = 0x00A0D2FFu;
 	DWORD plumeColBloom   = 0x00FFC8AAu;
+	DWORD plumeColDia     = 0x00FFFFFFu;
 	// Bell glow. Its TEMPERATURE was already tracked per family (OroBell.cpp's s_T[]);
 	// this is what closes the other half of that - the controls were shared while the
 	// physics was not, which was an inconsistency sitting in the panel.
@@ -289,9 +297,33 @@ struct OroEffectState {
 	// on top of an already-shimmering world. Premium IPI resample; off without the client
 	// patch. Driven by the camera-target vessel's main/hover/retro plumes x air density.
 	bool  shimmerEnabled  = true;
-	float shimmer         = 0.0f;  // 0..1; 0 = no distortion, 1 = strong heat haze
-	float shimmerOfs      = 0.0f;  // -1..+1 m: slides the haze along the plume axis (0 = at the
-	                               // nozzle as the exhaust spec defines it; +ve = further aft)
+	float shimmer         = 0.0f;  // 0..1; 0 = no distortion, 1 = strong heat haze. This IS
+	                               // the wave AMPLITUDE (max UV displacement) - the row is
+	                               // labelled "Shimmer amplitude" since 2026-09-04, when the
+	                               // other two wave parameters got their own sliders.
+	float shimmerOfs      = 0.0f;  // -2..+10 m (was +/-1 until 2026-09-04): slides the haze
+	                               // along the plume axis (0 = at the nozzle as the exhaust
+	                               // spec defines it; +ve = further aft). Same units, wider
+	                               // track - old saved values load unchanged. ASYMMETRIC,
+	                               // his call: a negative fix (spec point authored aft of
+	                               // the visual nozzle) is a metre or two at most, and past
+	                               // that the depth-less warp sits over the HULL and
+	                               // ripples the ship itself - so the upstream side stays
+	                               // short while the downstream side serves the giants.
+	float shimmerWave     = 1.0f;  // x WAVELENGTH (0.25..4, 2026-09-04): spatial scale of the
+	                               //   ripple texture, along the plume AND the cross ripple
+	                               //   together (the octave ratios are preserved, so the knob
+	                               //   scales the whole texture instead of detuning it).
+	                               //   1 = the 2026-07-30 lab look bit for bit.
+	float shimmerFreq     = 1.0f;  // x FREQUENCY (0..3, 2026-09-04): temporal churn rate of
+	                               //   the waver (base ~1.4 Hz with faster harmonics at 1.0);
+	                               //   0 freezes the pattern - the Soot-churn convention.
+	                               //   ⚠️ Wavelength + Frequency are single full-frame shader
+	                               //   uniforms (shared phase math), so when two groups haze
+	                               //   at once the frame's wave TEXTURE comes from the
+	                               //   STRONGEST CONTRIBUTOR (26e's rule). STRENGTH is per
+	                               //   capsule since the same-day fold - each jet warps at
+	                               //   its own group's (or override's) strength.
 
 	// PLUME EXPANSION (2026-08-09) - pressure-dependent exhaust: the nozzle is expanded
 	// for ONE ambient pressure and the atmosphere decides what the jet does everywhere
@@ -342,13 +374,47 @@ struct OroEffectState {
 	                               //   owns the silhouette, so its width is a per-hull
 	                               //   fact (the Shell-dist lesson - a knob, not a bake).
 	float plumeLen        = 1.0f;  // x jet length (0..3) - the silhouette's other axis
-	float plumeCells      = 7.0f;  // NUMBER of shock cells / diamonds (1..12, rounded to
-	                               //   int at use). Spacing moves the same train closer/
-	                               //   further (doubling as a length lever - his call:
-	                               //   "that's ok"); this sets how many discs there ARE.
+	float plumeCells      = 7.0f;  // NUMBER of shock cells / diamonds (0..12, rounded to
+	                               //   int at use; 0 = NO diamonds - floor lowered from 1
+	                               //   on his 2026-09-04 ask). Spacing moves the same train
+	                               //   closer/further (doubling as a length lever - his
+	                               //   call: "that's ok"); this sets how many discs there
+	                               //   ARE. Note the sea-level jet LENGTH rides the count
+	                               //   (L_sea = spacing x (N+1.5)), so 0 also gives the
+	                               //   shortest train - continuous with 12 -> 1, and the
+	                               //   Length knob corrects it per hull.
 	float plumeDiamond    = 1.0f;  // x diamond (Mach disc) brightness  (0..2)
 	float plumeSpacing    = 1.0f;  // x shock-cell spacing              (0..3; cells sit
 	                               //   ~2 nozzle widths apart at 1.0)
+	float plumeDiaShape   = 0.0f;  // lozenge PROFILE, bipolar (-1..+1, his 2026-09-04
+	                               //   spec): the widest cross-section slides from the
+	                               //   upstream disc (-1 = half diamond, cone base facing
+	                               //   the BELL - the RS-25 first-cell look) through
+	                               //   mid-cell (0 = the classic full diamond, bit-exact
+	                               //   the pre-knob look) to the downstream disc (+1 =
+	                               //   the mirrored half, an expansion fan opening away).
+	float plumeDiaSize    = 1.0f;  // x lozenge RADIAL width (0..2; 1 = the pre-knob
+	                               //   0.85 x nozzle width). ⚠️ Labelled "Diamond width"
+	                               //   since the SAME-DAY split of the one-day-old Size
+	                               //   knob into length + width (his first flight of it) -
+	                               //   the KEY stays PlumeDiaSize so his test save
+	                               //   survives, the Opacity-renamed-from-Strength rule.
+	float plumeDiaLen     = 1.0f;  // x lozenge AXIAL extent (0..2), stretched about the
+	                               //   shape knob's peak. 1 = tips exactly AT the discs
+	                               //   (the pre-split geometry bit for bit); below it the
+	                               //   tips pull in - at the bottom the lozenge is a thin
+	                               //   slab at the peak, the pure-Mach-disc look; above it
+	                               //   the tent SPILLS into the flanking cells, which are
+	                               //   evaluated too and combined by MAX (the flash law:
+	                               //   the same structure re-lit, never a sum).
+	float plumeDiaOfs     = 0.0f;  // METRES, bipolar -2..+5 (his spec): slides the whole
+	                               //   cell train along the axis - negative = toward/into
+	                               //   the bell, positive = downstream. Shifts the
+	                               //   LOZENGES, the core waists and the disc glints
+	                               //   together (they are one standing-wave structure);
+	                               //   absolute metres like Throat offset, because the
+	                               //   visual nozzle and the exhaust spec disagree per
+	                               //   hull and that error is metres, not fractions.
 	float plumeBloomWid   = 1.0f;  // x vacuum bloom opening angle      (0..2)
 	float plumeBloomBri   = 1.0f;  // x vacuum bloom brightness         (0..2)
 	float plumeThroatOfs  = 0.0f;  // THROAT OFFSET [m] (0..1): slides the throat-fire
@@ -386,6 +452,18 @@ struct OroEffectState {
 	DWORD plumeColBloom   = 0x00FFC8AAu; // BLOOM tint: the vacuum halo. Default pale
 	                               //   blue - vacuum plumes lose the afterburning
 	                               //   orange (no entrained air to burn in).
+	DWORD plumeColDia     = 0x00FFFFFFu; // DIAMOND colour (2026-09-04, his ask) -
+	                               //   WYSIWYG, his same-day correction of the first
+	                               //   cut: the lozenges render this pick VERBATIM
+	                               //   (a "whiten toward the pick" blend was built
+	                               //   first and overturned on his first test - 15b's
+	                               //   pick-a-colour-get-that-colour rule). White
+	                               //   default sits within a hair of the classic
+	                               //   look, which was 85% of the way to white. The
+	                               //   core's disc glints blend TOWARD the same pick
+	                               //   (a glint is a blend by nature); the THROAT
+	                               //   fire deliberately does not follow it - that is
+	                               //   the JET family (23h).
 	// Outputs - module-written, dialog-read (the reentryHeat discipline: the regime
 	// the model picked must be VISIBLE, or a wrong pressure blend reads as a bug).
 	float plumeAtmKPa     = 0.0f;  // ambient static pressure at the vessel [kPa]
@@ -747,6 +825,29 @@ struct OroEffectState {
 	                               //   covered. Same instant-zero on the pill.
 	char  rainWhy[32]     = "";    // why it is not drawing, when it is not
 
+	// THE FOG (2026-09-05, client patch (aa)) - the FOG leaf under WORLD / WEATHER.
+	// GLOBAL scope in v1; per-world files arrive with the weather model, like the rain's.
+	// The client owns the colour (its own sun and daylight at the camera); these are the
+	// event, the layer's shape, and two taste gains.
+	bool  fogEnabled      = false; // the pill: a ground fog where you are
+	bool  fogTest         = false; // TEST: the same event as a preview - never saved
+	float fogVis          = 300.0f;// m, how far you see at ground level (20..3000)
+	float fogTop          = 250.0f;// m, the layer's thickness over the ground (20..1500)
+	float fogFade         = 1.0f;  // how the top thins: 0 = a hard ceiling, 2 = wispy (0..2)
+	float fogBright       = 1.0f;  // x the lit fog colour (0..2; 1 = the client's own)
+	float fogGlow         = 1.0f;  // x the forward-scatter lobe toward the sun (0..2)
+	float fogI            = 0.0f;  // live: the envelope, 0..1 - never saved
+	char  fogWhy[32]      = "";    // live: why there is none, when there is none
+
+	// BASE LIGHTS (2026-09-05, client patch ac) - his ask: low visibility is when an
+	// airfield switches its lights on. ONE setting, mirrored at the bottom of the RAIN
+	// and FOG pages. Off = stock (on at night, off by day). Auto-on at an effect
+	// threshold is a later question; the user's choice wins either way. GLOBAL.
+	bool  baseLightsOn    = false; // force every base's night state on now
+	float baseLightsGlow  = 1.0f;  // x the lit result (0.25..3; 1 = stock, >1 blooms with Light glow)
+	float baseLightsHalo  = 1.0f;  // x the fog AUREOLE round each light (0..3; 1 = designed, 0 = none) -
+	                               //   size and softness grow with the fog between lamp and eye
+
 	float plasVCGlow      = 1.0f;  // x THE VC GLOW (0..3), 2026-08-20. Brightness and reach
 	                               //   of the cockpit's luminous sheath - the screen-space
 	                               //   field that REPLACES the geometric draw list when the
@@ -950,6 +1051,20 @@ struct OroEffectState {
 	                               //   closing the cone's wide end. ON by default -
 	                               //   the base is part of the look he approved; off
 	                               //   returns the open loft.
+	float vapBaseOfs      = 0.0f;  // BASE FILL OFFSET (2026-09-04, Buck Rogers's ask,
+	                               //   promised on the thread): axial displacement of
+	                               //   the cap's CENTRE, as a fraction of this cone's
+	                               //   own reach, -1..+0.5. -1 = pushed fully in (the
+	                               //   cap becomes a second, inner face of the cone);
+	                               //   0 = the flat disc BIT FOR BIT; +0.5 = bulged
+	                               //   outward half the cone's depth (capped there by
+	                               //   design - the "sideways spinning top" risk, to
+	                               //   be judged in the look round). Scales with the
+	                               //   cone's own axial reach, so at Size z 0 (the
+	                               //   flat collar) there is no depth to offset and
+	                               //   the knob is inert - consistent: a second face
+	                               //   of a zero-depth cone IS the disc. Per class,
+	                               //   like every vapour shape knob.
 	// --- THE SECOND CONE (2026-08-29, his spec - the Concorde photo, one collar at
 	// the nose and one at the tail). Identical controls, completely separate tuning,
 	// NO second pill: the one pill arms the whole effect and each cone's OPACITY is
@@ -977,6 +1092,7 @@ struct OroEffectState {
 	DWORD vapColour2      = 0x00FAF0E8u; // cone 2 vapour colour
 	DWORD vapStreakCol2   = 0x00887C76u; // cone 2 streak colour
 	bool  vapBaseOn2      = true;  // cone 2's own BASE FILL pill
+	float vapBaseOfs2     = 0.0f;  // cone 2's own Base fill offset - see cone 1's note
 	// THE MACH BAND, as a double-handled slider (his design, 2026-08-11 round 3 - the
 	// EXPANSION BAND's control kind reused). Track spans M 0.5 .. 1.5; the handles are
 	// where the shroud starts and stops existing, and the RAMPS live inside that window
@@ -1051,6 +1167,31 @@ struct OroEffectState {
 	// frame passes over it. PER VESSEL CLASS, like the cabin box - the right value
 	// depends on how that particular VC was authored, not on who is flying it.
 	float vcShadowDepth   = 0.0f;
+	// THE CABIN AT NIGHT (client patch ad, 2026-09-05 - his ask: "Can we have the VC darken
+	// in the dark? ... There is no reason to use a cockpit light at night."). Stock keeps a
+	// VC fully readable at midnight because its authors fill it with material EMISSIVE
+	// (the DG: 0.8 on nearly every cabin surface) plus the Launchpad ambient. With the pill
+	// on, both scale down as the sun sets at the CAMERA - a twilight ramp with an
+	// atmosphere, a sharp flip without one, the horizon dipping with altitude so an
+	// orbital night is the planet's shadow - to the floor below. Displays, MFDs, emission
+	// maps and every local light stay: turn the cockpit light on and it finally matters.
+	bool  vcNight         = true;
+	float vcNightFloor    = 0.06f;  // what is left at full night: 0 = black without a lamp, 1 = stock
+	float vcNightLive     = 1.0f;   // READOUT: the scale sensed this frame (1 = day)
+	// WEATHER DIM (2026-09-06, his ask after the first storm test: "at gloom = 1.0 the
+	// cockpit is a bit more bright than I'd like"). How much the storm light and the fog
+	// take out of the cabin fill, on top of the sun: it still rides the RAIN page's Gloom
+	// and the FOG page's visibility - this only scales the darkening they cause. 1 = the
+	// designed curve (full storm leaves ~10%, gloom 1 ~37%), 2 = twice as dark, pill off
+	// = the weather leaves the cabin alone.
+	bool  vcWxDimOn       = true;
+	float vcWxDim         = 1.0f;
+	// THE CABIN'S OWN RAIN SOUND (2026-09-06, his design): the rain loops heard from the
+	// seat have their own volume, INDEPENDENT of the RAIN page's (which is the outside
+	// mix now). Inside you hear this one only; 0 = a silent cabin in a storm you can
+	// still hear from an external view. The hull drum sits beside it - both are what a
+	// HULL transmits to the seat, so both keys ride the movable VC block.
+	float vcRainSound     = 1.0f;   // x cabin rain volume (0..2; 0 = silent inside)
 	                               //   MEASURED on the stock DeltaGlider (2026-08-04), not
 	                               //   guessed: the sharpest box that still contains its
 	                               //   canopy structure. It stays a slider because unlike
@@ -1486,6 +1627,8 @@ bool        OroDepthClipOK();
 // suppression. Probed by binding (CanSuppressExhaust); the THRUSTER tab's
 // STOCK EXHAUST pill greys out when false.
 bool        OroStockExhaustSupported();
+bool        OroBaseLightsSupported();   // patch (ac): the BASE LIGHTS pill greys out without it
+bool        OroVCNightSupported();     // patch (ad): the CABIN AT NIGHT section greys out without it
 
 // True if the running client carries patch (l), so ORO can synthesize a tinted
 // particle texture. PARTICLESTREAMSPEC has no colour field - colour lives in the
@@ -1535,6 +1678,16 @@ bool        OroThr_ClassMatch(VESSEL* v);    // does this vessel's class match t
 // self-heals to the group. fam is ORO_FAM_EXH or ORO_FAM_PRT; thrIdx -1 or an
 // unfaithful vessel resolves to the group.
 const OroThrusterFx& OroThr_Eff(int grp, int thrIdx, int fam);
+
+// --- RAINSURFACES (2026-09-01) - the click-to-declare rain-glass popup -------
+// The dialog's ADD button borrows the Debug dialog's mesh-group pick through the
+// STOCK GENERICPROC_PICK_VESSEL slot; the module owns the registration (it holds
+// pCore) and hands each qualifying hit back to the dialog. All main thread.
+bool OroRs_PickAvail();               // patched client with GetDevMeshName bound?
+bool OroRs_PickArm(bool on);          // (un)register the pick proc (OroModule.cpp)
+bool OroRs_ApplyAvail();              // patched client with the live reload bound?
+bool OroRs_ApplyNow();                // re-apply the cfg to the LIVE meshes (patch h part 4)
+void OroDlg_RsPickResult(const char* mesh, int grp);   // module -> dialog (OroDialog.cpp)
 
 // --- THE PER-VESSEL CLASS CACHE (2026-08-30, his SRB report) -----------------
 // ORO loads ONE class file live - the focus vessel's - and used to apply it to

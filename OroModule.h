@@ -173,6 +173,18 @@ public:
 	// which made this a use-after-free in Orbiter's heap; see the registration site.
 	void ReleaseSceneOwnedBorrows(bool fromShutdownProc);
 
+	// RAINSURFACES (2026-09-01): the Debug-dialog-style mesh-group pick, borrowed
+	// through the STOCK GENERICPROC_PICK_VESSEL slot. Armed only while the popup's
+	// ADD button is amber; the file-static pick thunk in OroModule.cpp hands each
+	// hit to RsPickDeliver, which names the mesh (gcCore::GetDevMeshName, guard #12)
+	// and passes it to the dialog. pickData is really a gcCore::PickData* - void*
+	// keeps gcCoreAPI.h out of this header (only the .cpp includes it).
+	bool RsPickAvail() const;               // patched client with GetDevMeshName bound?
+	bool RsPickArm(bool on);                // (un)register the pick proc
+	void RsPickDeliver(const void* pickData);
+	bool RsApplyAvail() const;              // patch (h) part 4: live reload bound?
+	bool RsApplyNow();                      // re-apply the cfg to the LIVE meshes
+
 private:
 	gcCore2* pCore = nullptr;               // D3D9Client core; NULL if D3D9Client isn't the active client
 	bool     renderProcRegistered = false;  // one-shot: the RenderProcs list survives clbkCloseSession, so register once
@@ -726,6 +738,13 @@ private:
 	float vcShadowLastRad   = -1.0f;
 	float vcShadowLastDep   = -1.0f;   // patch (p): the ambient bite
 	void  UpdateVCShadows();
+	// THE CABIN AT NIGHT (patch ad): sensed every frame (the sun at the camera - paused
+	// included, invariant 1's law), pushed on change (client state, invariant 18).
+	bool  vcNightSupported = false;
+	float vcNightK      = 1.0f;        // this frame's scale: 1 = day, the floor = night
+	float vcNightPushed = -1.0f;       // last scale handed to the client (-1 = never)
+	void  SenseVCNight();
+	void  PushVCNight();
 
 	void  UpdateEclipse();
 	void  DrawEclipsePass();    // the IPI resample; self-gating, called from both branches
@@ -901,6 +920,12 @@ private:
 	float   rainGlassRunMag = 9.81f;        // |gravity + airflow| at the glass - the
 	                                        //   runners' speed source (25e: bound to the
 	                                        //   physics, not to a hull axis or a knob)
+	// THE RUNNERS' INTEGRATED PHASE (2026-09-06) - rainSheetPh's law, swept onto the
+	// runners at last: the shader used fTime x rate, and a falling airspeed (engine cut
+	// while still rolling) ran every runner backward, exactly the sheet's 08-27 symptom.
+	// Integrated in DrawGloomPass on real time (animT), so it freezes under pause.
+	float   rainGlassRunPh  = 0.0f;
+	float   rainGlassRunPhT = -1.0f;        // last animT the integral advanced to
 	bool    rainGlassOK = false;            // the sensing succeeded this frame
 	// TEMPORARY DIAGNOSTIC (2026-08-26) - the render path cannot log (invariant 1), so
 	// DrawGloomPass records and clbkPreStep writes the line. Out once the drops work.
@@ -1141,6 +1166,30 @@ private:
 	                                        //   and must survive it easing, but not a climb
 	                                        //   to orbit. Zero whenever SenseRain bails.
 
+	// THE FOG (2026-09-05, client patch (aa)) - see OroFog.cpp. ORO draws none of it:
+	// the client integrates two height-fog layers in every shader family and these hand
+	// it the layers, split exactly like the rain (evolve / sense / push).
+	void    UpdateFog();                    // main thread: the envelope + the anchor slew
+	void    SenseFog();                     // every frame: world, air, ground, altitude
+	void    PushFog();                      // wherever the sensing ran: the layers, on change
+	float   fogNearDens  = 0.0f;            // BOTH layers' density at the CAMERA, 1/m, set on
+	                                        //   the main thread - for ORO's own geometry,
+	                                        //   which the client's fog cannot reach
+	float   fogNearDens0 = 0.0f;            // the GROUND fog alone (layer 0) - for the storm
+	                                        //   deck and the bolts, which the storm's own mist
+	                                        //   must not wash (the approved rain look)
+	float   FogTransNear(float dist) const; // exp(-fogNearDens * dist): per-vertex, render path
+	float   fogSunColumn = 0.0f;            // VERTICAL optical depth of both layers ABOVE the
+	                                        //   camera (2026-09-06): the cabin fill divides it
+	                                        //   by the sun's sine - thick fog = a white sky,
+	                                        //   so it only ever dims the VC mildly
+	DWORD   FogColNear(DWORD c, float dist) const;        // the alpha byte scaled by it (0xAABBGGRR)
+	DWORD   FogColNearGround(DWORD c, float dist) const;  // ...by the ground fog alone
+	void    PushBaseLights();               // patch (ac): on change, wherever the sensing ran
+	int     blPushedOn   = -1;              // last force state handed to the client (-1 = never)
+	float   blPushedGlow = -1.0f;           // last glow gain handed to the client
+	float   blPushedHalo = -1.0f;           // last halo gain handed to the client
+
 	void    UpdateVapour();                 // per frame, main thread - builds vapVtx
 	void    DrawVapourPoly(oapi::Sketchpad* pSkp);   // push + ALPHA-BLENDED draw
 	PlasVtx vapVtx[VAP_MAX_TRI * 3];
@@ -1279,11 +1328,13 @@ private:
 	VECTOR3    mkCg  = { 0,0,0 };           //   its CENTRE - RenderEpochShift's pair
 	                                        //   (invariant 21a: shift by the BODY centre)
 	double     mkScale = 10.0;              // that vessel's GetSize() - marker sizing
-	float      plmShimStr = 0.0f;           // shimmer strength of the STRONGEST group that
-	                                        //   actually contributed a capsule this frame.
-	                                        //   PSShimmer has one full-frame uniform, so a
-	                                        //   per-plume strength is not expressible; this
-	                                        //   is the honest reduction (2026-08-16).
+	float      plmShimStr = 0.0f;           // shimmer strength of the STRONGEST contributor
+	                                        //   this frame. ⚠️ Since the 2026-09-04 fold it
+	                                        //   is a SELECTOR only - strength itself rides
+	                                        //   each capsule's own vPlumeP slot; this picks
+	                                        //   whose wave texture the frame takes:
+	float      plmShimWave = 1.0f;          // ... the winner's wavelength + churn (still
+	float      plmShimFreq = 1.0f;          //   frame uniforms - the phase math is shared)
 	double     plmRho    = 0.0;             // ambient density at the vessel (the
 	                                        //   shimmer's atmosphere gate reads it)
 	// Last step's (exhaust idx -> level, puff), matched BY INDEX so slot reshuffles

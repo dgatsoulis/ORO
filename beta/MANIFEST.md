@@ -41,12 +41,11 @@ column (which is relative to `<OrbiterRoot>`).
 | `Modules\Plugin\ORO.dll` | `Modules\Plugin\ORO.dll` | ours |
 | `Modules\Plugin\D3D9Client.dll` | `Modules\Plugin\D3D9Client.dll` | ⚠️ **PATCHED — overwrites stock** |
 
-The patched client logs `[Build 260830]`; stock logs `[Build 241231]`. That one log line
-is the fastest way to confirm an install took. (The stamp only refreshes when
-`D3D9Client.cpp` recompiles — later patch work that avoided that TU keeps the 260820
-stamp; probe-by-binding means nothing depends on it.)
+The patched client logs `[Build 260906]`; stock logs `[Build 241231]`. That one log line
+is the fastest way to confirm an install took. (The stamp refreshes only when `D3D9Client.cpp` recompiles; it did for 260906. Probe-by-binding
+means nothing depends on it.)
 
-## 2. The SEVEN deployed shaders — ⚠️ ALL OVERWRITE STOCK
+## 2. The ELEVEN deployed shaders — ⚠️ ALL OVERWRITE STOCK
 
 They are compiled at RUN TIME, so they must always match the DLL. Never ship a patched
 DLL with stock shaders or vice versa. ⚠️ `Mesh.fx` joined the set with patch (s)'s
@@ -63,6 +62,10 @@ the 2026-08-13 rule exists for.
 | `Modules\D3D9Client\Sketchpad.fx` | same path |
 | `Modules\D3D9Client\NewPlanet.hlsl` | same path |
 | `Modules\D3D9Client\Mesh.fx` | same path |
+| `Modules\D3D9Client\NewMesh.hlsl` | same path |
+| `Modules\D3D9Client\Particle.fx` | same path |
+| `Modules\D3D9Client\BeaconArray.fx` | same path |
+| `Modules\D3D9Client\Common.hlsl` | same path |
 
 ## 3. ORO's own runtime assets
 
@@ -263,7 +266,7 @@ Then the part only a human can do:
 
 1. Unzip into a scratch copy of a **clean** Orbiter 2024, run `ORO_Install.bat`,
    then start a scenario.
-2. `Orbiter.log` should show `Module D3D9Client.dll ... [Build 260830, API 260725]` and,
+2. `Orbiter.log` should show `Module D3D9Client.dll ... [Build 260906, API 260725]` and,
    ⚠️ **it is the BUILD that discriminates, not the API** — the patched client is compiled
    from the clone, so its API number tracks the clone's SDK (260725) and does NOT match
    stock's 241231. Both docs said 241231 until 2026-08-12, which would have had a tester

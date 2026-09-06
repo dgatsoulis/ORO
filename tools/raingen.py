@@ -92,22 +92,39 @@ TIERS = {
     # skin - a low membrane thump with a fast contact tick, over a faint low bed.
     # The exterior storm loops drop to 45% inside; this is the sound that takes
     # their place, because the hull is the instrument the rain is playing.
+    # REWORKED 2026-09-06 (his verdict after the cabin-sounds pass: "too much rain
+    # sound inside it... should be taps on metal, completely different from an
+    # external rain sound"). The first tier was a low membrane thump over a broadband
+    # bed with a heavy-tailed amplitude spread: most taps inaudible, fusing into a
+    # rain-like texture - which is exactly what he heard. Now: NO bed at all, the
+    # grain_metal tap (a contact click exciting three inharmonic aluminium-panel modes
+    # that ring 30-70 ms, a small skin bonk under them), fewer taps, an amplitude
+    # FLOOR so every tap is heard, and PEAK mastering - the 08-27 attempt ("harsh")
+    # cut the bed and kept equal-RMS, which on a sparse signal drives every tap into
+    # the soft knee. Sparse signals are mastered by peak; the Hull drum slider (0..3)
+    # owns the level.
+    # ROUND 2 (same day): the first grain rang three tuned plate modes for 30-70 ms at a
+    # random pitch, and nine a second of that read as WINDCHIMES. A metal roof is a big,
+    # heavily damped sheet - a drop is a short dull thump with a sharp contact click,
+    # dense enough to DRUM, and only the odd bright tink from a seam (grain_roof).
     "hull": dict(
         seed=404, dur=12.0,
-        spectrum=[(30, -34), (80, -26), (200, -24), (500, -27), (1200, -31),
-                  (3000, -37), (8000, -46), (16000, -58), (20000, -64)],
-        # ⛔ A "louder, more distinct" rework was tried 2026-08-27 and REVERTED the
-        # same day, his verdict: "much worse than before". It cut the bed to 0.06 and
-        # rendered the tier at rms_db -16.5 - with the bed gone, equal-RMS mastering
-        # poured everything into the taps and the result was harsh. The bed is part
-        # of the sound. A proper rain-sounds pass is parked for later; do not re-try
-        # this shape of change blind. (The master() rms_db parameter it added stays -
-        # inert at the default, useful for that pass.)
-        wash=0.18, gust_depth=0.18,
+        # ROUND 3 (his reference description: "a crisp click or ping" first, "large
+        # metal panels act like a drum, amplifying vibrations and low rumbles" second):
+        # ROUND 4: the clicks and pings are GONE again ("keep only the drumming") - the
+        # thump alone over the bed. Round 3 had: the clicks and pings lead, the thumps
+        # under them, and the bed back as
+        # the panels' own low RUMBLE - a resonant hump at 150-250 Hz with nothing above
+        # 600 Hz, so it cannot read as rain hiss (the bed he sent back was a broadband
+        # wash). The rushing noise of a downpour is the exterior loops' job (45% inside).
+        spectrum=[(30, -40), (80, -30), (150, -24), (250, -26), (400, -34),
+                  (700, -46), (1500, -60), (4000, -75), (20000, -90)],
+        wash=0.12, gust_depth=0.35,
         tick_rate=0.0,  tick_gain=0.0,
         blop_rate=0.0,  blop_gain=0.0,
         splat_rate=0.0, splat_gain=0.0,
-        tap_rate=13.0,  tap_gain=1.00,
+        tap_rate=30.0,  tap_gain=1.00, tap_maker="roof", tap_floor=0.25, tap_pow=1.6,
+        peak_db=-4.0,
     ),
 }
 
@@ -195,6 +212,54 @@ def grain_tap(rng):
     return g
 
 
+def grain_metal(rng):
+    # A drop on aluminium skin, the METAL heard: a sub-millisecond contact click (a
+    # 2-7 kHz noise burst) exciting three inharmonic panel modes - the ratios of a
+    # clamped plate, not a string, which is what makes it read as metal rather than a
+    # note - ringing 30-70 ms with the upper modes dying first, and a small low skin
+    # bonk underneath. Peak-normalised; the scatter's amplitude law sizes it.
+    f1 = np.exp(rng.uniform(np.log(520.0), np.log(1500.0)))
+    ratios = (1.0, 2.32 * rng.uniform(0.96, 1.04), 3.85 * rng.uniform(0.96, 1.04))
+    amps = (1.0, 0.55, 0.30)
+    tau1 = rng.uniform(0.030, 0.070)
+    n = max(64, int(5.0 * tau1 * SR))
+    t = np.arange(n) / SR
+    g = np.zeros(n)
+    for k, (r, a) in enumerate(zip(ratios, amps)):
+        tau = tau1 / (1.0 + 0.7 * k)
+        g += a * np.sin(2.0 * np.pi * f1 * r * t + rng.uniform(0, 2 * np.pi)) * np.exp(-t / tau)
+    # the contact click: band-limited noise, 0.7 ms
+    nc = int(0.004 * SR)
+    click = rng.standard_normal(nc)
+    fc = np.fft.rfft(click); fr = np.fft.rfftfreq(nc, 1.0 / SR)
+    fc *= ((fr > 2000.0) & (fr < 7000.0)).astype(float)
+    click = np.fft.irfft(fc, nc)
+    click /= (np.max(np.abs(click)) + 1e-12)
+    g[:nc] += 0.8 * click * np.exp(-t[:nc] / 0.0007)
+    # the skin bonk: the panel's body, low and brief
+    f0 = np.exp(rng.uniform(np.log(160.0), np.log(320.0)))
+    g += 0.22 * np.sin(2.0 * np.pi * f0 * t) * np.exp(-t / 0.010)
+    return g / (np.max(np.abs(g)) + 1e-12)
+
+
+def grain_roof(rng):
+    # Rain on a metal roof, from under it. The sheet is big and heavily damped, so a
+    # drop is a THUMP - a low panel mode (90-260 Hz) dying in 6-14 ms with a second,
+    # faster mode above it. No sustained ring, no click, no tink (rounds 2-4): every
+    # bright transient tried on top of it read as windchimes.
+    f0 = np.exp(rng.uniform(np.log(90.0), np.log(260.0)))
+    tau = rng.uniform(0.006, 0.014)
+    n = max(64, int(0.06 * SR))
+    t = np.arange(n) / SR
+    g = 0.7 * np.sin(2.0 * np.pi * f0 * t + rng.uniform(0, 2 * np.pi)) * np.exp(-t / tau)
+    g += 0.3 * np.sin(2.0 * np.pi * f0 * 2.6 * rng.uniform(0.95, 1.05) * t) * np.exp(-t / (tau * 0.45))
+    # ROUND 4 (his verdict on round 3: "the windchimes are back. Remove those click
+    # sounds and keep only the drumming"): NO contact click and NO ping. Anything
+    # above the panel modes reads as a chime in a 30-a-second stream, however short.
+    # The drop is the thump alone; the bed underneath is the panels' own rumble.
+    return g / (np.max(np.abs(g)) + 1e-12)
+
+
 def grain_splat(rng):
     # Heavy-rain splatter: a tilted noise burst with a fast decay - the crush
     # of water hitting water. Round 1 used a full first difference (+6 dB/oct),
@@ -207,7 +272,7 @@ def grain_splat(rng):
     return x * np.exp(-t / (dur / 3.0))
 
 
-def scatter(buf, n_total, rate, dur, gust, gain, maker, rng):
+def scatter(buf, n_total, rate, dur, gust, gain, maker, rng, amp_pow=2.4, amp_floor=0.0):
     # Poisson events on the CIRCLE: times uniform, thinned by the gust curve
     # (patter responds a bit harder than the wash: ^1.5), tails wrapping past
     # the loop end back to the start. Amplitudes heavy-tailed (u^2.4): many
@@ -222,7 +287,7 @@ def scatter(buf, n_total, rate, dur, gust, gain, maker, rng):
         i0 = int(t0 * SR) % n_total
         if rng.uniform() * gmax > gp[i0]:
             continue
-        g = maker(rng) * (gain * rng.uniform() ** 2.4)
+        g = maker(rng) * (gain * (amp_floor + (1.0 - amp_floor) * rng.uniform() ** amp_pow))
         p = rng.uniform(-0.85, 0.85)                  # equal-power pan
         gl, gr = np.sqrt((1.0 - p) * 0.5), np.sqrt((1.0 + p) * 0.5)
         ln = len(g)
@@ -239,13 +304,19 @@ def scatter(buf, n_total, rate, dur, gust, gain, maker, rng):
     return count
 
 
-def master(x, rms_db=TARGET_RMS_DB):
+def master(x, rms_db=TARGET_RMS_DB, peak_db=None):
     # Equal-RMS across tiers, then a soft ceiling: linear below the knee, tanh
     # above it, asymptote just under full scale. Shaves only the rare loudest
     # drop peaks - G9's lesson that a HARD clamp flattens texture applies to
     # audio exactly as it did to Gouraud alpha.
-    rms = np.sqrt(np.mean(x * x))
-    x = x * (10.0 ** (rms_db / 20.0) / (rms + 1e-12))
+    # peak_db: master by PEAK instead - for a SPARSE signal (the hull taps) equal-RMS
+    # drives every event into the knee, which is the "harsh" of 2026-08-27.
+    if peak_db is not None:
+        pk = np.max(np.abs(x))
+        x = x * (10.0 ** (peak_db / 20.0) / (pk + 1e-12))
+    else:
+        rms = np.sqrt(np.mean(x * x))
+        x = x * (10.0 ** (rms_db / 20.0) / (rms + 1e-12))
     a = np.abs(x)
     over = a > SOFT_KNEE
     span = 1.0 - SOFT_KNEE - 0.03
@@ -275,10 +346,12 @@ def build_tier(name, p, out_dir):
     nt = scatter(buf, n, p["tick_rate"],  p["dur"], gust, p["tick_gain"],  grain_tick,  rng)
     nb = scatter(buf, n, p["blop_rate"],  p["dur"], gust, p["blop_gain"],  grain_blop,  rng)
     ns = scatter(buf, n, p["splat_rate"], p["dur"], gust, p["splat_gain"], grain_splat, rng)
+    tap_maker = {"metal": grain_metal, "roof": grain_roof}.get(p.get("tap_maker", ""), grain_tap)
     ntp = scatter(buf, n, p.get("tap_rate", 0.0), p["dur"], gust,
-                  p.get("tap_gain", 0.0), grain_tap, rng)
+                  p.get("tap_gain", 0.0), tap_maker, rng,
+                  amp_pow=p.get("tap_pow", 2.4), amp_floor=p.get("tap_floor", 0.0))
 
-    buf = master(buf, p.get("rms_db", TARGET_RMS_DB))
+    buf = master(buf, p.get("rms_db", TARGET_RMS_DB), p.get("peak_db"))
 
     path = out_dir / f"Rain_{name}.wav"
     write_wav(path, buf, rng)
@@ -308,11 +381,14 @@ def main():
     ap = argparse.ArgumentParser(description="Generate ORO's three seamless rain loops.")
     ap.add_argument("--out", type=Path, default=default_out,
                     help=f"output folder (default: {default_out})")
+    ap.add_argument("--only", default=None, help="regenerate one tier only (light / medium / heavy / hull)")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
     print(f"raingen: {SR} Hz stereo 16-bit -> {args.out}")
     for name, p in TIERS.items():
+        if args.only and name != args.only:
+            continue
         build_tier(name, p, args.out)
     print("done. Loops are exactly periodic - no seam editing needed, ever.")
 

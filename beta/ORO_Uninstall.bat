@@ -127,7 +127,7 @@ if /i not "%GO%"=="Y" (
   goto :done
 )
 
-rem --- 4. restore the client + its nine shaders, AND CHECK THAT IT WORKED ---
+rem --- 4. restore the client + its ten shaders, AND CHECK THAT IT WORKED ---
 rem  Every copy is verified by reading the file back and comparing it to the
 rem  source. That catches all three ways this can go wrong: the copy refused
 rem  (destination locked, so the old patched file is still sitting there), the
@@ -156,7 +156,7 @@ if exist "%SRC%\Modules\Plugin\D3D9Client.dll" (
   echo   [ok] D3D9Client.dll restored and verified
 )
 
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx) do (
+for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl) do (
   if exist "%SRC%\Modules\D3D9Client\%%F" (
     call :copyVerify "%SRC%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client" "%%F"
     if defined CVFAIL goto :restorefailed
@@ -189,6 +189,12 @@ call :cleanTree "Textures\ORO"
 call :cleanTree "Scenarios\ORO_beta"
 call :cleanTree "Config\ORO"
 call :cleanFile "Config\ORO.cfg"
+rem  Two ORO files living in SHARED folders (added 2026-09-04) - a cleanTree on
+rem  Script\ or Config\GC would touch things that are not ours, so each gets a
+rem  single byte-identical cleanFile. The ecam config had been missing from this
+rem  list since 260831 - the same gap, closed in the same sweep.
+call :cleanFile "Script\focusall.lua"
+call :cleanFile "Config\GC\Atlantis_ecam_oro.cfg"
 
 set "LEFT="
 if exist "%ROOT%\Modules\Plugin\ORO.dll" set "LEFT=1"
@@ -289,7 +295,7 @@ call :copyVerify "%SRC%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin" "
 if defined CVFAIL goto :restorefailed
 echo   [ok] D3D9Client.dll restored and verified
 
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx) do (
+for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl) do (
   if exist "%SRC%\Modules\D3D9Client\%%F" (
     call :copyVerify "%SRC%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client" "%%F"
     if defined CVFAIL goto :restorefailed

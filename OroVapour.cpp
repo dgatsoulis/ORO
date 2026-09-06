@@ -470,6 +470,8 @@ void OroModule::BuildVapourGeometry()
 		float pitchDeg, yawDeg;  // axis tilt about vessel X/Y [deg, +-30], pivot = apex
 		DWORD col, colStk;
 		bool  baseOn;      // the BASE FILL pill - the closing disc, per cone
+		float baseOfs;     // BASE FILL OFFSET (2026-09-04): the cap centre's axial
+		                   //   displacement, x this cone's own reach, -1..+0.5
 	};
 	float visMax = 0.0f;
 
@@ -701,11 +703,11 @@ void OroModule::BuildVapourGeometry()
 	auto emit3 = [&](int ra, int ia, int rb, int ib, int rc2, int ic) {
 		if (vapVtxN + 3 > VAP_MAX_TRI * 3) return;
 		vapVtx[vapVtxN].x = px[ra][ia]; vapVtx[vapVtxN].y = py[ra][ia];
-		vapVtx[vapVtxN].c = pc[ra][ia]; vapDepth[vapVtxN] = pd[ra][ia]; vapVtxN++;
+		vapVtx[vapVtxN].c = FogColNear(pc[ra][ia], pd[ra][ia]); vapDepth[vapVtxN] = pd[ra][ia]; vapVtxN++;
 		vapVtx[vapVtxN].x = px[rb][ib]; vapVtx[vapVtxN].y = py[rb][ib];
-		vapVtx[vapVtxN].c = pc[rb][ib]; vapDepth[vapVtxN] = pd[rb][ib]; vapVtxN++;
+		vapVtx[vapVtxN].c = FogColNear(pc[rb][ib], pd[rb][ib]); vapDepth[vapVtxN] = pd[rb][ib]; vapVtxN++;
 		vapVtx[vapVtxN].x = px[rc2][ic]; vapVtx[vapVtxN].y = py[rc2][ic];
-		vapVtx[vapVtxN].c = pc[rc2][ic]; vapDepth[vapVtxN] = pd[rc2][ic]; vapVtxN++;
+		vapVtx[vapVtxN].c = FogColNear(pc[rc2][ic], pd[rc2][ic]); vapDepth[vapVtxN] = pd[rc2][ic]; vapVtxN++;
 	};
 
 	for (int ir = 0; ir <= NR; ir++) {
@@ -821,10 +823,34 @@ void OroModule::BuildVapourGeometry()
 		const double nAxR = (dlR > 1e-9) ? (-drR / dlR) : 0.0;
 		const double nRaR = (dlR > 1e-9) ? ( dxR / dlR) : 1.0;
 
+		// THE BASE FILL OFFSET (2026-09-04, Buck Rogers's ask, promised on the
+		// thread). The cap's CENTRE slides along the axis by offset x the cone's own
+		// axial depth, the rings between interpolating linearly in s - the rim ring
+		// (s = 1) never moves, so the seam-free junction with the loft survives BY
+		// CONSTRUCTION. At -1 the centre lands exactly on the apex and the cap is an
+		// inner second face of the cone; at 0 every term below collapses to the flat
+		// disc BIT FOR BIT; +0.5 bulges it outward half the cone's depth (capped
+		// there by his call - "maybe we cap the offset at +0.5"). Because the scale
+		// is the cone's own reach, Size z 0 (the flat collar) has no depth to offset
+		// and the knob is correctly inert there - a second face of a zero-depth cone
+		// IS the disc.
+		// The displaced cap is a shallow cone, so its face takes its OWN meridian
+		// normal (the rim stencil's convention, run on the cap's centre->rim run) -
+		// with the flat disc's axial normal a pushed-in cap would keep answering the
+		// limb response as a flat sheet. At offset 0 the run is purely radial and
+		// nCap IS downG - the identity case needs no branch.
+		const float  kBOfs = clampf(K.baseOfs, -1.0f, 0.5f);
+		const double dxCap = -(double)kBOfs * xxR;          // centre -> rim, axial
+		const double drCap = rr[irRim];                     // centre -> rim, radial
+		const double dlCap = sqrt(dxCap * dxCap + drCap * drCap);
+		const double nAxC  = (dlCap > 1e-9) ? (drCap / dlCap) : 1.0;
+		const double nRaC  = (dlCap > 1e-9) ? (-dxCap / dlCap) : 0.0;
+
 		const float CS[VAP_NCAP + 1] = { 0.0f, 0.50f, 0.85f, 1.0f };
 		for (int ir = 0; ir <= VAP_NCAP; ir++) {
 			const int   cur = ir & 1;
 			const float s   = CS[ir];
+			const double capAx = xxR * (1.0 + (double)kBOfs * (double)(1.0f - s));
 			for (int ib = 0; ib <= NA; ib++) {
 				const int   bb = ib % NA;
 				const float th = (float)bb / (float)NA * 6.2831853f;
@@ -832,7 +858,7 @@ void OroModule::BuildVapourGeometry()
 				const float boil = 1.0f
 				                 + 0.030f * sinf(th * 3.0f + t2 * 0.9f)
 				                 + 0.018f * sinf(th * 7.0f - t2 * 1.5f);
-				const VECTOR3 gp = apexG + downG * xxR
+				const VECTOR3 gp = apexG + downG * capAx
 				                 + (e1 * ((double)ct * rrX[irRim] * (double)s)
 				                  + e2 * ((double)st * rrY[irRim] * (double)s)) * (double)boil;
 				double zz;
@@ -840,12 +866,14 @@ void OroModule::BuildVapourGeometry()
 				if (!pk[cur][ib]) { pc[cur][ib] = 0; pd[cur][ib] = 0.0f; continue; }
 				pd[cur][ib] = (float)length(gp - cc.pos);
 
-				// Axial normal at the centre, blending into the cone rim's meridian
-				// normal at the edge - which makes the s = 1 ring's alpha formula
-				// IDENTICAL to the cone rim's, and the junction cannot show.
+				// The cap's own meridian normal at the centre (axial when the cap is
+				// flat - see the offset block above), blending into the cone rim's
+				// meridian normal at the edge - which makes the s = 1 ring's alpha
+				// formula IDENTICAL to the cone rim's, and the junction cannot show.
 				const VECTOR3 nrad = unit(e1 * ((double)ct * RmaxY) + e2 * ((double)st * RmaxX));
 				const VECTOR3 nRim = unit(downG * nAxR + nrad * nRaR);
-				const VECTOR3 nG   = unit(downG * (double)(1.0f - s) + nRim * (double)s);
+				const VECTOR3 nCap = unit(downG * nAxC + nrad * nRaC);
+				const VECTOR3 nG   = unit(nCap * (double)(1.0f - s) + nRim * (double)s);
 				const VECTOR3 vd = unit(gp - cc.pos);
 				const float   fc = (float)fabs(dotp(nG, vd));
 				const float   thick = 1.0f / (fc > 0.12f ? fc : 0.12f);
@@ -891,13 +919,13 @@ void OroModule::BuildVapourGeometry()
 	                      g_fx.vapPos,       g_fx.vapPosX,  g_fx.vapPosY,
 	                      g_fx.vapPitch,     g_fx.vapYaw,
 	                      g_fx.vapColour,    g_fx.vapStreakCol,
-	                      g_fx.vapBaseOn };
+	                      g_fx.vapBaseOn,    g_fx.vapBaseOfs };
 	const VapKnobs k2 = { g_fx.vapStrength2, g_fx.vapSize2, g_fx.vapSizeY2, g_fx.vapSizeZ2,
 	                      g_fx.vapStreaks2,  g_fx.vapStreakChurn2, g_fx.vapFlickHz2,
 	                      g_fx.vapPos2,      g_fx.vapPosX2, g_fx.vapPosY2,
 	                      g_fx.vapPitch2,    g_fx.vapYaw2,
 	                      g_fx.vapColour2,   g_fx.vapStreakCol2,
-	                      g_fx.vapBaseOn2 };
+	                      g_fx.vapBaseOn2,   g_fx.vapBaseOfs2 };
 	BuildCone(k1, s_vap.fGate1);
 	BuildCone(k2, s_vap.fGate2);
 

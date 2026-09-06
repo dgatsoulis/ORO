@@ -38,6 +38,9 @@
     <ClCompile Include="OroRain.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="OroFog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="OroVapour.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

@@ -103,7 +103,80 @@ Thanks for testing. ORO is a global module that adds two families of effects:
 
 Everything is adjustable live, from one panel, while you fly.
 
-NEW IN THIS BUILD (260831) - THE THRUSTER MILESTONE:
+NEW IN THIS BUILD (260906) - SHADOWS TO THE HORIZON, THE AIR, THE NIGHT:
+  * CASCADED SHADOWS. A new terrain-shadow mode in the Launchpad's D3D9
+    Advanced setup, "Cascaded (ORO)": ONE sun-shadow atlas for the whole
+    scene. Buildings shadow the ground, hills shadow buildings, vessels shadow
+    each other and their own pads, out to tens of kilometres, with crisp
+    shadows on every vessel near you. Nothing blinks, nothing shimmers as the
+    world turns, no tile-shaped bites - it replaces the stencil sheets and the
+    per-tile maps in that mode, and the two stock modes are untouched. Section
+    3 has the new Shadows box row by row.
+  * BASE SPOTLIGHTS ARE HONEST IN DAYLIGHT TOO. In Cascaded mode the
+    spotlight's shadow map rides in the same atlas, so a lamp no longer lights
+    the ground through a hangar wall at noon.
+  * FOG. A FOG page under WORLD / WEATHER: two real fog layers rendered inside
+    every surface - terrain, bases, hulls, particles, runway lights, the sky -
+    coloured by the sun, so it is warm at dawn, grey under a storm and dark at
+    night. Shadows soften and vanish through it. The rain's gloom is fog now.
+  * THE CABIN GOES DARK AT NIGHT. A stock cockpit is as bright at midnight as
+    at noon. Now its fill light follows the sun - and the weather - so at
+    night, or in orbit's shadow, you reach for the cockpit light the way a
+    pilot would. PILOT / VIRTUAL COCKPIT: a night floor and a weather dim.
+  * BASE LIGHTS on demand, with a HALO in fog: runway and taxiway lights become
+    aureoles that grow with the air between you and the lamp. One pill, on
+    both the RAIN and FOG pages.
+  * SHADOWS HIDE BEHIND HILLS in the stock shadow modes too: stencil ground
+    shadows are cut where a hill stands between them and you. The
+    frame-to-frame blink this first showed at KSC is fixed at the root.
+  * CABIN SOUNDS. The rain heard from the seat has its own volume, and the HULL
+    DRUM was rebuilt: rain on a metal roof - dull thumps over a low panel
+    rumble, no hiss.
+  * TERRAIN FLATTENING NOW WORKS WITH CUBIC INTERPOLATION - the elevation
+    setting most people have. Flattening (.flt) files used to flatten the
+    ground you stood on but not the ground you saw; both agree now.
+  * FIXED: the windscreen runners ran BACKWARD when the engine was cut on the
+    runway; the client refused its vessel shader with Vessel self-shadows set
+    to None (an error box at every scenario start, since 260809); a spotlight
+    lit a vessel behind a building in daylight.
+
+ALSO IN THIS BUILD - LIGHTS, SHADOWS AND THE SCULPTED PLUME:
+  * SPOTLIGHT SHADOWS. Base spotlights now cast real shadows: a hangar carves
+    its beam, a vessel standing in it throws its shadow on the ground, and a
+    terrain ridge ends the beam. Vessels receive them day and night; the pool
+    on the ground is a dusk-and-night feature in the stock shadow modes and
+    works in daylight in Cascaded mode. (Off switch: the Shadows box, or
+    LocalLightShadows=0 in D3D9Client.cfg. ShadowDebug=1 there is a diagnostic
+    - only if I ask you for it.)
+  * NOTHING DRAWS THROUGH TERRAIN ANY MORE. Runway lights and base surfaces
+    hide behind hills instead of bleeding through them; the sun's glare now
+    sets behind a mountain ridge instead of shining through it; and glare
+    sprites respect buildings.
+  * NIGHT TEXTURES FOR BASE BUILDINGS. The classic mytex.dds / mytex_n.dds
+    convention now works for MESH base objects - the most common kind - so
+    base authors' windows light up at dusk. Runway markings ride along free.
+  * SCULPTABLE SHOCK DIAMONDS. The train's count now goes to 0 (a clean jet),
+    and each cell has SHAPE (the RS-25's half-diamond at the lip, the classic
+    symmetric cell, or a downstream fan), LENGTH and WIDTH (short length =
+    pure Mach discs), a train OFFSET in metres, and its own COLOUR swatch that
+    renders exactly what you pick. Under throttle the train grows and shrinks
+    by WHOLE diamonds in sequence - never a sliced fraction of a cell.
+  * FULL SHIMMER CONTROL. The heat haze has amplitude, WAVELENGTH and
+    FREQUENCY, a wider per-jet offset (-2..+10 m along each jet's own flow),
+    per-group strength (a weak hover haze beside a strong main haze), and it
+    answers to air density on its own - thinning as you climb, gone in vacuum,
+    nearly doubled on a world as dense as Venus.
+  * THE STOCK DG'S WINDSCREEN IS PRE-DECLARED for the windscreen raindrops
+    (Config\ORO\VesselsRainSurfaces.cfg ships with it), so the drops work on a
+    plain DeltaGlider out of the box.
+  * A SMALL TOOL: Script\focusall.lua. Some vessels (the Atlantis boosters and
+    tank, many addon stack parts) are created unselectable, which also makes
+    them untunable - per-class settings load for the FOCUSED vessel. Enable
+    the LuaConsole module, open the console in the sim and type
+    run('focusall') - every vessel in the scenario becomes selectable with F3
+    for that session.
+
+NEW IN 260831 - THE THRUSTER MILESTONE:
   * THE PANEL IS A MENU TREE. Three doors - WORLD / VESSEL / PILOT - then
     short pages, one subject each, with BACK and a breadcrumb. No more giant
     scrolling tabs. HELP is per page and an open help window follows you as
@@ -120,8 +193,9 @@ NEW IN THIS BUILD (260831) - THE THRUSTER MILESTONE:
   * BOOSTERS KEEP THEIR LOOK. Vessels in a stack (SRBs, tanks) follow their
     OWN class's saved tuning even while you fly the orbiter.
   * RAINDROPS ON THE WINDSCREEN - drops bead, run and streak on the VC glass
-    with real refraction, driven by the storm outside. Vessel authors enable
-    their glass with a one-line RAIN 1 mesh token.
+    with real refraction, driven by the storm outside. Declare any window by
+    CLICKING it (the RAINSURFACES button on the RAIN page - no mesh editing);
+    vessel authors can also mark glass with a one-line RAIN 1 mesh token.
   * REFLECTIONS THAT INCLUDE YOU. A fourth Launchpad reflection mode, "Full
     Scene ORO (exp)": vessels reflect THEMSELVES and their payloads (stock
     Full Scene never could), with multi-probe environment maps and real
@@ -239,7 +313,7 @@ install at any time, in one click, and it will not touch anything you tuned.
 To confirm the install took, open Orbiter.log in the Orbiter root and look near
 the top for:
 
-    Module D3D9Client.dll ........ [Build 260830, ...]   <- patched, good
+    Module D3D9Client.dll ........ [Build 260906, ...]   <- patched, good
     Module D3D9Client.dll ........ [Build 241231, ...]   <- still stock
 
 It is the BUILD number that tells them apart. Ignore the "API" number printed
@@ -248,7 +322,8 @@ client is built from source so it does not match the stock one. On this build it
 reads API 260725, and that is correct, not a failed install.
 
 A few lines further down ORO lists what it found in the client - patches (d),
-(f), (g), (i), (k), (l), (n), (o) should all read "available".
+(f), (g), (i), (k), (l), (n), (o), the fog layers (patch aa), base lights (ac)
+and the VC night light (ad) should all read "available".
 
 
 --------------------------------------------------------------------------------
@@ -280,6 +355,32 @@ In the Launchpad, VIDEO tab -> "Advanced" / D3D9 configuration:
   Local shadows / ShadowMapMode .... 1 or higher   REQUIRED for VC shadows
       Shadow map size 2048 is a good default; 4096 if you have headroom.
 
+  Terrain and world shadows .. "Cascaded (ORO)"   RECOMMENDED (new in 260906)
+      The SHADOWS box, bottom right of the D3D9 Advanced setup dialog:
+        Vessel self-shadows      The per-vessel map and its filter (stock).
+                                 NONE is legal with Cascaded on: you keep
+                                 every ground and building shadow and lose
+                                 only cockpit shadows and the finest hull
+                                 detail. Map size 1024 / 2048 / 4096.
+        Terrain and world        Off / Stencil / Projected (stock) / Cascaded
+        shadows                  (ORO). Cascaded replaces the stencil sheets
+                                 and the per-tile maps with one atlas: nothing
+                                 blinks, nothing bites, shadows reach the
+                                 horizon.
+        Cascade detail           1024 (48 MB) / 2048 (192 MB) / 4096 (768 MB
+                                 of video memory). 4096 needs a card that
+                                 takes 16384-wide textures (DX11 class) and
+                                 halves itself on one that does not. 2048 is
+                                 the default.
+        Cascade reach            How far the far cascades go, 5 to 60 km.
+        Soft far shadows         A wider filter on the distant cascades, which
+                                 otherwise read pixelated up close.
+        Local light shadows      Spotlights cast shadows (buildings, vessels,
+                                 ridges); in Cascaded mode in daylight too.
+      Greyed rows are the ones that do nothing in the selected mode.
+      Keys in D3D9Client.cfg: TerrainShadowing 3, ShadowCascadeSize,
+      ShadowCascadeFar, ShadowCascadeSoft, LocalLightShadows.
+
 In the Launchpad, VISUAL EFFECTS tab:
 
   Particle streams ........... ON (it is on by default)   REQUIRED for the
@@ -290,8 +391,10 @@ In the Launchpad, VISUAL EFFECTS tab:
       Raising it washes out every shadow in the sim, including ORO's.
 
 Reference: the settings this was developed and tuned on are
-ShadowMapMode 2, ShadowMapFilter 2, ShadowMapSize 2048, PostProcess 1,
-SunGlare 1, AmbientLevel 20.
+ShadowMapMode 3, ShadowMapFilter 2, ShadowMapSize 4096, TerrainShadowing 3
+(Cascaded), ShadowCascadeSize 2048 (4096 on a card that takes it),
+ShadowCascadeFar 30000, ShadowCascadeSoft 1, LocalLightShadows 1,
+PostProcess 1, SunGlare 1, AmbientLevel 20.
 
 
 --------------------------------------------------------------------------------
@@ -495,8 +598,18 @@ you are editing and whether it owns an override.
 
 --- Page EXHAUST - the parts ORO draws itself ---
 
-  Exhaust shimmer   Heat haze bending the view behind the plume, in atmosphere.
-  Offset (m)        Slides the haze along the plume axis.
+  Shimmer amplitude  Heat haze bending the view behind the plume - the slider is
+                     the wave's amplitude. Each engine group (or overridden
+                     thruster) hazes at its OWN strength in the same frame.
+  Offset (m)         Slides the haze along EACH JET'S OWN flow direction,
+                     -2 to +10 m (positive = downstream, for a retro as much as
+                     a main). The tick marks true zero and the knob snaps to it.
+  Wavelength         Ripple size, as a multiplier. High = broad and lazy,
+                     low = fine frying-pan heat. 1.00 = the original look.
+  Frequency          How fast the waver churns. 1.00 = original, 0 = frozen.
+  The haze answers to AIR DENSITY on its own: full low down, visibly thinning
+  through a climb, gone in vacuum - and up to about twice Earth strength on a
+  world as dense as Venus. Nothing to set.
 
   PLUME EXPANSION - a rocket nozzle is built for ONE ambient pressure; the
   atmosphere decides what the jet does everywhere else. Overexpanded at sea
@@ -513,16 +626,32 @@ you are editing and whether it owns an override.
                     built for. Drag the high handle down and you have a vacuum
                     engine that shudders and pinches at the pad.
     Width / Length      Overall jet size.
-    Diamonds            How many shock cells in the train (1-12).
+    Diamonds            How many shock cells in the train (0-12; 0 = a clean
+                        jet, no cells). Successive cells are always fainter
+                        than the one before, and under throttle the train grows
+                        and shrinks by WHOLE diamonds in sequence - never a
+                        fraction of a cell.
     Diamond bright      Their contrast.
     Diamond spacing     How far apart they sit.
+    Diamond shape       Where each cell bulges (-1..+1). 0 = the classic
+                        symmetric diamond; -1 = a half diamond, base toward the
+                        bell (the bright converging cone an RS-25 shows at the
+                        lip); +1 = the mirror.
+    Diamond length      Each cell's axial size. 1 puts the tips exactly at the
+                        discs; short leaves only thin bright discs (a pure
+                        Mach-disc train).
+    Diamond width       Each cell's radial size.
+    Diamond offset      Slides the whole train along the jet, -2..+5 m
+                        (negative = toward the bell).
     Bloom width/bright  The wide vacuum plume.
     Throat glow         The fire seen down inside the nozzle.
     Throat offset       Nudges it, because the visual nozzle and the engine's
                         defined exhaust point disagree on some hulls.
     Soot streaks        Dark soot shedding off the nozzle lip. 0 = off.
     Soot churn          How fast it moves. 0 freezes it.
-    Jet / Bloom         Two colour swatches.
+    Jet / Bloom / Dia   Three colour swatches: the jet core, the vacuum halo,
+                        and the diamonds. The diamond swatch renders EXACTLY
+                        the colour you pick (white = the classic look).
 
   BELL GLOW - the engine bells heat and cool as real metal does, on sim time,
   whether or not you are watching.
@@ -725,6 +854,12 @@ sets in code, and lets you move them live. Units are the API's own.
     Base fill       The filled disc closing this cone's wide end - what gives
                     it a back, and at high opacity the face that hides the
                     hull. Off returns the open shell.
+    Base fill offset  Slides the base's centre along the cone's axis (-1..+0.5,
+                    as a fraction of the cone's depth). -1 = pushed all the way
+                    in, a second inner face of the cone; 0 = flat disc; +0.5 =
+                    bulged outward. The rim never moves, so base and cone stay
+                    joined. Does nothing on a flat collar (Size z 0) - there is
+                    no depth to offset.
     Position x/y/z  Where this cone sits, in Orbiter's own axis order: x along
                     the wing line, y vertical, z along the flight direction.
                     All bipolar, snapping to zero. z separates the two collars
@@ -769,7 +904,7 @@ sets in code, and lets you move them live. Units are the API's own.
 
 === WORLD ===  the sky
     (each of these is its own page: ECLIPSE, AURORA and GOD RAYS under WORLD,
-     RAIN and LIGHTNING under WORLD / WEATHER)
+     RAIN, FOG and LIGHTNING under WORLD / WEATHER)
 
   ECLIPSE - models your EYE, not the light. Dark adaptation is slow opening up
   and fast closing down, which is why coming out of shadow dazzles.
@@ -911,9 +1046,9 @@ sets in code, and lets you move them live. Units are the API's own.
     Swim size/rate  The rain-pocked ripple on that reflection - how far the
                     image warps and how fast it flickers. Size 0 is a still
                     mirror.
-  The windscreen (virtual cockpit only; needs Sun glare, and a mesh whose
-  window groups carry a RAIN 1 line - the DeltaGlider and XR2 are done, and
-  any vessel can be marked with one line in its mesh, see below):
+  The windscreen (virtual cockpit only; needs Sun glare, and the glass must
+  be DECLARED - click it with the RAINSURFACES button below, or mark it with
+  a one-line RAIN 1 mesh token; both are described after this section):
     Glass drops     Raindrops ON the cockpit glass. Coverage: how much of the
                     pane fills with drops at full storm. The window fills
                     gradually and dries in reverse.
@@ -937,20 +1072,35 @@ sets in code, and lets you move them live. Units are the API's own.
                     In the VC the rain is cut at the window frame per pixel
                     (needs Sun glare on); in the flat panel views Orbiter
                     paints the panel over it, so nothing extra is needed.
+    Rain surfaces   Opens the RAINSURFACES popup - declare which mesh groups
+                    take drops by CLICKING them in the sim, no mesh editing.
+                    ADD goes amber; click your windscreen from the VC and the
+                    group lights up green while you hold the button, then
+                    joins the list. REMOVE takes one off the list (click the
+                    entry, confirm). SAVE writes the shared file AND applies
+                    it immediately - the drops respond without a reload.
   Sounds:
-    Rain sound      The storm's sound: three rain loops (patter / steady /
-                    downpour) crossfading as it builds. 1 is the designed mix
-                    against Orbiter's other ambient sounds, 0 is silent. In
-                    the cockpit the storm is muffled and a fourth loop takes
-                    over - drops drumming on the hull. Needs XRSound.dll
-                    (ships with Orbiter 2024). Thunder lives with the bolts,
-                    on the LIGHTNING page.
-    Hull drum       Rain drumming on the SKIN of your ship - a fourth loop
-                    that plays only from inside a virtual cockpit. Its own
-                    volume, so you can have the storm without the drumming.
+    Rain sound      The storm's sound heard from OUTSIDE: three rain loops
+                    (patter / steady / downpour) crossfading as it builds.
+                    1 is the designed mix against Orbiter's other ambient
+                    sounds, 0 is silent. Inside a cockpit you hear a
+                    DIFFERENT volume - Rain in cabin on the VIRTUAL COCKPIT
+                    page, with the hull drum beside it - so the two are set
+                    independently. Needs XRSound.dll (ships with Orbiter
+                    2024). Thunder lives with the bolts, on the LIGHTNING page.
     Rain            Readout: the storm's build-up and ground wetness, or the
                     honest reason nothing draws - "external only", "Earth
                     only", "above the weather", "VC: SunGlare off".
+    Base lights     Forces every base's NIGHT state on now - night textures,
+                    runway and taxiway lights - the way an airfield lights up
+                    when the visibility drops. Off is Orbiter's own behaviour
+                    (on at night, off by day). The same switch sits at the
+                    bottom of the FOG page: one setting, two doors.
+    Lights glow     A gain on everything those lights emit; past 1 they reach
+                    the Light glow post-process and bloom.
+    Lights halo     The aureole round each runway light in fog - a soft disc
+                    that grows with the fog between you and the lamp. 0 is a
+                    plain lamp that only dims with distance.
 
     FOR VESSEL AUTHORS - THE RAIN SHIELD. From inside a virtual cockpit the
     rain is kept out of the cabin by a depth test that covers cockpit-sized
@@ -969,13 +1119,21 @@ sets in code, and lets you move them live. Units are the API's own.
     mesh are ignored; ORO re-reads the file at every session start, so you
     can iterate on it between runs.
 
-    FOR VESSEL AUTHORS - THE WINDSCREEN GLASS TOKEN. The drops on the glass
-    need to know which mesh groups ARE the glass. Any vessel opts in with one
-    line in its own mesh file: put  RAIN 1  on a line of its own directly
+    DECLARING THE GLASS - FOR EVERYONE. The drops need to know which mesh
+    groups ARE the glass, and the easy way is the RAINSURFACES button in the
+    windscreen section: sit in the VC, press ADD, click the window (it lights
+    green while you hold the button), SAVE. The picks live in
+    Config\ORO\VesselsRainSurfaces.cfg - one "<mesh name> <group>" line each,
+    shared by every vessel - and SAVE applies them to the running sim at
+    once. The shipped file already declares the stock DeltaGlider's
+    windscreen, so the DG rains out of the box.
+
+    FOR VESSEL AUTHORS - THE WINDSCREEN GLASS TOKEN. A vessel can also opt
+    in from its own mesh file: put  RAIN 1  on a line of its own directly
     before a window group's GEOM statement (Orbiter's mesh parser ignores
-    unknown tokens, so the line is invisible to everything else). The
-    DeltaGlider family and the XR2 are already marked. No token, no drops -
-    the rest of the storm is unaffected.
+    unknown tokens, so the line is invisible to everything else). Both
+    routes work side by side. No declaration, no drops - the rest of the
+    storm is unaffected.
 
     Needs the ORO patched client for the wet ground, storm light, glint and
     reflections (all probe by binding and quietly stand down without it);
@@ -986,6 +1144,28 @@ sets in code, and lets you move them live. Units are the API's own.
     freesound.org, credited in XRSound\ORO\README.txt - that credit file
     travels with any redistribution.
 
+
+  FOG - a ground fog where you are, rendered by the patched client inside
+  every surface: terrain, the apron, hulls, exhaust, runway lights and the
+  sky all fade into the same grey. The colour is not a picker - it follows
+  the sun (warm at dawn, grey under a storm, dark at night), the sun and
+  every shadow weaken through it, and the cockpit interior stays clear.
+    TEST            Previews the same fog with the pill off. Both build over
+                    about twenty seconds; the pill off clears at once.
+    Visibility (m)  How far you can see at ground level. 300 is a real fog,
+                    50 is a wall, 2000 is a haze.
+    Fog top (m)     How thick the layer is over the ground under your vessel.
+                    Climb out of it and you look down on a blanket.
+    Fade            How the top thins: 0 a solid slab with a hard ceiling,
+                    1 thinned to a few percent by the top, 2 wispy.
+    Brightness      A gain on the lit fog colour. 1 is the client's own.
+    Sun glow        The bright lobe toward the sun. 0 removes it.
+    Fog             Readout: the build-up, or why there is none (no air on
+                    this world, camera at another world, too high).
+    Base lights / Lights glow / Lights halo - the same three as on the RAIN
+                    page (one setting, two doors).
+    The RAIN page's Gloom drives a second layer - the storm's own mist, up to
+    the storm deck. Needs the ORO patched client; on stock the page is inert.
 
 === PILOT / VIRTUAL COCKPIT ===  the cockpit
 
@@ -1012,6 +1192,37 @@ sets in code, and lets you move them live. Units are the API's own.
                   cockpit shadows look washed out. Raising this lets the shadow
                   take the ambient with it. Lit instrument panels are never
                   dimmed, so your MFDs stay readable.
+
+  CABIN AT NIGHT  Stock Orbiter keeps a virtual cockpit fully lit at midnight:
+                  its authors fill it with a flat emissive light, and the
+                  sun going down changes nothing inside. With this on, the
+                  cabin goes dark as the sun sets at the camera - a twilight
+                  ramp on worlds with air, a sharp flip without, and in orbit
+                  the planet's shadow. MFD screens, self-lit instruments,
+                  emission maps and every cockpit lamp are untouched - so
+                  switching the cabin light on finally means something.
+                  Needs the ORO patched client (the section greys out
+                  without it).
+    Night floor   What is left at full night. 0 is black without a lamp on,
+                  1 is stock. The caption shows the live value.
+    DIM UNDER RAIN AND FOG  A second pill: the weather takes light out of the
+                  cabin too - a storm collapses the sun (RAIN's Gloom), a
+                  thick fog thins it (FOG's Visibility).
+    Weather dim   How much of that loss the cabin shows. 1 = a full storm at
+                  noon leaves about a tenth; 2 = near black; 0 = off.
+                  One compromise: a lit button painted with the same flat
+                  emissive as the walls dims with the walls. A real self-lit
+                  display does not.
+
+  CABIN SOUNDS    The storm as heard from the seat.
+    Rain in cabin The rain loops heard INSIDE, muffled through the hull.
+                  Independent of the RAIN page's Rain sound (the outside
+                  mix): 0 here is a silent cabin in a storm you can still
+                  hear from an external view.
+    Hull drum     Rain on the SKIN of your ship heard from inside - a metal
+                  roof under rain: dull thumps over a low panel rumble, no
+                  hiss - structure-borne so it is never muffled. Its own
+                  volume, up to 3; 0 is silent.
 
   CAM-SHAKE       Buffet and the push into your seat. The STRENGTH is physics
                   driven - thrust, dynamic pressure, ground contact - so these
@@ -1077,6 +1288,17 @@ for eleven worlds. Other vessels will work but are untuned.
 * Orbiter 2024 crashes on exit on some installs, after everything is saved and
   closed. It predates ORO - it is Orbiter's own shutdown path - and it costs
   nothing. If you see a crash dialog AFTER quitting, that is probably it.
+* Cascaded shadows, three edges: reflection probes and planar mirrors do not
+  see the atlas (they keep the per-vessel map, so a reflected hull can read a
+  little brighter than the real one); where more than two hulls overlap, a hull
+  pixel takes the two nearest; and Cascade detail 4096 costs 768 MB of video
+  memory - drop to 2048 if the frame rate falls.
+* In the STENCIL and PROJECTED terrain-shadow modes, a spotlight at dusk can
+  bite a vessel's terrain shadow where the map borrow opens before the sun is
+  fully down. Cascaded mode has no borrow and no bites.
+* The rain is hard to see at night away from a lamp, and the lightning flash
+  does not yet light the cockpit or cast shadows. Both are on the list for the
+  next release.
 
 
 --------------------------------------------------------------------------------

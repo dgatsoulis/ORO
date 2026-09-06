@@ -161,15 +161,23 @@ float4 PSTilt(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 // screen-space CAPSULE (root a -> tip b, radius) and we offset the sampling UV
 // with animated turbulence, weighted by nearness to the plume axis.
 //   vPlume[i]  = (ax, ay, bx, by)  plume axis in UV
-//   vPlumeP[i] = (radius_uv, strength, unused, unused)
-//   fShimmer   = 0..1 master strength (the dialog slider)
+//   vPlumeP[i] = (radius_uv, strength, turb_peak, unused)
+//   Strength is PER CAPSULE since 2026-09-04 (the fold, his call): the dialog
+//   slider is baked into each plume's own vPlumeP.y by the host, so two engine
+//   groups can haze at different strengths in one frame. There is no frame-wide
+//   master any more - fShimmer was removed with the fold.
 // Deliberately placed LAST in this file (not first in the render order) because
 // it reuses fTime / fAspect, which are declared above - HLSL globals must be
 // declared before use, and the whole file compiles as ONE unit per entry point.
 // PLUME_N must match OroModule.h MAX_PLUMES. Inactive plumes carry strength 0
 // (a constant loop count keeps the shader SM3-safe - no dynamic branching).
 // ----------------------------------------------------------------------------
-uniform extern float  fShimmer;    // 0..1 master strength
+uniform extern float  fShimWave;   // x WAVELENGTH (2026-09-04): spatial scale of the
+                                   //   ripple texture; 1 = the 2026-07-30 lab look
+uniform extern float  fShimFreq;   // x FREQUENCY: temporal churn rate; 0 freezes.
+                                   //   Both come from the strongest contributing
+                                   //   plume's block (the 26e reduction) - the wave
+                                   //   TEXTURE is the one thing still frame-wide.
 uniform extern float4 vPlume[6];   // plume axes  (ax,ay,bx,by) in UV
 uniform extern float4 vPlumeP[6];  // plume params (radius_uv, strength, -, -)
 
@@ -205,14 +213,21 @@ float4 PSShimmer(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 
 		// Turbulence: two octaves per axis, scrolling ALONG the plume (h) so the ripple
 		// visibly streams aft instead of shimmering in place. Phase-offset per plume.
-		float ph = fTime * 9.0f + h * 26.0f + (float)i * 2.3f;
-		float n1 = sin(ph)               + 0.5f * sin(ph * 2.7f + uv.y * 90.0f);
-		float n2 = cos(ph * 1.13f + 1.7f) + 0.5f * cos(ph * 2.3f + uv.x * 80.0f);
+		// The wave knobs (2026-09-04): time scales by fShimFreq, every spatial term
+		// divides by fShimWave - ph carries both, so the octave harmonics (2.7/2.3/
+		// 1.13) inherit them and the whole texture scales coherently instead of
+		// detuning. Both at 1 = the old constants bit for bit.
+		float sw = max(fShimWave, 0.05f);
+		float ph = fTime * 9.0f * fShimFreq + (h * 26.0f) / sw + (float)i * 2.3f;
+		float n1 = sin(ph)               + 0.5f * sin(ph * 2.7f + uv.y * 90.0f / sw);
+		float n2 = cos(ph * 1.13f + 1.7f) + 0.5f * cos(ph * 2.3f + uv.x * 80.0f / sw);
 
 		disp += float2(n1, n2) * w;
 	}
 
-	disp *= SHIMMER_MAX * saturate(fShimmer);
+	// SHIMMER_MAX alone since the 2026-09-04 fold: the dialog strength is already
+	// inside each capsule's s (clamped host-side, where the old saturate lived).
+	disp *= SHIMMER_MAX;
 	return tex2D(tSrc, uv + disp);
 }
 
@@ -397,10 +412,15 @@ uniform extern float3 vGlRunB;     //   host-built - the streaks' polar chart ax
 uniform extern float  fRunAmt;     // RUNNERS: how many columns carry one (0 = none)
 uniform extern float  fRunSize;    // ... their thickness - rides the DROP SIZE slider
                                    //   (his ask: one size control for the whole glass)
-uniform extern float  fRunSpd;     // ... and how fast they travel, in COLUMN-CELLS/s -
-                                   //   derived host-side from |gravity + airflow| at
-                                   //   the glass, so parked runners crawl and in-flight
-                                   //   ones whip aft with no threshold (invariant 25e)
+uniform extern float  fRunPh;      // ... and how far they have travelled: the run RATE
+                                   //   (rad/s, derived host-side from |gravity + airflow|
+                                   //   at the glass - parked runners crawl, in-flight ones
+                                   //   whip aft, no threshold, invariant 25e) INTEGRATED
+                                   //   over real time on the host. Was a rate the shader
+                                   //   multiplied by fTime until 2026-09-06: that product
+                                   //   tracks its DERIVATIVE, so a falling airspeed (engine
+                                   //   cut on the runway) ran every runner BACKWARD - the
+                                   //   sheet's 08-27 bug, not swept onto the runners.
 uniform extern float  fDropDbg;    // TEMPORARY scaffold: 1 = ignore the depth mask,
                                    //   2 = VISUALIZE THE BUFFER instead of drawing
                                    //   drops - green where the depth is NEGATIVE (an
@@ -629,8 +649,9 @@ float4 PSGloom(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 				if (h1r.x < saturate(0.08f + 0.30f * fRunAmt) * saturate(fDrop * 1.6f))
 				{
 					const float L = 0.45f;                    // wrap period, radians
-					float spd = fRunSpd * (0.6f + 0.8f * h2r.x);        // rad/s
-					float vh  = fmod(fTime * spd + h1r.y * L, L);       // the head
+					// per-runner pace x the host-integrated phase (a constant times an
+					// integral is the integral of the constant times the rate)
+					float vh  = fmod(fRunPh * (0.6f + 0.8f * h2r.x) + h1r.y * L, L);   // the head
 					float va  = cv - floor(cv / L) * L;                 // this pixel
 					// column-local ACROSS offset, in RADIANS of arc (sector width is
 					// (2pi/N)*sin(cv)); curvature is SPATIAL and seed-keyed, never
