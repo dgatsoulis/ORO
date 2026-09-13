@@ -9,10 +9,11 @@ This is the first time the whole thing has been listed in one place. Everything 
 |---|---|
 | Started | 2026-07-25 |
 | Shipped to beta | 2026-08-10 (16 days) |
-| Distinct effects | **30** — 13 physiological, 17 environmental (the FOG joined the weather; the windscreen drops joined the storm; the vapour cone is TWO independent cones) |
-| Live controls | **165** sliders/knobs, **18** colour pickers, organised as a **menu tree** (WORLD / VESSEL / PILOT → 7 menus, 13 pages), all thruster settings PER ENGINE GROUP (MAIN / HOVER / RETRO / USER / **RCS**) — or **PER INDIVIDUAL THRUSTER** via layered overrides |
-| Source | ~30,100 lines across 18 source files, plus 9 pixel shaders in one HLSL file |
-| Client patches | **35** (a–z, +k2, +z2, +z3, +aa–af) — every one of them load-bearing |
+| Distinct effects | **32** — 13 physiological, 19 environmental (the LENS FLARE and the RINGS both joined 2026-09-12; the FOG joined the weather; the windscreen drops joined the storm; the vapour cone is TWO independent cones) |
+| Live controls | **184** sliders/knobs, **18** colour pickers, organised as a **menu tree** (WORLD / VESSEL / PILOT → 7 menus, 14 pages), all thruster settings PER ENGINE GROUP (MAIN / HOVER / RETRO / USER / **RCS**) — or **PER INDIVIDUAL THRUSTER** via layered overrides |
+| Source | ~33100 lines across 18 source files, plus 9 pixel shaders in one HLSL file |
+| Client patches | **41** (a–z, +k2, +z2, +z3, +aa–al) — every one of them load-bearing |
+| Test rigs shipped | **1** — `Script\testlights.lua`, twelve automatic cases over the local-light and shadow work, with its own scenario |
 | Worlds with auroras | 12 |
 | Settings scopes | 3 — global / per vessel class / per body (+ a window-geometry file). The G-FORCES and VIRTUAL COCKPIT pages' settings can be moved between the first two per hull with a **Save target** switch |
 
@@ -120,6 +121,14 @@ visibility.
   analytic surface that makes it read as a shock front survives.
 - **Two colour picks per cone** — the vapour body and the streaks — so stained or
   sunset-lit vapour is one swatch away.
+- **It forms by chance, and the air decides** (2026-09-07). Each pass through the Mach
+  band rolls the dice once: the odds are Max chance × water (the planet's own `Mask.tree`
+  water map around the vessel — open sea 1.0, deep inland 0.6, no map at all means no
+  cone) × how far below a dry ceiling you are (15 km, drawn ±10% per pass) × the dynamic
+  pressure's expansion term. The cone exists while the draw beats the live chance, so it
+  thins climbing toward its ceiling and forms on descent where the air gets humid enough;
+  an **Intermittency** gate makes it appear and die in bursts, more so on a marginal draw.
+  Three global sliders and an Air readout; the shapes stay per class.
 - **It is the one thing ORO draws that is not light.** Condensed water scatters and
   *occludes*, so unlike every other effect in the addon it draws alpha-blended and goes down
   *before* the additive layers — a cloud has to be laid down before light is added over it.
@@ -222,6 +231,32 @@ visibility.
   the rotating cloud layer by construction; the flash is the cloud image lighting up from a
   baked texture atlas, with multi-stroke envelopes and the occasional spider. Day kills the
   glow, which is physics, not a budget.
+- **Planetary rings** — the ring stops being a card and becomes a sheet with a real
+  **optical depth**. Opacity is `1 − exp(−τ/μ)`, so it goes opaque as the view flattens
+  toward the ring plane — which is the only honest kind of "thickness" available, the main
+  rings being 10–30 m thick. The lit and unlit faces are different phenomena rather than one
+  scaled by a constant: reflection one way, *transmission* the other, so backlit the thick B
+  ring goes dark while the Cassini Division glows — the inversion in every Cassini frame.
+  **The ring casts its shadow on the planet**, which Orbiter had never drawn at all, carrying
+  the ring's own structure so the Division reads as a bright line inside the band, and
+  broadening and narrowing with the 26.7° obliquity for free. Anything inside that shadow —
+  a ship, and the sun glare seen through the sheet — is dimmed by exactly what the ring
+  transmits. **Every ringed planet qualifies, addon systems included, with no new files**:
+  the optical depth is read out of the ring texture the planet already ships, because the
+  legacy `.tex` format's alpha channel has always been real opacity and nothing had used it.
+  **And the close-up (round 2):** bring the camera toward the ring and the sheet grows its
+  own texture — grooves and grain, ten and eight octaves from 2 km down to 4 m, each admitted
+  by a per-pixel fade once it is big enough on screen, so the far ring is round 1 to the bit
+  — standing still for a co-orbiting eye because its anchor rides Orbiter's own J2 field at
+  the camera's radius. `Detail` sets how fine, `Contrast` how strong, and `Relief` reads the
+  density as height and lights it, so every ridge has a lit and a shade side under Saturn's
+  grazing sun. The underside of a dense ring is grey rather than black (the light a thick
+  slab diffuses through itself, and planetshine), and ships cast their shadows onto the
+  sheet in Cascaded mode. Underneath it, a client-side *near-field draw*: the client renders
+  every planet distance-scaled on a near plane that cut the sheet 26 km out, so the sheet is
+  drawn again after the hulls on a local disc with exact coordinates and crossfaded into the
+  far draw at 600 km — the only way metre-scale structure can be placed to the millimetre on
+  a 137,000 km mesh.
 - **God rays** — crepuscular shafts from a low sun, and the cheapest effect in the addon
   because of an accident of frame order: D3D9Client draws its sun glare into the backbuffer
   *after* the bloom resolve and *before* the HUD stages ORO captures from. So the frame ORO
@@ -233,6 +268,24 @@ visibility.
   cross the whole sky, so the falloff is linear and wide — and shafts need an *occluder*:
   with the sun in open sky the technique can only smear the disc into a halo. The eclipse
   takes the light with it, so a transit kills them for free.
+- **Lens flare** — ghosts, an iris starburst, an anamorphic streak and a veil, from the
+  sun. **External views only, and that is physics rather than a scope cut**: a flare is
+  made between the elements of a *lens* and a healthy eye has none, so through the pilot's
+  eyes there is nothing to see and through a camera there is. It carries **no brightness
+  rule of its own** — it reads the sun's own pixels out of the finished frame and measures
+  their *contrast* against the ring of sky around them, so it dies behind a hull, dims
+  through haze and fades in an eclipse without being told about any of them, and a bright
+  hazy sky makes it weaker rather than stronger. (Brightness alone would have got that
+  backwards, which is the lesson the 2026-09-01 sun-disc round left behind: nothing in the
+  sun pipeline knows about clouds.) Its atmosphere term is the **god rays' gate inverted** —
+  a shaft needs a medium to scatter in, a flare needs a concentrated source that air is
+  busy smearing across the sky — so the two hand over to each other across an ascent.
+  **Four optics** (CLASSIC / ANAMORPHIC / CLEAN / VINTAGE), each a different element stack,
+  coating and aperture, with all six sliders keeping their meaning across every one: it is
+  one effect with a lens to choose, not four effects. The ghost tables are *measured* off
+  reference photographs rather than invented, and VINTAGE's near-colourless ghosts are the
+  physics falling out — a ghost's colour is thin-film interference in the coating, so an
+  uncoated lens has almost nothing for the Dispersion slider to spread.
 - **Rain** — a summonable surface storm, and the largest single effect in the addon
   (client patch (s), seven parts). The **light collapses at the source**: the storm slider
   kills the directional sun and lifts the ambient, so shadows and the warm cast go with it
@@ -259,7 +312,16 @@ visibility.
   `VesselsRainSurfaces.cfg` to the LIVE meshes so the drops respond without a reload.
   The shipped cfg already declares the stock DeltaGlider's windscreen; authors can
   still mark glass with a one-line `RAIN 1` mesh token (patch (h)) — both routes
-  work side by side.
+  work side by side. **The glass answers to the airflow, not to a setting**: the
+  runners radiate from the *stagnation point* — where the oncoming air first meets
+  the airframe, which is below the glass — so they run straight down when parked and
+  sweep **up** the windscreen and outward from about rotation speed onward, the way
+  they do on a real canopy, on any vessel and with nothing to configure. Past roughly
+  45 m/s of **dynamic pressure** (so it stays honest at altitude, where 200 m/s in
+  thin air barely disturbs a drop) the sitting drops thin out, the runners multiply to
+  carry the water away, and what is left is a moving **film** that ripples the view
+  rather than drawing anything of its own — one sensed number driving all three, so
+  they cannot disagree about how hard the air is working.
   The deck overhead is ORO's own **two-layer textured cloud ceiling** — a main deck and
   a darker scud layer hanging beneath it, with real parallax, vertical relief and no
   repetition — and the storm carries its own **lightning**: most events light a region
@@ -317,6 +379,7 @@ rather than rendering anything.
 | **The cabin at night** | A stock VC stays fully lit at midnight — its authors fill it with flat emissive light. ORO scales that fill (and the ambient) down as the sun sets at the camera, the horizon dipping for orbit and a twilight band on worlds with air; storms and fog dim it further by a slider of your own. MFDs, self-lit instruments, emission maps and every cockpit lamp are untouched, so the cabin light finally has a job. |
 | **Fog** | Two analytic height-fog layers rendered by the client inside every surface — terrain, bases, hulls, particles, runway lights, the sky — one grey for all of them, coloured by the sun's own irradiance. Visibility, top, fade, brightness, sun glow; the rain's gloom is the second layer. Ground shadows, VC shadows and the sun all weaken through it. |
 | **Base lights** | Every base's night state forced on — night textures, runway and taxiway lights — with a glow gain into the bloom and a fog halo that grows with the air between you and the lamp. One setting behind two doors (RAIN and FOG). |
+| **Base trains and solar plants** | No knob at all — the client revives the three base objects that only Orbiter 2010's own renderer ever animated. The monorail cabin shuttles between its ends, the hangrail's two cabins pass each other under their girder rail, and a solar plant's panels track the sun and glint at you; all frozen or invisible under every graphics client since terrain arrived. The rails follow the terrain under an 8% grade on pylons and portals cut to the ground; everything casts and receives the cascaded shadows and takes local lights, fog and night textures. Habana's monorail and hangrail are the stock examples. |
 | **Stock reentry kill** | Stock's billboards *and* every vessel's default reentry particle stream, suppressed — neither of which any documented API can turn off. |
 | **Stock exhaust kill** | Billboards and exhaust streams, as two independent bits, per vessel. |
 | **Night clouds** | Three stock behaviours conspired to make night cloud decks invisible from above and city lights punch through anything. Fixed in the deployed shader; tunable at runtime. |
@@ -368,7 +431,7 @@ rather than rendering anything.
 ## 6. The client work
 
 Stock D3D9Client crashes the instant any HUD render proc is registered. That was patch (a);
-thirty-four more followed. Several are outright bug fixes to the client, demonstrable with no
+thirty-five more followed. Several are outright bug fixes to the client, demonstrable with no
 addon involved:
 
 - `clbkCreateParticleStream` is unimplemented — so the documented core API

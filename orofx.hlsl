@@ -409,6 +409,12 @@ uniform extern float3 vGlF;        // camera FORWARD axis, expressed in the VESS
 uniform extern float3 vGlRun;      // where a drop runs: gravity + airflow, VESSEL frame
 uniform extern float3 vGlRunA;     // with vGlRunB: an orthonormal basis AROUND vGlRun,
 uniform extern float3 vGlRunB;     //   host-built - the streaks' polar chart axes
+uniform extern float  fShear;      // 0..1 how hard the airflow is stripping the pane
+                                   //   (dynamic pressure, host-sensed). Drops thin out,
+                                   //   runners multiply, the film comes up - one number,
+                                   //   three consequences, so they cannot disagree
+uniform extern float  fFilm;       // the FILM's own trim, 0 = off (the user's taste on
+                                   //   top of the physics - 25i)
 uniform extern float  fRunAmt;     // RUNNERS: how many columns carry one (0 = none)
 uniform extern float  fRunSize;    // ... their thickness - rides the DROP SIZE slider
                                    //   (his ask: one size control for the whole glass)
@@ -421,7 +427,7 @@ uniform extern float  fRunPh;      // ... and how far they have travelled: the r
                                    //   tracks its DERIVATIVE, so a falling airspeed (engine
                                    //   cut on the runway) ran every runner BACKWARD - the
                                    //   sheet's 08-27 bug, not swept onto the runners.
-uniform extern float  fDropDbg;    // TEMPORARY scaffold: 1 = ignore the depth mask,
+uniform extern float  fDropDbg;    // MASK DEBUG (the panel's own row): 1 = ignore the mask,
                                    //   2 = VISUALIZE THE BUFFER instead of drawing
                                    //   drops - green where the depth is NEGATIVE (an
                                    //   authored window), blue-tinted where positive
@@ -460,11 +466,12 @@ float4 PSGloom(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 		// (patch h part 2 - see tDepth's comment above). -0.25 rather than 0: a
 		// pane nearer than 25 cm is the visor of a helmet you are wearing, not a
 		// window, and fp16 noise around zero stays out.
-		// TEMPORARY (2026-08-26): fDropDbg >= 1 bypasses the mask, so one flight says
-		// whether the drops are absent or merely masked away. Scaffolding - out on
-		// sign-off, like the wet mirror's MIR X toggle.
+		// Mask Debug >= 1 bypasses the mask, which answers the one question a
+		// screenshot cannot: are the drops absent, or merely masked away? It was
+		// built as scaffolding and KEPT (2026-09-12) because that turned out to be
+		// the thing users actually need when a windscreen looks wrong.
 		float sd = tex2D(tDepth, suv).a;
-		// TEMPORARY: dbg 2 paints the buffer itself - see fDropDbg's comment.
+		// Mask Debug 2 paints the buffer itself - see fDropDbg's comment.
 		if (fDropDbg >= 1.5f) {
 			float4 s2 = tex2D(tSrc, suv);
 			if (sd < -0.25f)     return float4(s2.rgb * 0.3f + float3(0, 0.7f, 0), s2.a);
@@ -512,6 +519,17 @@ float4 PSGloom(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 			float  rl = length(rd);
 			rd = (rl > 1e-4f) ? rd / rl : float2(0.0f, -1.0f);
 
+			// STANDING coverage, which is NOT the same as how much water is arriving
+			// (2026-09-12, triage A4). Past ~44 m/s of dynamic pressure the airflow
+			// strips sitting drops faster than they can gather, so the lattice empties -
+			// in REVERSE BIRTH ORDER, for free, because coverage is already a birth rank
+			// (see below): the last drops to appear are the first to be blown away, and
+			// no per-drop state was needed to say so.
+			// ⚠️ fDrop itself is left alone, because the RUNNERS key off it: they need
+			// water ARRIVING, not water sitting, and scaling their gate with this would
+			// have made them thin out exactly when they should be multiplying.
+			float dropCov = fDrop * (1.0f - 0.85f * fShear);
+
 			// --- the 3x3 neighbourhood -------------------------------------------
 			float best = 0.0f;          // the winning drop's height
 			float2 bestN = float2(0, 0);// ... its in-plane normal, lattice space
@@ -548,13 +566,13 @@ float4 PSGloom(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 					// reverse when it dries. No per-drop state, no clock: a pure
 					// function of (cell, fDrop), so it is warp-proof and freezes
 					// correctly under pause with the scalar that drives it.
-					if (h1.x >= fDrop) continue;
+					if (h1.x >= dropCov) continue;
 
 					// ... and a newborn GROWS rather than appearing full-size: maturity
 					// ramps over the last ~8% of coverage rise, scaling the radius (and
 					// with it the lens, which rides bestR). At GLASS_RISE = 16 s that is
 					// roughly a second of swelling per drop - visible, not a pop.
-					float m = saturate((fDrop - h1.x) * 12.5f);
+					float m = saturate((dropCov - h1.x) * 12.5f);
 
 					// Radius 0.22 .. 0.50 of a cell, biased small - a real windscreen
 					// is mostly small drops with a few fat ones, and the max() below
@@ -646,7 +664,14 @@ float4 PSGloom(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 				                                  // hash lesson: sharing correlates)
 				// Occupancy rides the knob AND the fill: runners need water on the
 				// glass before they have anything to gather.
-				if (h1r.x < saturate(0.08f + 0.30f * fRunAmt) * saturate(fDrop * 1.6f))
+				// ... AND THE SHEAR (2026-09-12, A4), which is the other half of the
+				// same statement as the thinning drops above: the water the airflow
+				// tears off the lattice has to go somewhere, and where it goes is into
+				// running columns. At full shear every column carries one, which is the
+				// point at which the pane stops being a field of drops and the film
+				// below takes over. The fill gate stays on fDrop - water ARRIVING.
+				if (h1r.x < saturate((0.08f + 0.30f * fRunAmt) * (1.0f + 2.2f * fShear))
+				          * saturate(fDrop * 1.6f))
 				{
 					const float L = 0.45f;                    // wrap period, radians
 					// per-runner pace x the host-integrated phase (a constant times an
@@ -713,6 +738,43 @@ float4 PSGloom(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 						tint *= lerp(1.0f, 1.0f - 0.55f * rim + 0.30f * caust, ah);
 					}
 				}
+			}
+
+			// --- THE WATER FILM (2026-09-12, triage A4's second half) --------------
+			// Past the point where the airflow strips drops faster than they can sit,
+			// what is left on the glass is not a field of objects at all - it is a thin
+			// SHEET being dragged across the pane, and what you see through it is not
+			// bent by individual lenses but rippled continuously. Stebb asked for it as
+			// "a 'vision disturbance'... to mimic a film of water on the glass", which
+			// is the right description: it disturbs, it does not draw.
+			//
+			// So it is DISPLACEMENT ONLY, with no shape of its own and no edges - two
+			// ripple trains streaming down-flow at different rates, plus the faintest
+			// loss of contrast where the sheet is thick. It could not be built out of
+			// the drop or runner primitives: both are objects with rims, and a rim is
+			// exactly what a sheet does not have.
+			//
+			// ⚠️ THE AZIMUTH MULTIPLIERS ARE INTEGERS. Azimuth wraps at 2pi, so a
+			// fractional one seams down the middle of the pane - the integer-cycle law
+			// (28e) in its fifth outfit, and the same rule the runner sectors obey.
+			// ⚠️ AND THE PHASE IS THE HOST-INTEGRATED fRunPh, never a rate x fTime: that
+			// product tracks the DERIVATIVE, which ran every runner backwards when the
+			// engine was cut on the runway (2026-09-06). One integral, two consumers.
+			float fw = fShear * saturate(fFilm);
+			if (fw > 0.002f)
+			{
+				float fcv = acos(clamp(-dot(rayV, vGlRun), -1.0f, 1.0f));  // down-flow
+				float faz = atan2(dot(rayV, vGlRunA), dot(rayV, vGlRunB)); // around it
+				float fph = fRunPh * 3.4f;
+				float r1 = sin(fcv * 52.0f - fph * 5.0f + faz *  7.0f);
+				float r2 = sin(fcv * 31.0f - fph * 3.1f + faz * 11.0f + 2.2f);
+				float rr = r1 * 0.62f + r2 * 0.38f;
+				// Along the flow, because that is the direction the sheet is moving.
+				float2 offF = rd * (rr * 0.0020f * fDropLens * fw);
+				suv += float2(dot(offF, Ju), dot(offF, Jv));
+				// Water scatters a little of what passes through it. Keyed to the same
+				// ripple so the thick parts are the dim parts - one number again.
+				tint *= 1.0f - 0.09f * fw * (0.5f + 0.5f * rr);
 			}
 		}
 	}
@@ -859,4 +921,350 @@ float4 PSGodRay(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
 	// in the accumulator) lets the shafts stack into white where they overlap near
 	// the disc, which is what the reference photographs do.
 	return float4(saturate(src.rgb + acc * vGRTint * (fGRStr * fGRFade * fall)), src.a);
+}
+
+
+// ============================================================================
+// PSLensFlare - THE CAMERA'S OWN ARTEFACT (2026-09-12)
+// ----------------------------------------------------------------------------
+// EXTERNAL VIEWS ONLY, and that is a physical ruling rather than a scope cut. A lens
+// flare is made INSIDE a lens, by light bouncing between the elements of the optic;
+// a healthy human eye has no such elements and does not produce one. So in a cockpit,
+// where you are looking through the pilot's eyes, there is no flare - in any of the
+// three internal views - and outside, where the camera IS the lens, there is. His rule,
+// and it also settles every awkward case for free: no VC glass to reason about, no HUD
+// ordering, nothing to explain in the help.
+//
+// DRAWN LAST of everything ORO does to the frame, for the same reason: the god rays are
+// scattering in the air AHEAD of the lens and the shimmer is heat ahead of it, so both
+// have to be in the image before the glass gets to smear it. The practical half of that
+// is that the god ray march cannot turn our ghosts into shafts.
+//
+// WHAT IT MEASURES, AND WHY IT IS CONTRAST AND NOT BRIGHTNESS.
+// The client has already drawn its own sun disc into the frame we captured, and has
+// already occluded it against hull, terrain and limb and dimmed it through the storm
+// light, the fog, the rings and the eclipse. So "is the sun visible, and how hard" is
+// answered by READING THOSE PIXELS - the god rays' trick (invariant 24a), and it means
+// this effect carries no brightness rule of its own. That matters here specifically:
+// every rule the 2026-09-01 sun-disc round wrote misread a hazy morning as a sunset,
+// because nothing in the sun pipeline knows about clouds.
+// The quantity is the sun's CONCENTRATION - its own pixels against the ring of sky
+// around them. Over a uniformly bright cloud deck both are bright, the contrast
+// collapses and the flare fades, which is exactly what haze does to a real lens.
+// Brightness alone would have made a bright hazy day flare HARDER, which is backwards.
+// The depth tap is the backstop the contrast probe cannot provide on its own: a
+// SUNLIT WHITE HULL crossing the disc is bright against black space and would read as
+// a sun. Five taps rather than one so the flare fades across the edge instead of
+// snapping off (the OroSunTerrainVis lesson - a centred probe must not model a hard
+// edge as a step).
+// ============================================================================
+uniform extern float  fLFMode;     // WHICH LENS: 0 CLASSIC, 1 ANAMORPHIC, 2 CLEAN,
+                                   //   3 VINTAGE (uncoated - mostly veiling glare). One
+                                   //   value for the whole frame, so the branch it drives
+                                   //   is free; every slider below means the same thing in
+                                   //   all three, which is why this is one effect with an
+                                   //   optic to choose rather than three effects
+uniform extern float  fLFStr;      // master intensity (0..2; 1 = the reference look)
+uniform extern float  fLFSize;     // scales the ghost chain and the reach of the rays
+uniform extern float  fLFGhost;    // opacity of the ghost chain alone
+uniform extern float  fLFRay;      // strength of the starburst alone
+uniform extern float  fLFDisp;     // how far the chain's colours spread from white
+uniform extern float  fLFFade;     // host budget: screen proximity x air x eclipse
+uniform extern float  fLFSamp;     // 1 = the sun's UV is inside the frame, so the probe
+                                   //   below means something; 0 = it is off-screen and
+                                   //   there is nothing to read, so trust the budget
+uniform extern float  fLFDepth;    // 1 = tDepth is bound (patch (h) AND Sun glare on)
+
+// The blade count lives per-lens now (see `blades` below). MANY AND THIN is the whole
+// difference between the reference photographs and the 2016 client's eight fat wedges -
+// same primitive, and the count plus the sharpening exponent is what separates "a lens"
+// from "a video game". It is also most of what separates the three lenses from each other.
+#define LF_PROBE  0.0065f          // centre-tap radius, in units of screen HEIGHT
+#define LF_RING   0.0900f          // ... and the surround the contrast is measured against.
+                                   //   Wide enough to clear the client's own glare sprite,
+                                   //   which has real angular size; see the min() below,
+                                   //   which is what makes the exact number forgiving
+
+// One element of the chain: a translucent disc with a brighter aperture RIM. The rim is
+// what makes a ghost read as a piece of glass rather than as a blob, and `ring` blends
+// the filled body away entirely to leave the bare annulus - the big faint circles.
+// Branchless on purpose: both terms fall to zero on their own past the radius, so an
+// early-out would only add divergence to a shader every pixel runs.
+float lfElem(float2 p, float2 c, float R, float rimW, float ring)
+{
+	float r    = length(p - c) / max(R, 1e-4f);
+	float body = saturate(1.0f - r); body *= body;
+	float rim  = saturate(1.0f - abs(r - 0.88f) / max(rimW, 1e-3f));
+	rim = rim * rim * rim;
+	// Low amplitudes on purpose: these are TRANSLUCENT. Eight of them at a peak near 1
+	// would wash the frame into fog; in the reference the largest disc is a quarter-tone
+	// over the sky and you read it by its edge, not its fill.
+	return lerp(body * 0.26f + rim * 0.34f, rim * 0.38f, saturate(ring));
+}
+
+// SCREEN, not additive. A flare is an artefact laid over a finished image and it cannot
+// make a pixel brighter than white; additive would blow the frame out around the disc,
+// where it is already saturated.
+float3 lfScreen(float3 a, float3 b) { return 1.0f - (1.0f - saturate(a)) * (1.0f - saturate(b)); }
+
+float4 PSLensFlare(float x : TEXCOORD0, float y : TEXCOORD1) : COLOR
+{
+	float2 uv  = float2(x, y);
+	float4 src = tex2D(tSrc, uv);
+
+	if (fLFFade <= 0.002f) return src;
+
+	const float asp = max(fAspect, 0.001f);
+
+	// --- is there a concentrated sun in this frame, and how hard? ------------
+	float3 sunCol = float3(1.0f, 1.0f, 1.0f);
+	float  conc   = 1.0f;
+
+	// A UNIFORM branch - the same for every pixel in the frame, so it costs nothing.
+	// fLFSamp is how far the disc's UV is INSIDE the captured frame, ramped over the
+	// probe's own reach. Past the edge the taps clamp and start measuring the border
+	// texel instead of the sky, so the measurement is lerped back toward "assume
+	// visible" as it loses meaning, leaving the host budget in charge. A hard switch
+	// here would pop the whole flare on as the sun crossed the frame edge.
+	if (fLFSamp > 0.002f)
+	{
+		float2 rp = float2(LF_PROBE / asp, LF_PROBE);
+		float2 rr = float2(LF_RING  / asp, LF_RING);
+
+		float3 cen = (tex2D(tSrc, vGRSun).rgb
+		            + tex2D(tSrc, vGRSun + float2( rp.x, 0.0f)).rgb
+		            + tex2D(tSrc, vGRSun + float2(-rp.x, 0.0f)).rgb
+		            + tex2D(tSrc, vGRSun + float2( 0.0f, rp.y)).rgb
+		            + tex2D(tSrc, vGRSun + float2( 0.0f,-rp.y)).rgb) * 0.2f;
+
+		// THE SURROUND IS THE DIMMEST OF THE RING, NOT ITS AVERAGE, and that is the one
+		// part of this probe that had to be thought about rather than written. The
+		// client's own glare sprite has real angular size, and if it spills past the
+		// ring then an AVERAGE would be measuring the sprite against itself and the
+		// contrast would collapse in deep space - the effect dying exactly where it
+		// should be at its best. The minimum finds whichever taps cleared the sprite.
+		// It is also the right answer for a mixed scene (a bright limb on one side,
+		// black sky on the other): high local contrast is precisely when a lens flares.
+		float l0 = dot(tex2D(tSrc, vGRSun + float2( rr.x,        0.0f      )).rgb, float3(0.299f, 0.587f, 0.114f));
+		float l1 = dot(tex2D(tSrc, vGRSun + float2(-rr.x,        0.0f      )).rgb, float3(0.299f, 0.587f, 0.114f));
+		float l2 = dot(tex2D(tSrc, vGRSun + float2( rr.x * 0.5f, rr.y*0.87f)).rgb, float3(0.299f, 0.587f, 0.114f));
+		float l3 = dot(tex2D(tSrc, vGRSun + float2(-rr.x * 0.5f, rr.y*0.87f)).rgb, float3(0.299f, 0.587f, 0.114f));
+		float l4 = dot(tex2D(tSrc, vGRSun + float2( rr.x * 0.5f,-rr.y*0.87f)).rgb, float3(0.299f, 0.587f, 0.114f));
+		float l5 = dot(tex2D(tSrc, vGRSun + float2(-rr.x * 0.5f,-rr.y*0.87f)).rgb, float3(0.299f, 0.587f, 0.114f));
+
+		float lc = dot(cen, float3(0.299f, 0.587f, 0.114f));
+		float ls = min(min(min(l0, l1), min(l2, l3)), min(l4, l5));
+
+		// Squared, so a merely-bright sky never quite gets there and a clean disc
+		// against black reaches full strength immediately.
+		conc = saturate((lc - ls) * 1.60f);
+		conc = conc * conc;
+
+		// Borrow the sun's own hue at half weight, so a low red sun throws a warm
+		// flare without the coating's colours being overpainted by it.
+		sunCol = lerp(float3(1.0f, 1.0f, 1.0f), cen / max(lc, 1e-3f), 0.5f);
+
+		// Is something SOLID standing in front of the disc? GBUF_DEPTH carries the
+		// vessels, the terrain (patch ab) and the base structures (z2); .a is the
+		// camera distance in metres and 0 means nothing was drawn, i.e. sky. The
+		// > 0.1 guard is this channel's standing convention - a negative is authored
+		// window glass and reads as nothing drawn, which is right here too.
+		if (fLFDepth > 0.5f)
+		{
+			float sky = step(tex2D(tDepth, vGRSun).a, 0.1f)
+			          + step(tex2D(tDepth, vGRSun + float2( rp.x, 0.0f)).a, 0.1f)
+			          + step(tex2D(tDepth, vGRSun + float2(-rp.x, 0.0f)).a, 0.1f)
+			          + step(tex2D(tDepth, vGRSun + float2( 0.0f, rp.y)).a, 0.1f)
+			          + step(tex2D(tDepth, vGRSun + float2( 0.0f,-rp.y)).a, 0.1f);
+			conc *= sky * 0.2f;
+		}
+
+		// ... and hand authority back to the host as the probe runs out of frame.
+		const float t = saturate(fLFSamp);
+		conc   = lerp(1.0f, conc, t);
+		sunCol = lerp(float3(1.0f, 1.0f, 1.0f), sunCol, t);
+	}
+
+	if (conc <= 0.002f) return src;
+
+	// --- the chain ----------------------------------------------------------
+	// Centred and aspect-corrected, so the ghosts are round on a widescreen viewport
+	// and the axis through the screen centre is the real one.
+	float2 p = (uv     - 0.5f) * float2(asp, 1.0f);
+	float2 s = (vGRSun - 0.5f) * float2(asp, 1.0f);
+
+	const float size = max(fLFSize, 0.02f);
+	// Ghost DISTANCES and the blade count are properties of a LENS, so they are baked;
+	// what you tune is the look (25i - the sim owns where things land). d = +1 is the
+	// sun itself, 0 is the screen centre, negative is the far side of it.
+	const float dw = saturate(fLFDisp * 0.5f);   // white -> the coating's own colour
+
+	// ------------------------------------------------------------------------
+	// THE LENS. fLFMode picks WHICH OPTIC you are looking through - a different
+	// element stack, a different coating, a different aperture - and every slider
+	// keeps its meaning across all of them, which is the whole point of doing it
+	// this way rather than as three separate effects. Each branch fills the same
+	// eight variables and the composite at the bottom is written once.
+	//
+	// THE BRANCH IS UNIFORM - one value for the entire frame - so it costs nothing
+	// at run time; only the compiler pays, in instruction slots for the bodies it
+	// will never both take.
+	//
+	// !! MODE 0 IS ARITHMETICALLY THE BUILD HE APPROVED ON 2026-09-12. Its table,
+	// its constants and its composite are untouched; the generalisation is defaults
+	// (gain 1, no streak, white veil) that evaluate to exactly what was there. A new
+	// lens must never move the one that has already been flown.
+	// ------------------------------------------------------------------------
+	float3 acc       = 0.0f;
+	float  ghostGain = 1.0f;
+	float3 rayTint   = float3(1.00f, 0.93f, 0.86f);
+	float3 veilTint  = float3(1.00f, 1.00f, 1.00f);
+	float  veilAmt   = 0.10f;
+	float  veilReach = 2.2f;    // how far the wash spreads; SMALLER covers more frame
+	float  blades    = 19.0f;   // iris leaves -> how many rays
+	float  raySharp  = 26.0f;   // how thin each one is
+	float  ray2W     = 0.45f;   // weight of the second, beating set
+	float  ray2Sharp = 44.0f;   // ... and its own thinness. Its OWN variable rather than a
+	                            //   multiple of raySharp: a factor of 1.7 would have made
+	                            //   mode 0 evaluate 44.2 instead of the 44.0 it was flown
+	                            //   with, and "arithmetically unchanged" has to be true
+	float  rayReach  = 3.2f;    // radial decay; SMALLER reaches further
+	float  streakW   = 0.0f;    // anamorphic horizontal bar, 0 = this lens has none
+
+	if (fLFMode < 0.5f)
+	{
+		// ---- 0: CLASSIC -----------------------------------------------------
+		// Warm-coated stills lens: a few LARGE, varied, well-separated ghosts. The
+		// table is MEASURED off his reference frame rather than invented - each
+		// ghost's distance along the sun->centre axis and its radius read off that
+		// image in units of screen height, which is why the big olive disc sits at
+		// d = -1.00 (as far the other side of centre as the sun is this side, where
+		// a real lens puts it) and the wide violet annulus past it at -1.30. Entry 1
+		// is the warm bloom over the core; entries 3 and 5 are the tiny specks.
+		acc += lfElem(p, s *  0.45f, 0.130f * size, 0.20f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.62f, 0.28f), dw);
+		acc += lfElem(p, s *  0.22f, 0.055f * size, 0.30f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.55f, 0.18f), dw);
+		acc += lfElem(p, s *  0.05f, 0.014f * size, 0.45f, 0.00f) * lerp(1.0f.xxx, float3(0.35f, 1.00f, 0.45f), dw);
+		acc += lfElem(p, s * -0.30f, 0.060f * size, 0.28f, 0.00f) * lerp(1.0f.xxx, float3(0.95f, 0.85f, 0.30f), dw);
+		acc += lfElem(p, s * -0.55f, 0.030f * size, 0.40f, 0.00f) * lerp(1.0f.xxx, float3(0.35f, 0.55f, 1.00f), dw);
+		acc += lfElem(p, s * -0.75f, 0.075f * size, 0.26f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.72f, 0.35f), dw);
+		acc += lfElem(p, s * -1.00f, 0.185f * size, 0.14f, 0.00f) * lerp(1.0f.xxx, float3(0.72f, 0.86f, 0.42f), dw);
+		acc += lfElem(p, s * -1.30f, 0.340f * size, 0.045f, 0.90f) * lerp(1.0f.xxx, float3(0.62f, 0.55f, 1.00f), dw);
+	}
+	else if (fLFMode < 1.5f)
+	{
+		// ---- 1: ANAMORPHIC --------------------------------------------------
+		// The cine look, measured off his second reference: cool blue-white, a long
+		// HORIZONTAL streak through the source (an anamorphic element is squeezed on
+		// one axis, so its flare smears on the other), far more and finer rays, and a
+		// long chain of MANY SMALL ghosts of similar size rather than a few big ones -
+		// which is the real difference between the two optics, not the colour.
+		rayTint  = float3(0.62f, 0.80f, 1.00f);
+		veilTint = float3(0.62f, 0.78f, 1.00f);
+		veilAmt  = 0.07f;
+		blades   = 26.0f; raySharp = 16.0f; ray2Sharp = 30.0f; ray2W = 0.55f; rayReach = 2.4f;
+		streakW  = 1.0f;
+		acc += lfElem(p, s *  0.35f, 0.020f * size, 0.35f, 0.00f) * lerp(1.0f.xxx, float3(0.75f, 0.85f, 1.00f), dw);
+		acc += lfElem(p, s *  0.20f, 0.024f * size, 0.32f, 0.00f) * lerp(1.0f.xxx, float3(0.85f, 0.80f, 0.95f), dw);
+		acc += lfElem(p, s *  0.05f, 0.026f * size, 0.30f, 0.00f) * lerp(1.0f.xxx, float3(0.70f, 0.85f, 1.00f), dw);
+		acc += lfElem(p, s * -0.10f, 0.029f * size, 0.28f, 0.00f) * lerp(1.0f.xxx, float3(0.90f, 0.85f, 0.80f), dw);
+		acc += lfElem(p, s * -0.28f, 0.034f * size, 0.26f, 0.00f) * lerp(1.0f.xxx, float3(0.75f, 0.90f, 0.95f), dw);
+		acc += lfElem(p, s * -0.48f, 0.036f * size, 0.26f, 0.00f) * lerp(1.0f.xxx, float3(0.95f, 0.85f, 0.70f), dw);
+		acc += lfElem(p, s * -0.70f, 0.022f * size, 0.32f, 0.00f) * lerp(1.0f.xxx, float3(0.70f, 0.80f, 1.00f), dw);
+		acc += lfElem(p, s * -0.92f, 0.016f * size, 0.38f, 0.00f) * lerp(1.0f.xxx, float3(0.85f, 0.90f, 1.00f), dw);
+		acc += lfElem(p, s * -1.15f, 0.010f * size, 0.50f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.95f, 0.85f), dw);
+		acc += lfElem(p, s * -1.40f, 0.049f * size, 0.22f, 0.00f) * lerp(1.0f.xxx, float3(0.70f, 0.85f, 1.00f), dw);
+		acc += lfElem(p, s * -1.65f, 0.014f * size, 0.40f, 0.00f) * lerp(1.0f.xxx, float3(0.90f, 0.80f, 0.95f), dw);
+		acc += lfElem(p, s * -1.88f, 0.011f * size, 0.45f, 0.00f) * lerp(1.0f.xxx, float3(0.80f, 0.90f, 1.00f), dw);
+		// The two wide, nearly-bare rings the chain sits inside.
+		acc += lfElem(p, s * -0.55f, 0.245f * size, 0.040f, 0.92f) * lerp(1.0f.xxx, float3(0.55f, 0.95f, 0.75f), dw);
+		acc += lfElem(p, s * -1.40f, 0.196f * size, 0.045f, 0.92f) * lerp(1.0f.xxx, float3(0.95f, 0.70f, 0.60f), dw);
+	}
+	else if (fLFMode < 2.5f)
+	{
+		// ---- 2: CLEAN -------------------------------------------------------
+		// A modern multi-coated optic, and the restrained one on purpose: coatings
+		// exist to kill exactly this artefact, so what survives is a crisp star from
+		// the aperture, two faint coating reflections and almost no veil. This is the
+		// setting for anyone who finds a full flare too much but still wants the sun
+		// to read as having been photographed.
+		ghostGain = 0.45f;
+		rayTint   = float3(1.00f, 0.98f, 0.95f);
+		veilAmt   = 0.045f;
+		blades    = 14.0f; raySharp = 36.0f; ray2Sharp = 60.0f; ray2W = 0.20f; rayReach = 4.2f;
+		acc += lfElem(p, s * -0.55f, 0.070f * size, 0.30f, 0.00f) * lerp(1.0f.xxx, float3(0.80f, 0.90f, 1.00f), dw);
+		acc += lfElem(p, s * -1.10f, 0.110f * size, 0.20f, 0.00f) * lerp(1.0f.xxx, float3(0.75f, 0.95f, 0.85f), dw);
+		acc += lfElem(p, s * -0.80f, 0.300f * size, 0.050f, 0.95f) * lerp(1.0f.xxx, float3(0.70f, 0.80f, 1.00f), dw);
+	}
+	else
+	{
+		// ---- 3: VINTAGE -----------------------------------------------------
+		// An UNCOATED optic, and it is a different failure of glass rather than a
+		// restyle of the same one - which is why it earns a row instead of being three
+		// slider positions of CLASSIC.
+		//
+		// Every bare air-glass surface reflects about 4% of what hits it, and an old
+		// lens has a lot of them, so what you get is not a tidy chain of ghosts: it is
+		// VEILING GLARE. Light scattered over the whole frame, blacks lifted, contrast
+		// gone. That is the dominant term here (0.30 against CLASSIC's 0.10) and it
+		// spreads much further (veilReach 0.85), so the wash reaches the corners.
+		//
+		// AND THE GHOSTS COME OUT NEARLY COLOURLESS ON PURPOSE - that is physics, not
+		// taste. A ghost's colour is thin-film interference in the COATING; with no
+		// coating there is no interference and no colour, just soft warm-grey discs
+		// (warm because old glass yellows and uncoated transmission is warmer). The
+		// nice consequence: DISPERSION barely moves this lens, because there is
+		// almost nothing for it to spread. The slider still works, it just has less
+		// to say - which is exactly true of the real thing.
+		//
+		// Few blades and soft ones, the way an old iris was built. This is the one
+		// place the 2016 client's "eight fat wedges" shape is the CORRECT answer -
+		// the difference is that here they are dim and sit inside a big warm wash
+		// instead of being the brightest thing on screen.
+		ghostGain = 0.90f;
+		rayTint   = float3(1.00f, 0.90f, 0.76f);
+		veilTint  = float3(1.00f, 0.88f, 0.70f);
+		veilAmt   = 0.30f;  veilReach = 0.85f;
+		blades    = 8.0f; raySharp = 20.0f; ray2Sharp = 34.0f; ray2W = 0.15f; rayReach = 2.0f;
+		acc += lfElem(p, s *  0.60f, 0.150f * size, 0.60f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.93f, 0.84f), dw);
+		acc += lfElem(p, s *  0.30f, 0.095f * size, 0.55f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.90f, 0.78f), dw);
+		acc += lfElem(p, s *  0.08f, 0.120f * size, 0.62f, 0.00f) * lerp(1.0f.xxx, float3(0.98f, 0.94f, 0.88f), dw);
+		acc += lfElem(p, s * -0.15f, 0.080f * size, 0.58f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.88f, 0.74f), dw);
+		acc += lfElem(p, s * -0.38f, 0.145f * size, 0.65f, 0.00f) * lerp(1.0f.xxx, float3(0.96f, 0.92f, 0.86f), dw);
+		acc += lfElem(p, s * -0.60f, 0.105f * size, 0.55f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.91f, 0.80f), dw);
+		acc += lfElem(p, s * -0.85f, 0.170f * size, 0.60f, 0.00f) * lerp(1.0f.xxx, float3(0.97f, 0.90f, 0.82f), dw);
+		acc += lfElem(p, s * -1.10f, 0.130f * size, 0.58f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.94f, 0.86f), dw);
+		acc += lfElem(p, s * -1.45f, 0.200f * size, 0.70f, 0.00f) * lerp(1.0f.xxx, float3(0.98f, 0.90f, 0.80f), dw);
+		acc += lfElem(p, s * -1.75f, 0.090f * size, 0.55f, 0.00f) * lerp(1.0f.xxx, float3(1.00f, 0.92f, 0.84f), dw);
+	}
+
+	// --- the starburst ------------------------------------------------------
+	float2 dr  = p - s;
+	float  rl  = length(dr);
+	float  ang = atan2(dr.y, dr.x);
+	float  v1  = pow(0.5f + 0.5f * cos(ang * blades), raySharp);
+	// A second set at double the frequency and offset in phase, at under half weight.
+	// A single perfectly regular star reads as a decal; two beating sets do not.
+	float  v2  = pow(0.5f + 0.5f * cos(ang * (blades * 2.0f) + 1.10f), ray2Sharp);
+	float  rays = (v1 + ray2W * v2) * exp(-rl * (rayReach / max(size, 0.05f)));
+
+	// --- the anamorphic streak ----------------------------------------------
+	// A thin horizontal bar through the source. Rides the Rays slider, because it is
+	// the same thing the aperture does - light spread along one axis rather than
+	// scattered evenly - and a lens either has this element or it does not.
+	float sy = saturate(1.0f - abs(dr.y) / (0.010f * size));
+	float st = sy * sy * sy * exp(-abs(dr.x) * (1.8f / max(size, 0.05f))) * streakW;
+
+	// --- veiling glare ------------------------------------------------------
+	// Light scattered across the whole element rather than reflected between two of
+	// them: a broad, faint lift around the source. Deliberately not the tight coloured
+	// halo of the 2016 effect, which is the thing he singled out.
+	float veil = exp(-rl * veilReach) * veilAmt;
+
+	float3 col = acc * (ghostGain * fLFGhost)
+	           + (rays + st) * (fLFRay * 0.55f) * rayTint
+	           + veil * veilTint;
+
+	col *= sunCol * (fLFStr * fLFFade * conc);
+
+	return float4(lfScreen(src.rgb, col), src.a);
 }

@@ -28,7 +28,11 @@
 // this file reads the same tiles - Textures\<body>\Archive\Cloud.tree, the format
 // verified byte-for-byte against the client's ZTreeMgr on 2026-08-08 (48-byte
 // header, 32-byte TOC nodes, per-node zlib blocks that oapiInflate - A PUBLIC CORE
-// API - decompresses). Storm cells spawn only where coverage passes a floor, and
+// API - decompresses).
+// The COVERAGE query is OroTree.h's since 2026-09-12 - this file carried its own
+// identical copy of that reader, written before the shared one existed. What stays
+// here is the FULL-RESOLUTION cache below, which the flash atlas needs and the shared
+// reader has no mode for. Storm cells spawn only where coverage passes a floor, and
 // every disc VERTEX multiplies its alpha by the coverage under it, so a flash
 // straddling a deck edge dies exactly where the cloud does and the interior mottle
 // comes from real data instead of hash noise.
@@ -58,7 +62,11 @@
 // ============================================================================
 
 #include "OroModule.h"
+#include "OroLog.h"
 #include "OroState.h"
+#include "OroTree.h"         // the shared tile-archive reader - the COVERAGE query below
+                             //   is one of its two consumers (the vapour cone's water
+                             //   mask is the other)
 #include "gcCoreAPI.h"       // patch (l): CreateTrianglesTex / UpdateTexture2D (the
                              //   OroReentry.cpp precedent for a second gc consumer)
 #include <math.h>
@@ -160,12 +168,9 @@ namespace {
 	// rather than a lift of the LGPL implementation.
 	// ========================================================================
 	const int   CM_LVL    = 7;     // sampling file level: 8x16 tiles, ~5 km/texel-block
-	const int   CM_TILE_N = 24;    // decoded-tile cache (16.4 KB each)
-	const int   CM_GRID   = 128;   // decoded alpha grid: one value per 4x4 DXT block
 
 	struct CmNode { __int64 pos; DWORD size; DWORD child[4]; };
 
-	struct DTile { int lvl, ilat, ilng; int stamp; BYTE a[CM_GRID * CM_GRID]; };
 
 	char    g_cmBody[64] = "";     // planet the open (or failed) tree belongs to
 	bool    g_cmOpenOK   = false;
@@ -175,10 +180,20 @@ namespace {
 	DWORD   g_cmNodeN    = 0;
 	DWORD   g_cmRoot4[2] = { (DWORD)-1, (DWORD)-1 };
 	CmNode* g_cmToc      = NULL;
-	DTile   g_cmTile[CM_TILE_N];   // lvl < 0 = empty slot
-	int     g_cmStamp    = 0;
-	bool    g_cmDecoded  = false;  // the one-decode-per-frame budget flag
-	bool    g_cmFmtWarned = false;
+
+	// THE COVERAGE QUERY IS THE SHARED READER'S NOW (2026-09-12). This file used to
+	// carry its own complete copy of it - header, TOC walk, inflate, DXT5 block decode,
+	// LRU, budget - written before OroTree.h existed. The two were character-identical
+	// once the names were normalised, so CmCoverage is a one-line delegation now.
+	//
+	// ⚠️ THE FILE STATE ABOVE STAYS, and that is deliberate rather than half-finished:
+	// the FULL-RESOLUTION cache below (the flash atlas' per-texel sampler) needs the
+	// file, the TOC and CmIdx, and OroTileTree has no full-resolution mode. Folding
+	// that in would mean adding API to a class the vapour cone depends on, to save a
+	// measured 1.4 MB of duplicate TOC, one file handle and a 0.38 MB tile cache -
+	// noise beside the 32 MB ORO already spends on its atlases. Not worth putting a
+	// working effect at risk; a separate step if it is ever wanted.
+	OroTileTree g_cmTree;
 
 	void CmCloseFull();         // fwd: defined with the full-res cache below
 
@@ -186,7 +201,7 @@ namespace {
 	{
 		if (g_cmFile) { fclose(g_cmFile); g_cmFile = NULL; }
 		if (g_cmToc)  { free(g_cmToc);   g_cmToc  = NULL; }
-		for (int i = 0; i < CM_TILE_N; i++) g_cmTile[i].lvl = -1;
+		g_cmTree.Close();       // the shared reader is per-body too
 		CmCloseFull();          // the full-res cache is per-body too
 		g_cmOpenOK = false;
 		g_cmBody[0] = 0;
@@ -225,7 +240,7 @@ namespace {
 		char path[MAX_PATH];
 		sprintf_s(path, sizeof(path), "%s\\%s\\Archive\\Cloud.tree", texDir, body);
 		if (fopen_s(&g_cmFile, path, "rb") != 0 || !g_cmFile) {
-			oapiWriteLogV("ORO: lightning - no cloud archive at %s (flashes limited to TEST).", path);
+			OroLog(0, "ORO: lightning - no cloud archive at %s (flashes limited to TEST).", path);
 			return false;
 		}
 
@@ -245,7 +260,7 @@ namespace {
 		       && fread(g_cmRoot4,  4, 2, g_cmFile) == 2
 		       && nodeCount > 0 && nodeCount < 4000000;
 		if (!ok) {
-			oapiWriteLogV("ORO: lightning - %s is not a tile tree (bad header).", path);
+			OroLog(0, "ORO: lightning - %s is not a tile tree (bad header).", path);
 			CmCloseInternal();
 			strcpy_s(g_cmBody, sizeof(g_cmBody), body);   // remember the failure per body
 			return false;
@@ -266,7 +281,7 @@ namespace {
 		}
 		if (raw) free(raw);
 		if (!ok) {
-			oapiWriteLogV("ORO: lightning - failed reading %s TOC.", path);
+			OroLog(0, "ORO: lightning - failed reading %s TOC.", path);
 			CmCloseInternal();
 			strcpy_s(g_cmBody, sizeof(g_cmBody), body);
 			return false;
@@ -275,7 +290,12 @@ namespace {
 		g_cmDataLen = dataLen;
 		g_cmNodeN   = nodeCount;
 		g_cmOpenOK  = true;
-		oapiWriteLogV("ORO: lightning cloud map open - %s (%u nodes).", path, nodeCount);
+		// The shared reader opens the same archive for the COVERAGE query. It resolves
+		// its own path from the body name, so a failure here is not fatal to the
+		// full-resolution path above - Sample simply returns "unknown" and cells fail
+		// closed, which is the same thing a budget-starved frame does.
+		g_cmTree.Open(body, "Cloud", "lightning");
+		OroLog(1, "ORO: lightning cloud map open - %s (%u nodes).", path, nodeCount);
 		CmLandmarkDiag(crotForDiag);
 		return true;
 	}
@@ -293,126 +313,14 @@ namespace {
 		return idx;
 	}
 
-	// Decode one tile's coverage into a CM_GRID^2 byte grid: DXT5 alpha averaged per
-	// 4x4 block (the honest average of all 16 decoded texels, not the endpoints).
-	// Returns the cache slot's grid, or NULL: *absent tells a missing tile (walk up a
-	// level) from a spent decode budget (unknown this frame - try again next frame).
-	const BYTE* CmTile(int lvl, int ilat, int ilng, bool& absent, bool force)
-	{
-		absent = false;
-		for (int i = 0; i < CM_TILE_N; i++) {
-			if (g_cmTile[i].lvl == lvl && g_cmTile[i].ilat == ilat && g_cmTile[i].ilng == ilng) {
-				g_cmTile[i].stamp = ++g_cmStamp;
-				return g_cmTile[i].a;
-			}
-		}
-		if (!g_cmOpenOK) { absent = true; return NULL; }
-		if (g_cmDecoded && !force) return NULL;             // budget spent this frame
-
-		const DWORD idx = CmIdx(lvl, ilat, ilng);
-		if (idx == (DWORD)-1 || idx >= g_cmNodeN || g_cmToc[idx].size == 0) { absent = true; return NULL; }
-
-		const __int64 zpos  = g_cmToc[idx].pos;
-		const __int64 znext = (idx + 1 < g_cmNodeN) ? g_cmToc[idx + 1].pos : g_cmDataLen;
-		const DWORD   zsize = (DWORD)(znext - zpos);
-		const DWORD   esize = g_cmToc[idx].size;
-		if (zsize == 0 || zsize > 8u * 1024 * 1024 || esize > 8u * 1024 * 1024) { absent = true; return NULL; }
-
-		BYTE* zbuf = (BYTE*)malloc(zsize);
-		BYTE* ebuf = (BYTE*)malloc(esize);
-		bool ok = zbuf && ebuf
-		       && _fseeki64(g_cmFile, g_cmDataOfs + zpos, SEEK_SET) == 0
-		       && fread(zbuf, 1, zsize, g_cmFile) == zsize
-		       && oapiInflate(zbuf, zsize, ebuf, esize) == esize;
-		if (zbuf) free(zbuf);
-		g_cmDecoded = true;                                  // a miss costs the budget too
-
-		int slot = -1;
-		if (ok) {
-			// DDS sanity + format. Every tile in the verified archive is 512x512 DXT5;
-			// anything else is logged once and treated as absent (fail soft, not wrong).
-			const DWORD ddsMagic = *(DWORD*)ebuf;                    // 'DDS '
-			const DWORD h = *(DWORD*)(ebuf + 12), w = *(DWORD*)(ebuf + 16);
-			const DWORD fourcc = *(DWORD*)(ebuf + 84);
-			if (ddsMagic != 0x20534444u || w != 512 || h != 512 || fourcc != 0x35545844u /*DXT5*/
-			    || esize < 128 + 512 * 512) {
-				if (!g_cmFmtWarned) {
-					g_cmFmtWarned = true;
-					oapiWriteLogV("ORO: lightning - unexpected cloud tile format (%ux%u fourcc 0x%08X) - skipping.",
-					              w, h, fourcc);
-				}
-				ok = false;
-				absent = true;
-			} else {
-				// LRU victim
-				slot = 0;
-				for (int i = 1; i < CM_TILE_N; i++)
-					if (g_cmTile[i].lvl < 0 || (g_cmTile[slot].lvl >= 0 && g_cmTile[i].stamp < g_cmTile[slot].stamp))
-						slot = i;
-				DTile& T = g_cmTile[slot];
-				T.lvl = lvl; T.ilat = ilat; T.ilng = ilng; T.stamp = ++g_cmStamp;
-				const BYTE* blk = ebuf + 128;
-				for (int by = 0; by < CM_GRID; by++) {
-					for (int bx = 0; bx < CM_GRID; bx++) {
-						const BYTE* B = blk + ((size_t)by * CM_GRID + bx) * 16;
-						const int a0 = B[0], a1 = B[1];
-						int av[8];
-						av[0] = a0; av[1] = a1;
-						if (a0 > a1) { for (int k = 1; k <= 6; k++) av[k + 1] = ((7 - k) * a0 + k * a1) / 7; }
-						else         { for (int k = 1; k <= 4; k++) av[k + 1] = ((5 - k) * a0 + k * a1) / 5; av[6] = 0; av[7] = 255; }
-						unsigned __int64 bits = 0;
-						memcpy(&bits, B + 2, 6);
-						int sum = 0;
-						for (int t = 0; t < 16; t++) sum += av[(int)((bits >> (3 * t)) & 7)];
-						T.a[by * CM_GRID + bx] = (BYTE)(sum >> 4);
-					}
-				}
-			}
-		} else absent = absent || !ok;
-		if (ebuf) free(ebuf);
-		return (ok && slot >= 0) ? g_cmTile[slot].a : NULL;
-	}
-
-	// Coverage 0..1 at (lat, lonT) - CLOUD-TEXTURE frame - or -1 when unknown this
-	// frame (decode budget). Walks up from CM_LVL when a level is genuinely absent.
-	// Tile addressing per the client's Tile::Extents: ilat 0 at the NORTH edge,
-	// ilng 0 at longitude -180 running east (both verified against the real archive
-	// by the ASCII coverage-map probe - the Southern Ocean storm ring came out at
-	// the bottom, where it belongs).
+	// THE COVERAGE QUERY. One line, because OroTileTree::Sample IS this function - the
+	// two were character-identical once the names were normalised, decode loop included.
+	// CM_LVL is the level this effect samples at; the walk-up to coarser levels, the
+	// bilinear on the block grid, the LRU and the one-decode-per-frame budget all live
+	// in the shared reader now.
 	float CmCoverage(double lat, double lonT, bool force)
 	{
-		if (!g_cmOpenOK) return -1.0f;
-		while (lonT >  PI) lonT -= 2.0 * PI;
-		while (lonT < -PI) lonT += 2.0 * PI;
-		for (int lvl = CM_LVL; lvl >= 4; lvl--) {
-			const int nlat = 1 << (lvl - 4);
-			const int nlng = 2 << (lvl - 4);
-			double v = (0.5 - lat / PI) * nlat;
-			double u = (lonT + PI) / (2.0 * PI) * nlng;
-			int ilat = (int)floor(v); if (ilat < 0) ilat = 0; if (ilat >= nlat) ilat = nlat - 1;
-			int ilng = (int)floor(u); ilng = ((ilng % nlng) + nlng) % nlng;
-			bool absent = false;
-			const BYTE* g = CmTile(lvl, ilat, ilng, absent, force);
-			if (g) {
-				double fx = (u - ilng) * CM_GRID - 0.5;
-				double fy = (v - ilat) * CM_GRID - 0.5;
-				int x0 = (int)floor(fx), y0 = (int)floor(fy);
-				const double tx = fx - x0, ty = fy - y0;
-				int x1 = x0 + 1, y1 = y0 + 1;
-				if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
-				if (x1 > CM_GRID - 1) x1 = CM_GRID - 1;
-				if (y1 > CM_GRID - 1) y1 = CM_GRID - 1;
-				if (x0 > CM_GRID - 1) x0 = CM_GRID - 1;
-				if (y0 > CM_GRID - 1) y0 = CM_GRID - 1;
-				const double a00 = g[y0 * CM_GRID + x0], a10 = g[y0 * CM_GRID + x1];
-				const double a01 = g[y1 * CM_GRID + x0], a11 = g[y1 * CM_GRID + x1];
-				const double a = (a00 * (1 - tx) + a10 * tx) * (1 - ty)
-				               + (a01 * (1 - tx) + a11 * tx) * ty;
-				return (float)(a / 255.0);
-			}
-			if (!absent) return -1.0f;                       // budget-starved: unknown
-		}
-		return -1.0f;
+		return g_cmTree.Sample(lat, lonT, CM_LVL, force);
 	}
 
 	// ------------------------------------------------------------------------
@@ -526,6 +434,10 @@ namespace {
 		if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
 		if (x1 > 511) x1 = 511; if (y1 > 511) y1 = 511;
 		if (x0 > 511) x0 = 511; if (y0 > 511) y0 = 511;
+		// The same low-side clamp as OroTree.cpp's - this full-resolution sampler is the
+		// THIRD copy of that bilinear, and it had the same out-of-bounds read. Inert for
+		// every reachable input; see the long note at the shared reader.
+		if (x1 < 0) x1 = 0; if (y1 < 0) y1 = 0;
 		const double a00 = g[y0 * 512 + x0], a10 = g[y0 * 512 + x1];
 		const double a01 = g[y1 * 512 + x0], a11 = g[y1 * 512 + x1];
 		return (float)(((a00 * (1 - tx) + a10 * tx) * (1 - ty)
@@ -602,7 +514,7 @@ namespace {
 			const float cm = CmCoverage(LM[i].latDeg * RAD, LM[i].lonDeg * RAD - crot, true);
 			n += sprintf_s(line + n, sizeof(line) - n, " %s +%.2f/-%.2f", LM[i].name, cp, cm);
 		}
-		oapiWriteLog(line);
+		OroLog(1, line);
 	}
 
 	// The flash ENVELOPE: 0..1 as a function of REAL seconds since trigger. 1-4
@@ -678,14 +590,14 @@ void OroModule::UpdateLightning(double simt)
 	// The render path's deferred warning, written here where oapi is legal.
 	if (s_ltgPoolFull && !s_ltgPoolLogged) {
 		s_ltgPoolLogged = true;
-		oapiWriteLogV("ORO: lightning triangle pool FULL (%d tri) - flashes are being clipped.",
+		OroLog(0, "ORO: lightning triangle pool FULL (%d tri) - flashes are being clipped.",
 		              LTG_MAX_TRI);
 	}
 
 	// The render path's deferred breadcrumb, written here where oapi is legal.
 	if (!s_ltgLogged && s_ltgLogVerts > 0) {
 		s_ltgLogged = true;
-		oapiWriteLogV("ORO: lightning first flash on screen - %d verts, %d cells in cap, %s mode.",
+		OroLog(2, "ORO: lightning first flash on screen - %d verts, %d cells in cap, %s mode.",
 		              s_ltgLogVerts, s_ltg.nCell,
 		              s_ltgLogTex ? "TEXTURED (cloud-lit)" : "Gouraud");
 	}
@@ -720,7 +632,7 @@ void OroModule::UpdateLightning(double simt)
 		if (pCore->CanDrawTexPoly())
 			hLtgAtlas = oapiCreateSurfaceEx(512, 512, OAPISURFACE_TEXTURE | OAPISURFACE_NOMIPMAPS);
 		ltgTexMode = (hLtgAtlas != NULL);
-		oapiWriteLogV("ORO: textured flash path (patch l) %s.",
+		OroLog(1, "ORO: textured flash path (patch l) %s.",
 		              ltgTexMode ? "available - flashes take their shape from the cloud map itself"
 		                         : "NOT available - Gouraud disc fallback");
 	}
@@ -781,7 +693,7 @@ void OroModule::UpdateLightning(double simt)
 		if (p) crot = *p;
 	}
 	const bool mapOK = CmOpen(g_fx.ltgBody, crot);
-	g_cmDecoded = false;
+	g_cmTree.NewFrame();        // the coverage reader's one-decode-per-frame budget
 
 	MATRIX3 Rp; oapiGetRotationMatrix(hP, &Rp);
 	OBJHANDLE hSun = FindStar();
@@ -945,7 +857,7 @@ void OroModule::UpdateLightning(double simt)
 			BakeFlashSlot(ltgAtlasImg, slot, fl.latT, fl.lonT, fl.radM, crot, Rdeck, fl.test, fl.cov0);
 			if (!pCore->UpdateTexture2D(hLtgAtlas, ltgAtlasImg, 512, 512)) {
 				ltgTexMode = false;
-				oapiWriteLog("ORO: lightning atlas upload FAILED - Gouraud disc fallback from here on.");
+				OroLog(0, "ORO: lightning atlas upload FAILED - Gouraud disc fallback from here on.");
 			}
 		}
 		fired++;

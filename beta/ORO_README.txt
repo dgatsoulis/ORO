@@ -103,7 +103,60 @@ Thanks for testing. ORO is a global module that adds two families of effects:
 
 Everything is adjustable live, from one panel, while you fly.
 
-NEW IN THIS BUILD (260906) - SHADOWS TO THE HORIZON, THE AIR, THE NIGHT:
+NEW IN THIS BUILD (260913) - THE SKY, THE GLASS, THE TOUR:
+  * SIXTEEN SCENARIOS THAT EXPLAIN THEMSELVES. The ORO_beta scenario folder is
+    replaced by ORO, six folders, sixteen scenarios - and every one of them
+    tells you in the description panel what it is, what to look for, and
+    exactly which pill and which Launchpad rows it needs. Click a folder for a
+    page about that whole family. The upgrade removes only the old scenarios
+    that are byte-identical to what shipped; anything you edited is named and
+    kept.
+  * LENS FLARE IS BACK (WORLD / GOD RAYS, second group). The effect Orbiter
+    2016 had and 2024 lost: ghosts, an iris starburst, a veil. Four lenses -
+    CLASSIC, ANAMORPHIC, CLEAN, VINTAGE - one set of sliders for all of them.
+    External views only, on purpose: a flare is made inside a lens and an eye
+    has none. It goes out behind hulls and mountains and dims through haze and
+    eclipse with nothing to set, because it reads the real sun out of the frame.
+  * PLANETARY RINGS (WORLD / RINGS). Saturn's and Uranus's rings are a real
+    sheet now - opaque edge-on, a different thing lit and backlit - and THEY
+    CAST THEIR SHADOW ON THE PLANET, which Orbiter never drew, Cassini Division
+    and all. Bring the camera in and the sheet grows grooves and grain down to
+    a few metres across. Any ringed planet works, addon ones included, with no
+    extra files. Two scenarios in "6 The sky" fly it.
+  * RAIN ON THE WINDSCREEN FOLLOWS THE AIRFLOW. Runners now radiate from the
+    stagnation point on the nose, below the glass, so from rotation speed
+    onward they sweep UP the windscreen; standing drops thin out as you
+    accelerate; a Water film slider brings the moving sheet past ~45 m/s.
+    And THE HUD STAYS READABLE through all of it - it is drawn after the drops.
+  * THE PANEL SIZES ITSELF TO YOUR SCREEN. Double size on 4K, unchanged at
+    1080p/1440p; DialogScale in Config\ORO\window.cfg overrides it.
+  * THE WET LOOK REACHES RUNWAYS, PADS AND TAXIWAYS, and open water mirrors
+    your ship with the rain OFF (the Water mirror slider on the RAIN page).
+    A Splash size slider, too.
+  * VAPOUR CONES FORM BY CHANCE, as they do: odds that fall with altitude, rise
+    over the sea, follow the dynamic pressure, rolled once per transonic pass.
+  * BASE TRAINS AND SOLAR PLANTS LIVE AGAIN - Habana's monorail and hangrail
+    run, solar panels track the sun, rails follow the terrain on pylons.
+  * LIGHTS: 12x and 16x local-light rows; up to SIX spotlights cast shadows at
+    once; POINT lights cast too (Aimed or a five-face Cube); and a twelve-case
+    LIGHTS AND SHADOWS test scenario that runs itself.
+  * YOU CHOOSE HOW MUCH ORO WRITES TO ORBITER.LOG: Debug = 0/1/2 in
+    Config\ORO.cfg (1 is the default). Nothing ORO writes is per frame at any
+    level - if you see a log growing by thousands of lines in one flight, that
+    is a bug and I want to hear about it.
+  * FIXED: the 260906 build wrote one error line to Orbiter.log EVERY FRAME
+    whenever rain was live (a log from that build is 16,000 lines of the same
+    message - discard it); the hatched moire inside a vessel's own shadow at a
+    grazing sun in Cascaded mode (shadow acne - the slope correction stopped
+    growing at 76 degrees; it does not any more); the ring sheet cutting off on
+    a straight line as the camera closed on it; the planet casting no shadow on
+    its own rings (a stock bug, visible in 2016 too); puddles on the sea and on
+    cliffs; distant mountains washing to a grey band in rain; the exit crash
+    with a SOLARPLANT block in an unvisited base; and, in the client, a
+    repeating error no longer floods the log - it is counted and written once
+    a second with its tally.
+
+ALSO SINCE 260904 (the 260906 build) - SHADOWS TO THE HORIZON, THE AIR, THE NIGHT:
   * CASCADED SHADOWS. A new terrain-shadow mode in the Launchpad's D3D9
     Advanced setup, "Cascaded (ORO)": ONE sun-shadow atlas for the whole
     scene. Buildings shadow the ground, hills shadow buildings, vessels shadow
@@ -145,7 +198,8 @@ ALSO IN THIS BUILD - LIGHTS, SHADOWS AND THE SCULPTED PLUME:
     its beam, a vessel standing in it throws its shadow on the ground, and a
     terrain ridge ends the beam. Vessels receive them day and night; the pool
     on the ground is a dusk-and-night feature in the stock shadow modes and
-    works in daylight in Cascaded mode. (Off switch: the Shadows box, or
+    works in daylight in Cascaded mode. Up to six spotlights cast at once (the
+    Spot light shadows row in the Shadows box; Off turns the feature off, or
     LocalLightShadows=0 in D3D9Client.cfg. ShadowDebug=1 there is a diagnostic
     - only if I ask you for it.)
   * NOTHING DRAWS THROUGH TERRAIN ANY MORE. Runway lights and base surfaces
@@ -243,6 +297,13 @@ NEW SINCE THE FIRST PUBLIC FILES (if you tested the PULSE beta, 260810):
   * GOD RAYS - crepuscular shafts from a low sun (WORLD).
   * The patched client no longer floods your Orbiter.log with errors on every
     scenario reload. That one was a stock D3D9Client bug, not an addon bug.
+  * And it no longer floods it with a REPEATING one either. An error that recurs
+    every frame used to write a line every frame - one of them put 16,252
+    identical lines into a twenty-minute flight. Identical messages are now
+    counted and flushed once a second with the tally, so a storm reads as
+    "[repeated 79 times in the last second]" instead of burying everything else.
+    Also a stock bug, and it reached everyone: the client's own DebugLvl
+    defaults to 1.
   * The rename, which touches everything you can see: the Launchpad module is
     "ORO control", the panel says ORO, and the folders are Modules\ORO,
     Config\ORO, Meshes\ORO, Textures\ORO. Your tuned settings are NOT carried
@@ -298,6 +359,12 @@ install at any time, in one click, and it will not touch anything you tuned.
        pass that, and installing into it would break it.
      - It shows what it is about to do and waits for you to type Y.
      - It backs up your original files before replacing anything.
+     - UPGRADING: the scenarios moved from Scenarios\ORO_beta to
+       Scenarios\ORO, so the installer retires the old folder for you.
+       It only deletes a file that is byte-identical to one it shipped:
+       anything you edited, and anything of your own you saved in there,
+       is kept and named on screen, and the folder stays if it still
+       holds something.
      - It is a plain text file. Open it in Notepad first if you want to see
        exactly what it does - you are about to let it replace your graphics
        client, so that is a reasonable thing to want.
@@ -313,7 +380,7 @@ install at any time, in one click, and it will not touch anything you tuned.
 To confirm the install took, open Orbiter.log in the Orbiter root and look near
 the top for:
 
-    Module D3D9Client.dll ........ [Build 260906, ...]   <- patched, good
+    Module D3D9Client.dll ........ [Build 260913, ...]   <- patched, good
     Module D3D9Client.dll ........ [Build 241231, ...]   <- still stock
 
 It is the BUILD number that tells them apart. Ignore the "API" number printed
@@ -375,11 +442,24 @@ In the Launchpad, VIDEO tab -> "Advanced" / D3D9 configuration:
         Cascade reach            How far the far cascades go, 5 to 60 km.
         Soft far shadows         A wider filter on the distant cascades, which
                                  otherwise read pixelated up close.
-        Local light shadows      Spotlights cast shadows (buildings, vessels,
-                                 ridges); in Cascaded mode in daylight too.
+        Spot light shadows       Off, or how many spotlights cast shadows at
+                                 once - 1, 2, 4 or 6 maps (default 4). Buildings,
+                                 vessels and ridges cast; in Cascaded mode in
+                                 daylight too. Lamps mounted together share a map.
+        Point light shadows      What a light with no direction does: Off, Aimed
+                                 (one map pointed at whatever is standing in the
+                                 light - the default), or Cube (five maps, so it
+                                 shadows in every direction). Cube uses five of
+                                 the maps above, so it wants the 6 row if a
+                                 spotlight is to keep one too. Spotlights are
+                                 always served first.
       Greyed rows are the ones that do nothing in the selected mode.
       Keys in D3D9Client.cfg: TerrainShadowing 3, ShadowCascadeSize,
-      ShadowCascadeFar, ShadowCascadeSoft, LocalLightShadows.
+      ShadowCascadeFar, ShadowCascadeSoft, LocalLightShadows, LocalLightShadowMaps,
+      LocalLightShadowPoint. Two hidden ones, ShadowCascadeSlope (16) and
+      ShadowCascadeOffset (1.5), are the numbers that keep a surface from
+      shadowing itself at a grazing sun in Cascaded mode - leave them unless
+      I ask you to try a value; ShadowDebug 5 paints the surfaces they act on.
 
 In the Launchpad, VISUAL EFFECTS tab:
 
@@ -393,7 +473,7 @@ In the Launchpad, VISUAL EFFECTS tab:
 Reference: the settings this was developed and tuned on are
 ShadowMapMode 3, ShadowMapFilter 2, ShadowMapSize 4096, TerrainShadowing 3
 (Cascaded), ShadowCascadeSize 2048 (4096 on a card that takes it),
-ShadowCascadeFar 30000, ShadowCascadeSoft 1, LocalLightShadows 1,
+ShadowCascadeFar 30000, ShadowCascadeSoft 1, LocalLightShadows 1, LocalLightShadowMaps 6,
 PostProcess 1, SunGlare 1, AmbientLevel 20.
 
 
@@ -401,16 +481,45 @@ PostProcess 1, SunGlare 1, AmbientLevel 20.
 4. FIRST FLIGHT  -  the quick tour
 --------------------------------------------------------------------------------
 
-FOUR SCENARIOS ARE PROVIDED, under Scenarios\ORO_beta in the Launchpad. They
-are the quickest way to see each part of the addon:
+SIXTEEN SCENARIOS ARE PROVIDED, under ORO in the Launchpad's scenario list, in
+six folders - one per family. THEY EXPLAIN THEMSELVES: click any scenario and
+the description panel tells you what it is, what to look for, and exactly which
+ORO pill and which Launchpad rows it needs. Click a FOLDER and you get a page
+about that whole family. So the short version of this section is: open the ORO
+folder and read it.
 
-  Habana Spaceport   A DG-S on the pad at dusk. Start here - it is the easiest
-                     place to look at the engines, the bell glow and the VC
-                     shadows without having to fly anything first.
-  Thruster effects   The exhaust system, set up ready to look at.
-  DG reentry         A DeltaGlider set up for reentry - the plasma, which is
-                     the biggest effect in the addon.
-  Atlantis reentry   The same, on a very different hull. Worth comparing.
+  1 The pilot        Pulling G - haul back and grey out for real, with the
+                     vision suite driven by the flight instead of by sliders.
+
+  2 Reentry          Entry from the cockpit, Entry from outside, Transonic.
+                     The plasma from both seats - they are completely
+                     different views of the same heating - and the vapour cone.
+
+  3 Engines          Surface to space - the plume opening up as you climb out
+                     of the air. Attitude and the bay - the RCS as a full engine
+                     group, and an open payload bay reflecting itself.
+
+  4 Weather          Storm on the ground, Into the weather, Fog at first light.
+                     Rain you stand in, rain on the glass at speed, and fog
+                     with real depth in it.
+
+  5 Night and lights A base at night - lit windows, lamp shadows, and the
+                     monorail running again after ten years frozen.
+                     Lights and shadows - a twelve-case tour that runs itself:
+                     T skips ahead, R goes back, Ctrl+P pauses. Each case says
+                     on screen what you should see and which setting it needs.
+                     NEEDS the LuaInline module ticked in the Modules tab. If
+                     something looks wrong, note the CASE NUMBER and send a
+                     screenshot - that is all we need to find it.
+
+  6 The sky          Night side (auroras and storms from orbit), The sun (god
+                     rays and the lens flare), Eclipse over Edwards, and two rides
+                     through Saturn's rings - one close up from the cockpit,
+                     one wide with the ring shadow across the planet.
+
+  In a hurry? "A base at night" and "Storm on the ground" show the most per
+  minute and neither asks you to fly anything.
+
 
 Then, from any of them, press CTRL+F4 -> ORO control.
 
@@ -487,6 +596,19 @@ so resizing the window can never commit tuning you had not saved. Delete that
 file to get the default 800 back.
 (If you had an earlier build that froze the sim while you dragged the panel: that
 was ours, and it is fixed. Orbiter keeps rendering during a window drag.)
+
+AND IT SIZES ITSELF TO YOUR SCREEN. On a 4K display the panel is drawn at double
+size, on a 5K one larger still, and at 1080p or 1440p it is exactly what it has
+always been. The help window comes with it - its text is bigger AND reflows, so
+widening it still gets you more words per line.
+If the automatic answer is not to your taste, put a line like
+
+    DialogScale = 150
+
+in Config\ORO\window.cfg (any value from 100 to 300, where 100 is the old size)
+and restart. The file lists the key in its own header, so you do not have to
+remember it. The remembered height above is measured before that scaling, so it
+means the same amount of panel whatever scale you are on.
 
 
 === PILOT / G-FORCES ===  what high G does to you
@@ -822,16 +944,34 @@ sets in code, and lets you move them live. Units are the API's own.
   VAPOUR CONES - the shroud that forms as you go through Mach 1. Real air holds
   water; the flow over the hull expands, the pressure and temperature drop, and
   the water condenses. It is the shock collar you have seen in every fighter
-  photograph, and it needs LOW ALTITUDE (the water is in the troposphere) as
-  well as the right speed - both are read from the sim, not set by you.
+  photograph, and it needs the right speed AND humid air (the water is in the
+  troposphere). Whether one FORMS is up to the air: each pass through the Mach
+  band rolls the dice once, with odds that fall with altitude, rise over the
+  sea and fall inland (read from the planet's own water map around you) and
+  follow the dynamic pressure. Two climbs on the same day can differ - one
+  cone, one none - which is how the real thing behaves.
   THERE ARE TWO CONES, each with the identical, completely independent set of
   controls - colours included - so a hull can carry one collar at the canopy
   and one at the tail, the way the Concorde photographs show. The single pill
   arms the effect; each cone's own Opacity is its visibility. Cone 2 ships at
   zero, so it only exists where you give it some.
-    TEST            Draws them at a fixed Mach 1.15 with the speed and altitude
-                    gates bypassed, so you can judge the look from a runway
-                    instead of flying an ascent over and over.
+    TEST            Draws them at a fixed Mach 1.15 with the speed gate and the
+                    humidity draw bypassed, so you can judge the look from a
+                    runway instead of flying an ascent over and over. The
+                    intermittency still shows, so that slider is judgeable too.
+  The air (GLOBAL - the same air for every hull):
+    Max chance      The odds at sea level over water, in percent. 100 is
+                    guaranteed low; lower it for rarer cones everywhere.
+    Dry ceiling     The altitude (km above sea level) at which the chance
+                    reaches zero - the top of the water. Drawn afresh at plus
+                    or minus ten percent on every pass. Default 15 km.
+    Intermittency   Makes the cone appear and die in bursts on top of its
+                    flicker. A certain draw at sea level flutters little, a
+                    marginal one near the ceiling flutters most. 0 = steady.
+    Air             Readout: the geography under you (sea / coast / inland),
+                    the live chance, and this pass's verdict - formed or no
+                    cone - or why there is none (dry above the ceiling, no
+                    water map on this world, TEST bypassing it).
   Per cone:
     Opacity         0 = no cone. Up to 1 a translucent shroud; PAST 1 the sheet
                     fills and densifies until it can hide the hull behind it -
@@ -903,7 +1043,7 @@ sets in code, and lets you move them live. Units are the API's own.
 
 
 === WORLD ===  the sky
-    (each of these is its own page: ECLIPSE, AURORA and GOD RAYS under WORLD,
+    (each of these is its own page: ECLIPSE, AURORA, GOD RAYS and RINGS under WORLD,
      RAIN, FOG and LIGHTNING under WORLD / WEATHER)
 
   ECLIPSE - models your EYE, not the light. Dark adaptation is slow opening up
@@ -976,6 +1116,101 @@ sets in code, and lets you move them live. Units are the API's own.
     Best seen low, near sunrise or sunset, with terrain or cloud between you and
     the sun. An eclipse kills them, which is correct - less beam to scatter.
 
+  LENS FLARE - on the same page, below the shafts. Ghosts, an iris starburst and
+  a veil, from the sun: the artefact a CAMERA makes when light bounces around
+  inside the lens. EXTERNAL VIEWS ONLY, and that is the point rather than a
+  limit - a healthy eye has no lens elements, so from any of the three cockpit
+  views there is nothing to see. Outside, the camera is a camera.
+    TEST            Bypasses the air fade, so you can see the full-strength look
+                    at sea level. It cannot fake a sun: the effect reads the real
+                    disc out of the frame, so the sun still has to be up, in
+                    front of you, and not behind something.
+    Lens            WHICH OPTIC you are looking through. Every slider below means
+                    the same thing in all four, so this changes the character and
+                    not the controls.
+                      CLASSIC     a warm-coated stills lens - a few large,
+                                  varied, well-separated ghosts.
+                      ANAMORPHIC  the cine look - cool blue-white, a long
+                                  horizontal streak through the sun, many fine
+                                  rays, a long chain of small ghosts.
+                      CLEAN       a modern multi-coated optic, deliberately the
+                                  restrained one: a crisp star, two faint
+                                  reflections, almost no veil.
+                      VINTAGE     an UNCOATED lens, which fails differently
+                                  rather than more: veiling glare washing the
+                                  whole frame, lifted blacks, many soft ghosts,
+                                  a few soft blades.
+    Intensity       Master. 1.00 is the reference look.
+    Size            Scales the ghosts and how far the rays reach - not their
+                    SPACING, which is a property of the lens and stays put.
+    Ghosts          The chain of coloured discs and rings alone. 0 leaves the
+                    starburst and the veil.
+    Rays            The iris starburst alone (and ANAMORPHIC's streak).
+    Dispersion      How far the chain's colours spread from white. Those colours
+                    are the lens COATING, which is why VINTAGE barely responds -
+                    an uncoated lens has no coating colours to spread.
+    Air fade        How completely a sea-level atmosphere kills it. 0 keeps it
+                    crisp everywhere, 1 leaves nothing at the surface.
+    Flare           Readout: strength, or why it is zero - "cockpit", "off-view",
+                    "hazy", "eclipsed", "behind". It reports what the PANEL can
+                    prove; whether the disc is really visible is measured per
+                    pixel against the frame, so it never claims the sun is hidden.
+    It is crispest in VACUUM and thins out as you descend - an atmosphere spreads
+    the sun's light over the sky and kills the contrast a flare lives on. That
+    makes it the god rays' opposite: shafts low and thick, flare high and clean.
+    It goes out behind a hull, a mountain or a building and dims through cloud,
+    haze and an eclipse with nothing to set. Enable Sun glare (section 3): without
+    it the client draws no sun disc and builds no depth buffer for the occlusion.
+
+  RINGS - Saturn's rings (and Uranus's, and any addon planet's) as a real
+  sheet with an optical depth: opaque when you look along it, the lit and
+  backlit faces different things (against the sun the thick B ring goes dark
+  and the thin Cassini Division glows), the ring's SHADOW ON THE PLANET, which
+  Orbiter never drew, and every ship inside that shadow shaded by what the
+  ring lets through. No per-planet files: the optical depth is read out of the
+  ring texture the planet already ships. Fly it with the two scenarios in
+  6 The sky: "Rings - the crossing" (inside the B ring, a minute above the
+  plane and falling through it at 32 m/s, from the cockpit, over the lit face)
+  and "Rings - the wide view" (the same thing in the thin Cassini Division,
+  starting wide, under the unlit face, with the ring's shadow lying across
+  Saturn's southern hemisphere).
+    ORO rings       The pill. OFF is stock exactly, so one click is the A/B.
+                    In Cascaded (ORO) shadow mode (Launchpad, section 3) ships
+                    and bases cast their shadows onto the sheet as well.
+    Ring density    A trim on the optical depth - the sheet's opacity, the
+                    shadow band on the planet, and how much a ship in it is
+                    shaded. 1 = the data as shipped.
+    Ring brightness The lit face.
+    Backlit glow    The unlit face: how much light comes THROUGH, including the
+                    glow a dense ring diffuses out of its far side and the
+                    planetshine on it - which is why the B ring seen from below
+                    is grey rather than black.
+  THE CLOSE-UP: bring the camera toward the ring and the sheet grows its own
+  texture - grooves and grain, each finer than the last as you close, down to
+  structure a few metres across when you are on the plane. It follows the
+  CAMERA, not the ship, and from far the ring is exactly what it was. The
+  texture co-orbits with the material beside you: a ship in a circular orbit
+  sees it stand still, one on any other orbit sees it drift, as it would the
+  real thing.
+    Detail          How FINE it gets. Each octave of structure appears once it
+                    is about 4 px on screen at 1; 2 admits features half the
+                    size at any distance (the edge of shimmer); 0 = off.
+    Contrast        How STRONG the grooves and grain are.
+    Relief          How DEEP they read: the texture taken as height and lit by
+                    the sun, so every ridge has a lit side and a shade side.
+                    Saturn's sun never rises more than 27 degrees over the
+                    ring plane, which is the ideal light for it. 0 = flat.
+    Position        Readout: where you are in the ring system.
+    Optical depth   Readout: tau there, density trim applied. 0 is a gap; the
+                    B ring is 2 to 5.
+    Above plane     Readout: how far off the ring plane the camera is - the
+                    one distance that decides how fine the texture gets.
+    Profile from    Readout: which files the profile was derived from. Addon
+                    authors: a <Planet>_ring_oro.dds in Textures overrides the
+                    derived profile with a hand-made one.
+  Saves PER BODY for the six sliders (Saturn and Uranus are nothing alike) and
+  GLOBALLY for the pill.
+
   RAIN - a storm you summon at the surface. The build-up ramps over about ten
   seconds: the light collapses to overcast, streaks fall, the ground soaks
   dark, water stands in pools and the ships reflect in them - and the storm
@@ -1001,6 +1236,13 @@ sets in code, and lets you move them live. Units are the API's own.
   flashes, bolts, thunder and the STRIKE test rig - lives on the LIGHTNING
   page beside this one, under its IN THE STORM header.
     TEST            The same storm as the pill, without enabling the effect.
+  The wet look reaches everything the storm falls on: terrain, the base's own
+  ground tiles, and - new in this build - RUNWAYS, PADS AND TAXIWAYS, which
+  Orbiter builds as structures rather than ground and which therefore used to
+  stay dry-looking while the dirt beside them darkened. They darken with the
+  apron now and carry the same sky sheen and the same mirrored ship. They get
+  no standing pools, deliberately: a runway is crowned and grooved precisely
+  to shed water, so puddles on one are a defect rather than weather.
   The storm outside:
     Gloom           How dark and grey the world goes. This is not a screen
                     filter: it collapses the SUN at the source and lifts the
@@ -1016,6 +1258,11 @@ sets in code, and lets you move them live. Units are the API's own.
     Slant (deg)     Wind - tilts the sheet up to 15 degrees either way.
     Splashes        Rings where drops land, on ground and on water. Two
                     fields: one around the camera, one around the ship.
+    Splash size     How big each ring grows. 1 is the designed size, about a
+                    metre and a half across - right beside a DeltaGlider,
+                    oversized beside a small helicopter. 0 removes the rings
+                    while the rest of the storm carries on. Splashes above is
+                    how MANY; this is how LARGE.
     Wet dark        How far the wet ground darkens. 1 is the designed look,
                     2 near-black; standing water goes darker still.
     Pool size       How large the standing pools grow - and at 0, whether
@@ -1043,6 +1290,17 @@ sets in code, and lets you move them live. Units are the API's own.
                     the way it does on a real wet apron, which scatters light
                     rather than mirroring it. A little goes a long way - it
                     should still read as the ship, just not as glass.
+    Water mirror    The reflection on OPEN WATER - and the one control on this
+                    page that works with the rain switched OFF, because a sea
+                    mirrors a ship in any weather. ORO reads the planet's own
+                    water map under your vessel, so it comes on wherever there
+                    is sea and never over land. Reflection blur and Swim shape
+                    it as they shape the puddles; the pools' grain does not,
+                    because open water has no pools. It fades out as you climb
+                    and is gone by about 1500 m, and it costs nothing unless a
+                    vessel is near the camera - there would be nothing to
+                    reflect. 0 turns it off and leaves the puddles alone. The
+                    Rain readout shows what it is reading: "sea 100%".
     Swim size/rate  The rain-pocked ripple on that reflection - how far the
                     image warps and how fast it flickers. Size 0 is a still
                     mirror.
@@ -1061,12 +1319,39 @@ sets in code, and lets you move them live. Units are the API's own.
                     full storm. The fill is the show - drops pop in one by
                     one and swell as they land.
     Runners         Loose drops that break away and run across the glass,
-                    leaving a fading wet trail - straight down when parked,
-                    sweeping aft with airspeed. Their speed is not a knob: it
-                    follows gravity plus the real airflow.
+                    leaving a fading wet trail. Their speed AND their direction
+                    are not knobs: both follow gravity plus the real airflow.
+                    Parked, they run straight down. As you accelerate the
+                    airflow takes over and they radiate from the STAGNATION
+                    POINT - the spot on the nose where the oncoming air first
+                    meets the airframe, which is below the glass - so from
+                    about rotation speed onward they sweep UP the windscreen
+                    and outward, the way they do on a real canopy.
     Runner size     Runner thickness relative to the sitting drops - a ratio,
                     so Drop size still scales both families together.
-    Drop debug      A development aid; leave it at 0.
+    Water film      Past about 45 m/s of dynamic pressure the air strips drops
+                    off the glass faster than they can settle: the sitting
+                    drops thin out, the runners multiply to carry the water
+                    away, and what is left is a moving SHEET rather than a
+                    field of drops. This trims that sheet - it ripples what you
+                    see through it rather than drawing anything of its own.
+                    0 turns it off and leaves the thinning drops and the extra
+                    runners. WHEN it arrives is not a setting: it is the
+                    dynamic pressure, so it is honest at altitude, where
+                    200 m/s in thin air barely disturbs a drop.
+    Mask Debug      What the client thinks your glass is. Leave it at 0 for
+                    normal flight. 1 draws drops everywhere, ignoring the
+                    window mask; 2 paints the mask itself - GREEN where the
+                    client sees authored window glass, BLUE where it sees
+                    interior, untouched where it sees nothing. If drops are
+                    missing, or are showing up somewhere they should not,
+                    position 2 answers the one question a screenshot cannot:
+                    whether the glass was declared. A shot at 2 is the most
+                    useful thing you can send about a windscreen problem.
+    Fly a takeoff roll in rain to see all of it: the runners swing from down
+    to up as you accelerate, the drops thin, and the film comes up - they all
+    change together, because they are all the airflow beating gravity and
+    surface tension at the same moment.
     Rain view       Which internal views get the rain. VC ONLY (default),
                     VC + PANEL, or ALL VIEWS. Outside views are always wet.
                     In the VC the rain is cut at the window frame per pixel
@@ -1310,10 +1595,25 @@ behaviour, without closing anything. If the problem persists with ORO
 disarmed, it is not an ORO effect.
 
 Then please send me:
-  * Orbiter.log from the Orbiter root - ORO writes a lot to it, including
-    which client capabilities it found and any problem it noticed.
+  * Orbiter.log from the Orbiter root - ORO notes which client capabilities it
+    found and any problem it noticed.
   * The scenario you were flying and roughly what you were doing.
   * Your GPU, and your frame rate armed vs disarmed.
+
+HOW MUCH ORO WRITES TO Orbiter.log is yours to set. Add a Debug line to
+Config\ORO.cfg - it is a real setting, so it survives a SAVE:
+
+    Debug = 0     only what is necessary - failures, and whether ORO is alive
+    Debug = 1     concise. THE DEFAULT, and what a useful report looks like
+    Debug = 2     verbose, for hunting something specific
+
+Level 1 is a few dozen lines a session. If I ask you to reproduce something
+with Debug = 2, put it back to 1 afterwards.
+
+NOTHING ORO WRITES IS PER FRAME, at any level - a diagnostic writes at most one
+line per REAL second. If you ever see a log growing by thousands of lines in a
+single flight, that is a bug in its own right and worth reporting on its own,
+whatever else was going on at the time.
 
 To remove ORO, CLOSE ORBITER AND THE LAUNCHPAD, then run ORO_Uninstall.bat in
 the ORO_beta folder. It restores your original graphics client and shaders and

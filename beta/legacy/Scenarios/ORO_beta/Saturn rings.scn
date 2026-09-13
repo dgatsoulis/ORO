@@ -1,0 +1,54 @@
+BEGIN_HYPERDESC
+<h1>ORO - Saturn's rings</h1>
+<p>The judging rig for ORO's planetary rings (2026-09-12): a DeltaGlider in a circular
+orbit just outside the A ring, inclined 25 degrees, near Saturn's northern summer
+solstice so the ring's shadow lies as a broad band across the globe. One orbit carries
+you over the lit face, through the ring plane, and under the backlit face.</p>
+<p>ORO panel: WORLD -&gt; RINGS. The pill is the A/B - off is stock exactly. Watch: the
+sheet going opaque near edge-on, the backlit inversion (the B ring dark, the Cassini
+Division bright), the shadow band on the planet with the Division as a bright line
+inside it, and the ship dimming as it crosses the shadow.</p>
+END_HYPERDESC
+
+BEGIN_ENVIRONMENT
+  System Sol
+  Date MJD 57897.25
+END_ENVIRONMENT
+
+BEGIN_FOCUS
+  Ship GL-01
+END_FOCUS
+
+BEGIN_CAMERA
+  TARGET GL-01
+  MODE Extern
+  POS 6.50 -35.0 20.0
+  TRACKMODE TargetRelative
+  FOV 50.00
+END_CAMERA
+
+BEGIN_HUD
+  TYPE Orbit
+END_HUD
+
+BEGIN_MFD Left
+  TYPE Orbit
+  REF Saturn
+END_MFD
+
+BEGIN_MFD Right
+  TYPE Map
+  REF Saturn
+END_MFD
+
+BEGIN_SHIPS
+GL-01:DeltaGlider
+  STATUS Orbiting Saturn
+  ELEMENTS 151403000.0 0.0005 25.0 40.0 0.0 0.0 57897.25
+  AROT 0.0 0.0 0.0
+  PRPLEVEL 0:1.000 1:1.000
+  NAVFREQ 0 0 0 0
+  GEAR 0 0.0000
+  AAP 0:0 0:0 0:0
+END
+END_SHIPS

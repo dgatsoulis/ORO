@@ -1,0 +1,74 @@
+BEGIN_DESC
+ORO LIGHTS TEST - an automatic twelve-case tour of the local-light and shadow work.
+
+Load it and watch: the script spawns lamp posts and extra vessels around the DeltaGlider,
+runs each case for about half a minute with the camera orbiting, and says on screen what
+you should be seeing, which Launchpad row the case needs, and what the client's own debug
+line should read. Everything it spawns is deleted at the end; your DeltaGlider is untouched.
+
+  T        skip to the next case
+  R        go back one case
+  Ctrl+P   pause (the sequence pauses with the sim)
+
+The cases: one spot; the DG's own landing light; two spots; four and six in a fan; a cluster
+sharing one map; more lights than maps; a stadium flood; a point light in a ring of casters;
+spots ranking before points; sixteen lights at once; and the same scene by day.
+
+FOR A FULL PASS set, in the Launchpad's Video tab, Advanced setup: Local lights 16x Full,
+Spot light shadows 6 spot maps, Point light shadows Cube, Terrain and world shadows
+Cascaded (ORO). The title card reads your settings back and warns about any row a case
+needs and does not have - so it is worth running whatever your settings are.
+
+IF YOU ARE REPORTING SOMETHING, say which case number it was, send an UNPAUSED screenshot
+or the video, and set ShadowDebug = 1 in D3D9Client.cfg first: the client then logs a line
+a second and the rig puts it straight into the caption.
+
+Needs the LuaInline module ticked in the Launchpad's Modules tab.
+END_DESC
+
+BEGIN_ENVIRONMENT
+  System Sol
+  Date MJD 51982.6780413247
+  Script testlights
+END_ENVIRONMENT
+
+BEGIN_FOCUS
+  Ship GL-01
+END_FOCUS
+
+BEGIN_CAMERA
+  TARGET GL-01
+  MODE Extern
+  POS 23.865000 -118.706238 -23.634508
+  TRACKMODE TargetRelative
+  FOV 60.00
+END_CAMERA
+
+BEGIN_HUD
+  TYPE Surface
+END_HUD
+
+BEGIN_VC
+END_VC
+
+BEGIN_SHIPS
+GL-01:DeltaGlider
+  STATUS Landed Earth
+  POS -80.6822150 28.5963320
+  HEADING 330.00
+  ALT 2.469
+  AROT 67.201 34.012 10.187
+  PRPLEVEL 0:1.000000 1:1.000000
+  NAVFREQ 0 0 0 0
+  XPDR 0
+  HOVERHOLD 0 1 0.0000e+00 0.0000e+00
+  GEAR 1.0000 0.0000
+  HUDMode 2
+  COMPARTMENT_TEMP 289.10 288.11 291.91 288.07 291.91 288.07 293.12 533.81 304.71 240.05 240.05 240.02 292.79
+  COOLANT_STATE 0 0.500 287.000
+  AAP 0:0 0:0 0:0
+END
+END_SHIPS
+
+BEGIN_ExtMFD
+END

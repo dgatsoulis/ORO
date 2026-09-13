@@ -1,0 +1,18 @@
+# ============================================================================
+# Files whose BYTES are load-bearing, so git must not normalise their line
+# endings on the way in or out.
+# ----------------------------------------------------------------------------
+# beta/legacy/ is the retired Scenarios\ORO_beta set. The uninstaller and the
+# installer delete a file there only when it is BYTE-IDENTICAL to the copy we
+# shipped (fc /b), so that anything the user edited is kept. Four of these came
+# out of ORO-beta-260906.zip itself and three from the working tree - and one of
+# them is LF while the rest are CRLF. Without this line a fresh clone would hand
+# out a CRLF copy of that file, the compare would fail, and the migration would
+# silently keep a scenario forever instead of retiring it. The bytes ARE the
+# reference; they are never to be edited.
+#
+# beta/pics/ is launchpad artwork, shipped exactly as delivered - a 1920-wide
+# shot is not re-encoded, so there is nothing for git to helpfully adjust.
+# ============================================================================
+beta/legacy/** -text
+beta/pics/**   -text

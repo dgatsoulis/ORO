@@ -23,6 +23,7 @@ set "HERE=%~dp0"
 set "HERE=%HERE:~0,-1%"
 for %%I in ("%HERE%\..") do set "ROOT=%%~fI"
 set "PAY=%HERE%\payload"
+set "LEG=%HERE%\legacy"
 set "STOCK=%HERE%\stock"
 set "BACKUP=%HERE%\backup"
 
@@ -157,7 +158,7 @@ if defined UPGRADE (
     if not exist "%BACKUP%\Modules\Plugin"     mkdir "%BACKUP%\Modules\Plugin"     >nul 2>&1
     if not exist "%BACKUP%\Modules\D3D9Client" mkdir "%BACKUP%\Modules\D3D9Client" >nul 2>&1
     copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
       if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] backup reseeded from the shipped stock copies
@@ -269,7 +270,7 @@ if defined PULSEFOUND (
   if exist "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" (
     echo   Recovering your original graphics client from PULSE's backup...
     copy /y "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
       if exist "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" copy /y "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] restored from PULSE's own backup
@@ -277,7 +278,7 @@ if defined PULSEFOUND (
     echo   PULSE's backup is gone - using the pristine Orbiter 2024 originals
     echo   shipped with this beta instead...
     copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
       if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] restored from the shipped originals
@@ -322,7 +323,7 @@ if defined UPGRADE (
   if not exist "%BACKUP%\Modules\D3D9Client"  mkdir "%BACKUP%\Modules\D3D9Client"  >nul 2>&1
 
   copy /y "%ROOT%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul || goto :copyfail
-  for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl) do (
+  for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
     if exist "%ROOT%\Modules\D3D9Client\%%F" (
       copy /y "%ROOT%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul || goto :copyfail
     )
@@ -332,6 +333,25 @@ if defined UPGRADE (
 
 rem --- 6. install ------------------------------------------------------------
 echo   Installing ORO...
+rem ---------------------------------------------------------------------------
+rem  UPGRADE: retire the old Scenarios\ORO_beta folder
+rem  It was replaced by Scenarios\ORO. Left alone, an upgraded install would
+rem  show both trees and the old one could never be removed again, because the
+rem  uninstaller only deletes what it can byte-compare against something shipped.
+rem  Same rule here: a file you edited is KEPT, and so is anything of your own.
+rem ---------------------------------------------------------------------------
+if exist "%ROOT%\Scenarios\ORO_beta" (
+  echo   Retiring the old Scenarios\ORO_beta folder ...
+  set "KEPT=0"
+  call :cleanLegacy "Scenarios\ORO_beta"
+  if exist "%ROOT%\Scenarios\ORO_beta" (
+    echo     some files there were yours - the folder has been left in place.
+  ) else (
+    echo     done.
+  )
+  echo.
+)
+
 xcopy "%PAY%\*" "%ROOT%\" /E /I /Y /Q >nul || goto :copyfail
 
 rem --- 6b. the old sound layout (pre-260823) ----------------------------------
@@ -369,6 +389,7 @@ if not exist "%ROOT%\Modules\D3D9Client\Mesh.fx"          set "MISSING=Mesh.fx"
 if not exist "%ROOT%\Modules\D3D9Client\Particle.fx"      set "MISSING=Particle.fx"
 if not exist "%ROOT%\Modules\D3D9Client\NewMesh.hlsl"     set "MISSING=NewMesh.hlsl"
 if not exist "%ROOT%\Modules\D3D9Client\Common.hlsl"      set "MISSING=Common.hlsl"
+if not exist "%ROOT%\Modules\D3D9Client\Planet.fx"        set "MISSING=Planet.fx"
 if not exist "%ROOT%\Script\focusall.lua"                 set "MISSING=focusall.lua"
 if not exist "%ROOT%\Config\ORO\VesselsRainSurfaces.cfg"  set "MISSING=VesselsRainSurfaces.cfg"
 if not exist "%ROOT%\Textures\ORO\Particles\README.txt"  set "MISSING=Particles README"
@@ -504,3 +525,31 @@ exit /b 0
 echo.
 pause
 exit /b 0
+
+rem ===========================================================================
+rem  cleanLegacy - delete only what a PREVIOUS release shipped, byte for byte
+rem ===========================================================================
+:cleanLegacy
+set "SUB=%~1"
+if not exist "%ROOT%\%SUB%" goto :eof
+if not exist "%LEG%" goto :eof
+for /r "%ROOT%\%SUB%" %%F in (*) do (
+  set "FULL=%%F"
+  set "REL=!FULL:%ROOT%\=!"
+  if exist "%LEG%\!REL!" (
+    fc /b "%%F" "%LEG%\!REL!" >nul 2>&1
+    if errorlevel 1 (
+      set /a KEPT+=1
+      echo     kept ^(you changed this^): !REL!
+    ) else (
+      del /q "%%F" >nul 2>&1
+    )
+  ) else (
+    set /a KEPT+=1
+    echo     kept ^(yours^): !REL!
+  )
+)
+for /f "delims=" %%D in ('dir "%ROOT%\%SUB%" /ad /b /s 2^>nul ^| sort /r') do rd "%%D" >nul 2>&1
+rd "%ROOT%\%SUB%" >nul 2>&1
+goto :eof
+

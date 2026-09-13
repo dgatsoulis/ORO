@@ -82,6 +82,7 @@
 // ============================================================================
 
 #include "OroModule.h"
+#include "OroLog.h"
 #include "OroState.h"
 #include "gcCoreAPI.h"       // gcCore::SuppressReentry (client patch c)
 
@@ -553,7 +554,7 @@ void OroModule::ReentryMakeStreams(int i, VESSEL* v)
 	// NULL and the module is required to cope. Say so once - otherwise the plasma silently
 	// having no streaks looks like our bug.
 	if (made == 0 && !reentryNoParticles) {
-		oapiWriteLogV("ORO: particle streams are disabled in the Launchpad - reentry plasma "
+		OroLog(0, "ORO: particle streams are disabled in the Launchpad - reentry plasma "
 		              "will show its light and cockpit glow but no streaks.");
 		reentryNoParticles = true;
 	}
@@ -680,7 +681,7 @@ void OroModule::ReentryMakeLight(int i, VESSEL* v, int band)
 	if (!sceneRendered) {
 		if (!lendDeferLogged) {
 			lendDeferLogged = true;
-			oapiWriteLogV("ORO: deferring AddPointLight (reentry hull light) - scene has not "
+			OroLog(0, "ORO: deferring AddPointLight (reentry hull light) - scene has not "
 			              "rendered a frame yet (invariant 23k). Will attach once it has.");
 		}
 		return;
@@ -729,7 +730,7 @@ void OroModule::UpdateReentry()
 		reentrySuppressChecked = true;
 		reentryCanSuppress = (pCore && pCore->CanSuppressReentry());
 		if (!reentryCanSuppress)
-			oapiWriteLogV("ORO: this D3D9Client cannot suppress stock reentry effects "
+			OroLog(0, "ORO: this D3D9Client cannot suppress stock reentry effects "
 			              "(billboards need client patch c, particle puffs patch e) - "
 			              "our plasma will draw OVER them.");
 	}
@@ -755,7 +756,7 @@ void OroModule::UpdateReentry()
 			const int slot = ReentryFindSlot(NULL);      // first free
 			if (slot < 0) {
 				if (!reentryFullWarned) {
-					oapiWriteLogV("ORO: reentry table full (%d vessels) - further vessels unlit.", MAX_RENTRY);
+					OroLog(0, "ORO: reentry table full (%d vessels) - further vessels unlit.", MAX_RENTRY);
 					reentryFullWarned = true;
 				}
 				break;
@@ -1017,7 +1018,7 @@ int OroModule::SampleHullPoints(VESSEL* v, HullPt* out, int maxN)
 			hp.pos = EMIT_DIR[k] * R;
 			hp.nrm = EMIT_DIR[k];
 		}
-		oapiWriteLogV("ORO: no readable mesh for hull sampling - plasma uses a bounding shell.");
+		OroLog(0, "ORO: no readable mesh for hull sampling - plasma uses a bounding shell.");
 	}
 	return nOut;
 }
@@ -1088,7 +1089,7 @@ void OroModule::BuildShell(int i, VESSEL* v)
 			e.shellIdx[nt * 3 + 0] = a; e.shellIdx[nt * 3 + 1] = d; e.shellIdx[nt * 3 + 2] = c2; nt++;
 		}
 		e.nShellV = nv; e.nShellT = nt;
-		oapiWriteLogV("ORO: no readable mesh - shock shell is a bounding sphere (%s).", v->GetName());
+		OroLog(0, "ORO: no readable mesh - shock shell is a bounding sphere (%s).", v->GetName());
 	};
 
 	// --- PER-CLASS HEATSHIELD OVERRIDE (2026-08-08, the user's design - and
@@ -1112,7 +1113,7 @@ void OroModule::BuildShell(int i, VESSEL* v)
 			char mres[96]; sprintf_s(mres, "ORO\\%s", cls);
 			hOverride = oapiLoadMeshGlobal(mres);    // core-cached template; never ours to delete
 			if (hOverride)
-				oapiWriteLogV("ORO: heatshield mesh %s - shell source override (%s).",
+				OroLog(1, "ORO: heatshield mesh %s - shell source override (%s).",
 				              mfile, v->GetName());
 		}
 	}
@@ -1438,7 +1439,7 @@ void OroModule::BuildShell(int i, VESSEL* v)
 			keep.push_back(fin[ti]); keep.push_back(fin[ti + 1]); keep.push_back(fin[ti + 2]);
 		}
 		if ((int)keep.size() >= 9 && dropped > 0) {
-			oapiWriteLogV("ORO: shell island cull - dropped %d of %d tris (%s).",
+			OroLog(2, "ORO: shell island cull - dropped %d of %d tris (%s).",
 			              dropped, (int)fin.size() / 3, v->GetName());
 			fin.swap(keep);
 		}
@@ -1601,7 +1602,7 @@ void OroModule::BuildShell(int i, VESSEL* v)
 				clamped++;
 			}
 			if (clamped > 0)
-				oapiWriteLogV("ORO: shell detail clamp - %d of %d vertices pulled in (%s).",
+				OroLog(2, "ORO: shell detail clamp - %d of %d vertices pulled in (%s).",
 				              clamped, nv, v->GetName());
 		}
 
@@ -1641,7 +1642,7 @@ void OroModule::BuildShell(int i, VESSEL* v)
 		}
 	}
 
-	oapiWriteLogV("ORO: shock shell %s: V=%d T=%d att=%d cell=%.2fm%s",
+	OroLog(2, "ORO: shock shell %s: V=%d T=%d att=%d cell=%.2fm%s",
 	              v->GetName(), nv, nt, attempt + 1, cell,
 	              partial ? " - coverage PARTIAL" : "");
 }
@@ -2295,7 +2296,7 @@ void OroModule::UpdateTrailPost(double simdt)
 	const int kNow = (pCore && pCore->CanGetRenderCam()) ? 1 : 0;
 	if (kLogged != kNow) {
 		kLogged = kNow;
-		oapiWriteLogV(kNow
+		OroLog(1, kNow
 			? "ORO: render-camera snapshot (patch k) bound - trail projects with the exact render camera."
 			: "ORO: render-camera snapshot (patch k) NOT available - trail falls back to the post-step camera (expect origin jitter).");
 	}

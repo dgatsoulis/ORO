@@ -171,6 +171,16 @@ struct OroEffectState {
 	// Ctrl+G toggles it from the keyboard as the panic/quick kill).
 	bool  masterArmed    = true;
 
+	// HOW MUCH ORO SAYS IN Orbiter.log. 0 = only what is absolutely necessary
+	// (failures, and whether the addon is alive), 1 = concise and the DEFAULT,
+	// 2 = verbose, for hunting something. See OroLog.h for the whole doctrine;
+	// the short version is that the level is a CEILING and that nothing, at any
+	// level, may be written more than once per REAL second.
+	// ⚠️ It lives in the SETTINGS table on purpose: Config\ORO.cfg is written with
+	// FILE_OUT, which TRUNCATES, so a key that is not in a table is erased by the
+	// first SAVE - a hand-edited "Debug = 2" would silently revert.
+	int   debugLevel     = 1;
+
 	// --- VISION ---
 	bool  blackoutEnabled = true;
 	float blackout        = 0.0f;  // 0..1; 1 = lights out (full black - the dialog
@@ -696,6 +706,18 @@ struct OroEffectState {
 	                               //   deleted (the origin-tilt pattern).
 	float rainSwimRate    = 1.0f;  // x the ripple CADENCE (0..2; 1 = designed). Same
 	                               //   deal as rainSwimAmp - a finding slider.
+	float rainWaterRefl   = 1.0f;  // x the reflection on OPEN WATER (0..2; 1 = designed,
+	                               //   0 = off). ⚠️ THE ONE ROW ON THIS PAGE THAT WORKS WITH
+	                               //   THE RAIN PILL OFF: a sea mirrors a vessel in any
+	                               //   weather (his ask 2026-09-10). Scales the water
+	                               //   fraction the mask reports under the focus vessel.
+	float rainWaterLive   = 0.0f;  // LIVE, never saved: that fraction, for the readout.
+	float rainSplashSize  = 1.0f;  // x the splash ring RADIUS (0..2; 1 = the designed
+	                               //   0.85 m, 0 = no rings at all). 2026-09-10, his
+	                               //   Bell 206 screenshot: rings sized against a
+	                               //   DeltaGlider read as huge beside a small addon
+	                               //   hull. Independent of Splashes, which is how MANY
+	                               //   and how opaque - two knobs for two facts.
 	float rainPoolSize    = 1.0f;  // x the standing-pool lattice scale (0..2; 1 =
 	                               //   designed, bigger = larger pools). Part 7.
 	float rainPoolReach   = 1.0f;  // x the pool visibility distance (0..2; 1 = the
@@ -800,6 +822,15 @@ struct OroEffectState {
 	                               //   number is his to find (the 25(i) rule). Still
 	                               //   MULTIPLIES Drop size, so the families scale
 	                               //   together and this only sets their ratio.
+	float rainGlassFilm   = 1.0f;  // x THE WATER FILM (2026-09-12, triage A4): the trim on
+	                               //   the moving sheet that replaces the drops once the
+	                               //   airflow is stripping the pane faster than they can
+	                               //   sit. 0..2, 1 = the physics position; 0 = off, so
+	                               //   high-speed rain goes back to thinning drops and
+	                               //   multiplying runners with nothing over them.
+	                               //   WHEN it appears is not a knob - that is the sensed
+	                               //   dynamic pressure (25i: the sim owns what happens,
+	                               //   the user owns the look).
 	float rainGlassRise   = 16.0f; // s, THE FILL TIME (his ask 2026-08-26): how long the
 	                               //   canopy takes to go from clean to the Glass drops
 	                               //   target once the storm is at full. Slider 10..60,
@@ -811,11 +842,18 @@ struct OroEffectState {
 	//  interface - any vessel, nothing to configure. The CLIENT reads the tokens itself
 	//  at mesh load, because clbkStoreMeshPersistent is the one place a mesh's filename
 	//  is ever spoken. See the client's RainGlassStoreScan.)
-	float rainGlassDbg    = 0.0f;  // TEMPORARY SCAFFOLD (2026-08-26): 0 = normal,
-	                               //   1 = ignore the depth mask, 2 = VISUALIZE the
-	                               //   depth buffer (green = authored window, blue =
-	                               //   interior/hull, unchanged = nothing there).
-	                               //   Never saved; removed once the drops are done.
+	float rainGlassDbg    = 0.0f;  // MASK DEBUG (2026-08-26; KEPT and renamed 2026-09-12,
+	                               //   his call on triage B2): 0 = normal, 1 = ignore the
+	                               //   depth mask, 2 = VISUALIZE the depth buffer (green =
+	                               //   authored window, blue = interior/hull, unchanged =
+	                               //   nothing there). Never saved.
+	                               //   ⚠️ IT WAS BUILT AS SCAFFOLDING AND EARNED ITS PLACE:
+	                               //   it shipped, a tester reached for position 2 as a
+	                               //   workaround, and it is now the instrument that
+	                               //   answers the one windscreen question a screenshot
+	                               //   cannot - was the glass declared at all. A diagnostic
+	                               //   users actually use is a feature; the honest response
+	                               //   was to name it properly rather than delete it.
 	// live readouts, never saved (they are the storm's current STATE, like the eye's)
 	float rainI           = 0.0f;  // the event envelope, 0..1
 	float rainWet         = 0.0f;  // ground wetness, lags rainI - build B consumes it
@@ -911,8 +949,6 @@ struct OroEffectState {
 	float plasFinRake     = 15.0f; // [deg] fin/streamer rake off the flow axis (0..45)
 	float plasComa        = 0.0f;  // x EDGE LIGHT gain (0..2) - round 3 repurposed
 	                               //   the retired coma knob's storage slot
-	float plasBlob        = 1.0f;  // RETIRED (round 3, blobs no longer draw);
-	                               //   field kept so nothing else shifts
 	float plasSpark       = 1.0f;  // x spark count per stream   (0..6 -> 0..12 sparks)
 	float plasSparkLife   = 1.0f;  // [s] spark travel time root->tip - longer = slower
 	                               //   march, visible for longer (0.1..3 in effect;
@@ -1004,6 +1040,19 @@ struct OroEffectState {
 	                               //   at full strength. NOT persisted - like every other
 	                               //   TEST toggle it is a look-judging tool, and a saved
 	                               //   one would put a permanent cone on a parked ship.
+	// THE AIR (2026-09-07, his open item 2: "vapour cones are a bit more unpredictable
+	// than that"). Whether a cone FORMS is a matter of the AIR, so these three are
+	// GLOBAL - the same air for every hull - while every shape knob stays per class.
+	// Chance per transonic transit = Max chance x WATER (the planet's own Mask.tree:
+	// sea 1.0 .. deep inland 0.6) x (1 - h / drawn ceiling) x EXPANSION (dynamic
+	// pressure / 20 kPa, clamped); one humidity draw per transit decides, and the cone
+	// exists wherever the live margin is positive. The mechanism is in OroVapour.cpp.
+	float vapChance       = 1.0f;  // MAX CHANCE (0..1): the sea-level, full-expansion
+	                               //   probability per transit. 1 = guaranteed low.
+	float vapCeiling      = 15.0f; // DRY CEILING [km] (5..25): the chance reaches zero
+	                               //   here; drawn +-10% per transit (his "+/- 1500 m").
+	float vapIntermit     = 0.35f; // INTERMITTENCY (0..1): the real-time on/off flutter
+	                               //   on top of the flicker; 0 = the steady cone.
 	float vapStrength     = 1.0f;  // OPACITY of the shroud (0..2; 0 = off). Renamed from
 	                               //   Strength in the dialog 2026-08-29 (key unchanged -
 	                               //   his tuned cfgs keep loading): up to 1.0 it is the
@@ -1131,6 +1180,8 @@ struct OroEffectState {
 	// Readouts - module-written, dialog-read (the reentryHeat discipline: a threshold
 	// nobody can see is indistinguishable from a bug).
 	float vapMach         = 0.0f;  // the camera-target vessel's Mach number
+	char  vapAirWhy[24]   = "";    // THE AIR's verdict for the readout (2026-09-07): "sea 96% formed",
+	                               //   "inland 41% no cone", "dry above 14.8 km", "test - bypassed"
 	float vapVis          = 0.0f;  // 0..1 combined gate - what fraction of full the cone is
 	char  vapWhy[24]      = "";    // why it is zero when it is: "off", "vacuum", "subsonic",
 	                               //   "too fast", "thin air", "no target"
@@ -1286,6 +1337,93 @@ struct OroEffectState {
 	// sun behind you, sun too high) and the readout is what tells those from "broken".
 	float grayVis      = 0.0f;     // 0..1 the combined gate actually applied this frame
 	char  grayWhy[40]  = "";       // one-line reason when grayVis is 0
+
+	// ---- THE LENS FLARE (2026-09-12; OroGodRays.cpp + PSLensFlare) -----------------
+	// Ghosts, an iris starburst and a veil, from the sun. EXTERNAL VIEWS ONLY, and that
+	// is his ruling and a physical one: a flare is made between the elements of a LENS,
+	// and a healthy eye has none - in a cockpit you are looking through the pilot's
+	// eyes, outside the camera is a camera. It also means every awkward case disappears
+	// (no VC glass, no HUD ordering, nothing to explain).
+	//
+	// IT SHARES THE GOD RAYS' SUN AND NOT THEIR GATE. Where the sun is on screen, how
+	// much air is at the camera and how much of the disc is covered are facts about the
+	// world that both effects need; UpdateSun/BuildSunScreen own them and each effect
+	// applies its own. Wiring the flare to what UpdateGodRays happened to leave behind
+	// would have made it die whenever the god rays' pill was off - the 2026-09-12 rings
+	// lesson verbatim: two effects that share a value must not share a gate.
+	//
+	// AND THE AIR FADE IS THE GOD RAYS' GATE INVERTED, which is not a coincidence.
+	// Shafts need a medium to scatter in; a flare needs a CONCENTRATED source, and what
+	// an atmosphere does is spread the sun's light across the sky and kill the contrast
+	// the flare lives on. So the two hand over to each other across an ascent: rays low
+	// and thick, flare high and clean.
+	bool  flareEnabled = true;
+	int   flareMode    = 0;        // WHICH LENS: 0 CLASSIC (warm stills optic, a few large
+	                               //   varied ghosts), 1 ANAMORPHIC (cool cine optic, the
+	                               //   horizontal streak and a long chain of small ghosts),
+	                               //   2 CLEAN (modern multi-coated - a crisp star and
+	                               //   almost nothing else), 3 VINTAGE (UNCOATED - mostly
+	                               //   veiling glare washing the frame, many soft nearly
+	                               //   colourless ghosts, few soft blades). Every slider
+	                               //   below means the same thing in all four: it is ONE
+	                               //   effect with an optic to choose, not four effects
+	                               //   sharing a page.
+	                               //   0 is the build flown and approved on 2026-09-12 and
+	                               //   is arithmetically unchanged by the other two.
+	float flareStr     = 1.00f;    // 0..2 master intensity; 1 = the reference look
+	float flareSize    = 1.00f;    // 0..2 scales the ghost chain and the rays' reach.
+	                               //   NOT their spacing - where a ghost lands is a
+	                               //   property of the lens, so it is baked (25i)
+	float flareGhosts  = 1.00f;    // 0..2 the chain's opacity alone; 0 = rays and veil
+	float flareRays    = 1.00f;    // 0..2 the iris starburst alone
+	float flareDisp    = 1.30f;    // 0..2 how far the chain's colours spread from white.
+	                               //   The colours ARE the coating, so this is the one
+	                               //   honest colour control - a single tint swatch
+	                               //   would flatten the whole chain to one hue
+	float flareAir     = 0.75f;    // 0..1 how completely a sea-level atmosphere kills it.
+	                               //   0 = crisp everywhere, 1 = nothing at the surface
+	bool  flareTest    = false;    // bypass the air fade (the disc still has to be there)
+	// Outputs - module-written, dialog-read, same discipline as the god rays': "no
+	// flare" has several honest causes and the line tells them from a broken effect.
+	// NOTE it reports the HOST budget only. Whether the disc is actually visible is
+	// measured per pixel in the shader, off the frame, so the panel cannot know it -
+	// which is why no why-string here ever claims the sun is hidden.
+	float flareVis     = 0.0f;     // 0..1 screen proximity x air x eclipse
+	char  flareWhy[40] = "";       // one-line reason when flareVis is 0
+
+	// ---- PLANETARY RINGS (2026-09-12, client patch aj; OroRings.cpp) ---------------
+	// ORO derives one radial profile per ringed planet from whatever it ships (the
+	// legacy .tex alpha is a real optical depth - see OroRingProfile.h) and hands the
+	// client a look; the client draws the ring on the per-pixel radial path, its shadow
+	// on the planet, and shades every object inside that shadow. The PILL is GLOBAL (the
+	// pilot's, like AuroraOn); the three trims are PER BODY (what a world's ring IS).
+	bool  ringsEnabled = true;     // off = stock ARITHMETICALLY: the client's own ring shader,
+	                               //   no planet shadow, no vessel shading. One pill, one A/B.
+	float ringDensity  = 1.0f;     // 0..2 optical-depth trim - opacity, the planet's shadow
+	                               //   band, vessel shading
+	float ringBright   = 1.0f;     // 0..2 the lit face
+	float ringBacklit  = 1.0f;     // 0..2 the unlit (transmitted) face
+	// ROUND 2 (2026-09-12) - THE CLOSE-UP, a LOOK driven by the camera (his rules after the
+	// physical swarm was reverted): from far the ring is round 1 exactly; closer, grooves
+	// and grain appear in the sheet's own texture, octave by octave down to a 4 m cell. Per
+	// body like the trims above; 0 is an exact A/B. (Bright specks and a dust halo were
+	// built, flown five times and CUT by him: "lose the particles and the halo and just
+	// keep the grooved texture, but we must make it as good resolution as we can".)
+	float ringDetail    = 1.0f;    // 0..2 how FINE the grooves and grain get: the reach of the
+	                               //   per-octave fade - 1 = a feature shows once it subtends
+	                               //   ~4 px, 2 = ~2 px (finer at every distance). 0 = the
+	                               //   round-1 sheet, bit for bit. (Flight 7: he expected
+	                               //   Detail to mean finer; it was the amplitude - Contrast.)
+	float ringContrast  = 1.0f;    // 0..2 x the amplitude of those grooves and grain.
+	float ringRelief    = 1.0f;    // 0..2 x the RELIEF: the density field read as height, its
+	                               //   slope tilting the sheet's lit normal so every ridge gets
+	                               //   a lit and a shade side (the flight-9 "3d feeling"). 0 = flat.
+	// live, never saved
+	char  ringBody[32]   = "";     // the ringed planet the readout speaks for ("" = none in range)
+	char  ringRegion[40] = "";     // "Cassini Division" / "B ring" / "above the sheet" ...
+	float ringTauLive    = 0.0f;   // optical depth at the readout's radius (density trim applied)
+	char  ringSrc[64]    = "";     // "8192.dds + .tex" - which files the profile came from
+	float ringPlaneAlt   = 0.0f;   // |height| above the ring plane, metres (round 2 readout)
 
 	// --- AURORA (2026-08-05) - the auroral curtains ------------------------------
 	// Additive ribbon GEOMETRY - "a curtain IS a ribbon", so the whole round-5 plasma
@@ -1598,6 +1736,12 @@ bool        OroSettings_VcFromClass();
 // unsaved tuning. Load returns 0 when there is nothing saved.
 int         OroSettings_LoadDlgHeight();
 void        OroSettings_SaveDlgHeight(int h);
+// The panel's DPI scale, in percent, from the same file. 0 = nothing saved, so the
+// dialog decides from the screen height (see InitDlgScale). Read-only from ORO's side:
+// there is no UI for it and nothing writes it - a user sets it by hand when the
+// automatic answer is not to their taste, which is why the writer documents the key in
+// the file's own header even when it has no value to write.
+int         OroSettings_LoadDlgScale();
 // ... and the HELP window's size, in the same file. There is deliberately no "was it
 // open" flag: the help window never reopens by itself, only its size is remembered.
 // Both zero = nothing saved, use the defaults.
@@ -1629,6 +1773,7 @@ bool        OroDepthClipOK();
 bool        OroStockExhaustSupported();
 bool        OroBaseLightsSupported();   // patch (ac): the BASE LIGHTS pill greys out without it
 bool        OroVCNightSupported();     // patch (ad): the CABIN AT NIGHT section greys out without it
+bool        OroRingsSupported();       // patch (aj): the RINGS page greys out without it (both pointers)
 
 // True if the running client carries patch (l), so ORO can synthesize a tinted
 // particle texture. PARTICLESTREAMSPEC has no colour field - colour lives in the

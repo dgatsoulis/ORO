@@ -6,6 +6,7 @@
 // ==============================================================
 
 #include "OroModule.h"
+#include "OroLog.h"
 #include "OroState.h"
 #include "OroDialog.h"
 #include <math.h>   // sinf/cosf/sqrtf for the tunnel ring geometry
@@ -25,6 +26,35 @@
 // The shared effect state (see OroState.h). Written by the dialog, read by the
 // render callback - same thread by construction, no locking.
 OroEffectState g_fx;
+
+// ----------------------------------------------------------------------------
+// THE ONE WAY ORO WRITES TO Orbiter.log. See OroLog.h for why this exists and for
+// the two rules it enforces (a level ceiling, and never more than one line per real
+// second). Formats into a fixed buffer and hands the result to oapiWriteLog, which
+// takes a non-const char* - hence the cast.
+// ⚠️ The level is read from g_fx, so a line written before the settings are loaded
+// gets the DEFAULT (1, concise). That is deliberate: the alternative is a startup
+// window in which nothing can be logged, and startup is where install problems are.
+// ----------------------------------------------------------------------------
+void OroLog(int level, const char* fmt, ...)
+{
+	if (level > g_fx.debugLevel) return;
+	char buf[1024];
+	va_list ap;
+	va_start(ap, fmt);
+	_vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
+	va_end(ap);
+	oapiWriteLog(buf);
+}
+
+// A real-time tick for ORO_LOG_EVERY. GetTickCount, deliberately: it is not an oapi
+// call, it keeps running while the sim is PAUSED, and it is immune to time
+// acceleration - a throttle on SIM time fires every frame at 100x, which is exactly
+// the failure this whole file exists to prevent.
+unsigned long OroLogTick()
+{
+	return (unsigned long)GetTickCount();
+}
 
 // Defined with the crash forensics near the bottom of this file, but called from the
 // session callbacks well above them - hence the forward declaration.
@@ -345,7 +375,7 @@ void OroModule::DrawRainPoly(oapi::Sketchpad* pSkp)
 // lifting stays with the client-side storm light (patch s part 2), which dims only the SUN.
 void OroModule::DrawGloomPass()
 {
-	// TEMPORARY DIAGNOSTIC, ROUND 2 (2026-08-26). Round 1 sat BELOW this early return, so
+	// THE GLASS DIAGNOSTIC's entry bits. Its first version sat BELOW this early return, so
 	// "all bits clear" could not distinguish "bailed here" from "never called" - the
 	// instrument was downstream of the thing it was measuring. These five are recorded
 	// BEFORE the return, and glassDiagI carries the intensity as the RENDER PATH sees it,
@@ -493,7 +523,25 @@ void OroModule::DrawGloomPass()
 			// guards the combined extreme.
 			float rsz = g_fx.rainGlassRunSize; if (rsz < 0.4f) rsz = 0.4f; if (rsz > 2.0f) rsz = 2.0f;
 			pIPIGloom->SetFloat("fRunSize", dsz * rsz);
-			pIPIGloom->SetFloat("fTime",   animT);             // real time (invariant 4)
+			// THE SHEAR and THE FILM (2026-09-12, triage A3/A4). One sensed number with
+			// three consequences in the shader - standing drops thin out, runners
+			// multiply, the sheet comes up - so they can never disagree about how hard
+			// the air is working on the pane. Film is a TRIM on the last of the three;
+			// the other two are physics and have no knob, deliberately.
+			float flm = g_fx.rainGlassFilm; if (flm < 0.0f) flm = 0.0f; if (flm > 2.0f) flm = 2.0f;
+			pIPIGloom->SetFloat("fShear", rainGlassShear);
+			pIPIGloom->SetFloat("fFilm",  flm);
+			// ⚠️ NO fTime HERE. PSGloom stopped referencing it on 2026-09-06, when the
+			// runners moved from a rate x clock to the host-integrated fRunPh (that
+			// product tracks the DERIVATIVE and ran every runner backwards on the
+			// runway). The compiler then strips the unused uniform from the constant
+			// table, so the push that was left behind FAILED EVERY FRAME - and the
+			// client logs a D3D9ERROR each time. It shipped in 260906 and put 16,252
+			// lines into one twenty-minute flight, in the log a tester then sends us,
+			// while patch (q) exists to keep that log worth reading.
+			// THE RULE: a SetFloat on a name the entry point does not USE is an error
+			// per frame, not a no-op. When a shader stops using a uniform, grep the
+			// host for its name in the same edit.
 			// The streaks' polar chart: an orthonormal basis AROUND the run axis, built
 			// from whichever vessel axis is least parallel to it so it can never
 			// degenerate. The chart is anchored to the AXIS, not to any per-pixel
@@ -552,6 +600,7 @@ void OroModule::DrawVapourPoly(oapi::Sketchpad* pSkp)
 	pSkp->DrawPoly(hVapourPoly);
 	pSkp->SetBlendState(oapi::Sketchpad::BlendState::ALPHABLEND);        // leave the pad as found
 }
+
 
 // The TRAIL poly - the third instance of the same pattern (plasma, aurora, now the
 // particle trail's sprites). Its OWN HPOLY, deliberately: the trail and the attached
@@ -701,6 +750,54 @@ void OroModule::DrawGodRayPass()
 }
 
 // ----------------------------------------------------------------------------
+// THE LENS FLARE (2026-09-12). Drawn LAST of everything ORO does to an external
+// frame, and that is the effect's own logic rather than a scheduling convenience:
+// the god rays are scattering in the air AHEAD of the lens and the shimmer is heat
+// ahead of it, so both have to be in the image before the glass gets to smear it.
+// The practical half is that the god ray march cannot turn our ghosts into shafts.
+//
+// The shader does the honest half of the work - it reads the sun's own pixels out of
+// the captured frame to decide whether there IS a sun and how concentrated it is - so
+// everything pushed from here is either a slider or the host budget.
+// ----------------------------------------------------------------------------
+void OroModule::DrawLensFlarePass()
+{
+	if (!lfActive || !ipiReady || !pCore || !hFrameTex || !pIPILens) return;
+	SURFHANDLE hBB = pCore->GetBackBufferHandle();
+	if (!hBB || !pCore->CopyResource(hFrameTex, hBB)) return;
+	pIPILens->SetTexture("tSrc", hFrameTex, IPF_CLAMP_U | IPF_CLAMP_V | IPF_LINEAR);
+	pIPILens->SetOutput(0, hBB);
+
+	// The depth tap is the backstop the contrast probe cannot provide on its own: a
+	// SUNLIT WHITE HULL crossing the disc is bright against black space and reads as a
+	// sun. GBUF_DEPTH carries vessels, terrain (patch ab) and base structures (z2).
+	// Needs patch (h) AND the client's Sun glare (which is what builds the buffer at
+	// all) - absent, the flare still works off contrast alone and the panel says so,
+	// because a capability that is dark must SAY so (invariant 18b / 20g).
+	float fDepth = 0.0f;
+	if (ipiDepthOK && pCore->SetIPISceneDepth(pIPILens, "tDepth", IPF_POINT | IPF_CLAMP)) fDepth = 1.0f;
+
+	const float sun[2] = { lfSunU, lfSunV };
+	pIPILens->SetFloat("vGRSun",  sun, sizeof(sun));
+	pIPILens->SetFloat("fLFFade", lfFade);
+	pIPILens->SetFloat("fLFSamp", lfSamp);
+	pIPILens->SetFloat("fLFDepth", fDepth);
+	// WHICH LENS. A float because that is what the interface carries; the shader
+	// compares against 0.5 / 1.5 / 2.5, so a stray value can only land on a real optic.
+	pIPILens->SetFloat("fLFMode", (float)((g_fx.flareMode < 0) ? 0 : (g_fx.flareMode > 3 ? 3 : g_fx.flareMode)));
+	// The five look dials go through raw: each one scales a term the shader owns, and
+	// 1.00 is the reference look for all of them. Nothing to remap - unlike the god
+	// rays' Reach and Softness, none of these has a dead end of the range.
+	pIPILens->SetFloat("fLFStr",   g_fx.flareStr);
+	pIPILens->SetFloat("fLFSize",  g_fx.flareSize);
+	pIPILens->SetFloat("fLFGhost", g_fx.flareGhosts);
+	pIPILens->SetFloat("fLFRay",   g_fx.flareRays);
+	pIPILens->SetFloat("fLFDisp",  g_fx.flareDisp);
+	pIPILens->SetFloat("fAspect", (viewH > 0) ? ((float)viewW / (float)viewH) : 1.3333f);
+	pIPILens->Execute((DWORD)0, true, gcIPInterface::Rect);
+}
+
+// ----------------------------------------------------------------------------
 // SETTINGS PERSISTENCE (2026-08-02) - Config\ORO.cfg + Config\ORO\<class>.cfg
 //
 // Tables drive both directions, so a new knob is one line and can never be
@@ -738,6 +835,10 @@ namespace {
 	// --- GLOBAL: the pilot and the session, not the ship ---------------------
 	const SetItem SETTINGS[] = {
 		{ "MasterArmed",      &g_fx.masterArmed,      ST_B },
+		// How much ORO says in Orbiter.log: 0 necessary / 1 concise / 2 verbose.
+		// No UI row - it is a diagnostic, not a look - but it must round-trip
+		// through this table or the truncating writer would erase a hand-set value.
+		{ "Debug",            &g_fx.debugLevel,       ST_I },
 		// ⚠️ THE ELEVEN EFFECT PILLS AND THE WHOLE PILOT MODEL LEFT THIS TABLE ON
 		// 2026-08-25 - they are in PILOTSET below, because they can now be written to
 		// EITHER this file or a vessel class's, and a key can only have one home.
@@ -781,11 +882,23 @@ namespace {
 		// much air there is to scatter in - is read from the sim every frame, not set by
 		// the user. These five are taste. Test is transient and never written.
 		{ "GodRaysOn",        &g_fx.grayEnabled,      ST_B },
+		{ "RingsOn",          &g_fx.ringsEnabled,     ST_B },   // 2026-09-12: the pill is the pilot's (AuroraOn's rule); the trims are per body
 		{ "GodRayStrength",   &g_fx.grayStrength,     ST_F },
 		{ "GodRayLength",     &g_fx.grayLength,       ST_F },
 		{ "GodRayDecay",      &g_fx.grayDecay,        ST_F },
 		{ "GodRaySens",       &g_fx.graySens,         ST_F },   // was GodRayThresh, inverted
 		{ "GodRayWarm",       &g_fx.grayWarm,         ST_F },
+		// LENS FLARE (2026-09-12), and GLOBAL for the god rays' own reason turned around:
+		// what the flare is a property OF is the camera, not a hull and not a world, so
+		// there is nothing for a per-class or per-body file to say. Test is transient.
+		{ "LensFlareOn",      &g_fx.flareEnabled,     ST_B },
+		{ "LensFlareMode",    &g_fx.flareMode,        ST_I },   // which optic: 0/1/2
+		{ "LensFlareStr",     &g_fx.flareStr,         ST_F },
+		{ "LensFlareSize",    &g_fx.flareSize,        ST_F },
+		{ "LensFlareGhosts",  &g_fx.flareGhosts,      ST_F },
+		{ "LensFlareRays",    &g_fx.flareRays,        ST_F },
+		{ "LensFlareDisp",    &g_fx.flareDisp,        ST_F },
+		{ "LensFlareAir",     &g_fx.flareAir,         ST_F },
 		// Vapour cone: the PILL only. Everything about its shape is a fact about a hull,
 		// so it lives in the class file (below) - the same split the shimmer uses. Test is
 		// transient and never written: a saved TEST would hang a permanent shroud on a
@@ -813,12 +926,15 @@ namespace {
 		{ "RainGlassRise",    &g_fx.rainGlassRise,    ST_F },
 		{ "RainGlassRunners", &g_fx.rainGlassRunners, ST_F },
 		{ "RainGlassRunSize", &g_fx.rainGlassRunSize, ST_F },
+		{ "RainGlassFilm",    &g_fx.rainGlassFilm,    ST_F },   // the high-speed sheet's trim
 		{ "RainDensity",      &g_fx.rainDensity,      ST_F },
 		{ "RainStreak",       &g_fx.rainStreak,       ST_F },
 		{ "RainStreakGlow",   &g_fx.rainStreakA,      ST_F },
 		{ "RainSpeed",        &g_fx.rainSpeed,        ST_F },
 		{ "RainAngle",        &g_fx.rainAngle,        ST_F },
 		{ "RainPuddle",       &g_fx.rainPuddle,       ST_F },
+		{ "RainSplashSize",   &g_fx.rainSplashSize,   ST_F },
+		{ "RainWaterRefl",    &g_fx.rainWaterRefl,    ST_F },
 		{ "RainWetDark",      &g_fx.rainWetDark,      ST_F },
 		{ "RainGlint",        &g_fx.rainGlint,        ST_F },
 		{ "RainRefl",         &g_fx.rainRefl,         ST_F },
@@ -836,6 +952,11 @@ namespace {
 		{ "RainThunder",      &g_fx.rainThunder,      ST_F },
 		{ "RainViewMode",     &g_fx.rainViewMode,     ST_I },
 		{ "VapourOn",         &g_fx.vapEnabled,       ST_B },
+		// THE AIR (2026-09-07): whether a cone forms is the air's business, so the three
+		// are GLOBAL - the same air for every hull; every shape knob stays per class.
+		{ "VapourChance",     &g_fx.vapChance,        ST_F },
+		{ "VapourCeiling",    &g_fx.vapCeiling,       ST_F },
+		{ "VapourIntermit",   &g_fx.vapIntermit,      ST_F },
 	};
 	const int NSETTINGS = (int)(sizeof(SETTINGS) / sizeof(SETTINGS[0]));
 
@@ -1187,6 +1308,19 @@ namespace {
 		{ "LtgRate",          &g_fx.ltgRate,          ST_F },
 		{ "LtgCellKm",        &g_fx.ltgCellKm,        ST_F },
 		{ "LtgColour",        &g_fx.ltgColour,        ST_I },
+		// PLANETARY RINGS (2026-09-12): the three trims are what a world's ring IS - Saturn
+		// and Uranus are nothing alike - so they live here beside the aurora's. The pill is
+		// GLOBAL (RingsOn in SETTINGS, AuroraOn's rule). The PROFILE itself is derived at
+		// runtime from the planet's own textures and is never a setting. Built-in defaults
+		// are all 1.0 = the physics position; a world with no file gets exactly those.
+		{ "RingDensity",      &g_fx.ringDensity,      ST_F },
+		{ "RingBright",       &g_fx.ringBright,       ST_F },
+		{ "RingBacklit",      &g_fx.ringBacklit,      ST_F },
+		// ROUND 2 - the close-up. Same scope and the same reason: what a ring looks like
+		// from a few thousand km is a fact about that ring, not about the pilot.
+		{ "RingDetail",       &g_fx.ringDetail,       ST_F },
+		{ "RingContrast",     &g_fx.ringContrast,     ST_F },
+		{ "RingRelief",       &g_fx.ringRelief,       ST_F },
 	};
 	const int NBODYSET = (int)(sizeof(BODYSET) / sizeof(BODYSET[0]));
 
@@ -1333,7 +1467,7 @@ namespace {
 			strcpy_s(g_bodyFiles[g_nBodyFiles++], nm);
 		} while (FindNextFileA(h, &fd));
 		FindClose(h);
-		oapiWriteLogV("ORO: %d aurora body file(s) in Config\\ORO\\bodies.", g_nBodyFiles);
+		OroLog(1, "ORO: %d aurora body file(s) in Config\\ORO\\bodies.", g_nBodyFiles);
 	}
 }
 
@@ -1365,7 +1499,7 @@ bool OroSettings_SaveScope(int mask)
 	if (mask & ORO_SCOPE_GLOBAL) {
 		FILEHANDLE f = oapiOpenFile(SETTINGS_FILE, FILE_OUT, CONFIG);
 		if (!f) {
-			oapiWriteLogV("ORO: could not write Config\\ORO.cfg");
+			OroLog(0, "ORO: could not write Config\\ORO.cfg");
 			ok = false;
 		} else {
 			oapiWriteLine(f, K("; ORO - global settings (the pilot and the session). Written by"));
@@ -1405,7 +1539,7 @@ bool OroSettings_SaveScope(int mask)
 		sprintf_s(rel, "ORO\\%s.cfg", fn);
 		FILEHANDLE fc = oapiOpenFile(rel, FILE_OUT, CONFIG);
 		if (!fc) {
-			oapiWriteLogV("ORO: could not write Config\\%s", rel);
+			OroLog(0, "ORO: could not write Config\\%s", rel);
 			ok = false;
 		} else {
 			char hdr[160];
@@ -1450,7 +1584,7 @@ bool OroSettings_SaveScope(int mask)
 		sprintf_s(rel, "ORO\\bodies\\%s.cfg", fn);
 		FILEHANDLE fb = oapiOpenFile(rel, FILE_OUT, CONFIG);
 		if (!fb) {
-			oapiWriteLogV("ORO: could not write Config\\%s", rel);
+			OroLog(0, "ORO: could not write Config\\%s", rel);
 			ok = false;
 		} else {
 			char hdr[160];
@@ -1502,7 +1636,7 @@ void OroSettings_Load()
 		SnapTable(MOVBLK[b].tbl, MOVBLK[b].n, MOVBLK[b].globalVal);
 	}
 	oapiCloseFile(f, FILE_IN);
-	oapiWriteLogV("ORO: global settings loaded (%d of %d items, movable %d of %d).",
+	OroLog(1, "ORO: global settings loaded (%d of %d items, movable %d of %d).",
 	              n, NSETTINGS, nm, nmTot);
 }
 
@@ -1525,6 +1659,7 @@ void OroSettings_Load()
 // that are primed by the first load and updated by whichever window moved.
 static const char* WINDOW_FILE = "ORO\\window.cfg";
 static int s_dlgH = 0, s_helpW = 0, s_helpH = 0;   // 0 = "no saved value, use the default"
+static int s_dlgScale = 0;                         // percent; 0 = let the screen decide
 
 static void WindowCfgRead()
 {
@@ -1537,6 +1672,7 @@ static void WindowCfgRead()
 	if (oapiReadItem_int(f, K("DialogHeight"), v)) s_dlgH  = v;
 	if (oapiReadItem_int(f, K("HelpWidth"),    v)) s_helpW = v;
 	if (oapiReadItem_int(f, K("HelpHeight"),   v)) s_helpH = v;
+	if (oapiReadItem_int(f, K("DialogScale"),  v)) s_dlgScale = v;
 	oapiCloseFile(f, FILE_IN_ZEROONFAIL);
 }
 
@@ -1544,7 +1680,7 @@ static void WindowCfgWrite()
 {
 	CreateDirectoryA("Config\\ORO", NULL);  // harmless if it already exists
 	FILEHANDLE f = oapiOpenFile(WINDOW_FILE, FILE_OUT, CONFIG);
-	if (!f) { oapiWriteLogV("ORO: could not write Config\\%s", WINDOW_FILE); return; }
+	if (!f) { OroLog(0, "ORO: could not write Config\\%s", WINDOW_FILE); return; }
 	oapiWriteLine(f, K("; ORO - window geometry. Written whenever you finish resizing the"));
 	oapiWriteLine(f, K("; panel or the help window, so each reopens the size you left it."));
 	oapiWriteLine(f, K("; Deliberately NOT in Config\\ORO.cfg: writing that file rewrites every"));
@@ -1553,6 +1689,15 @@ static void WindowCfgWrite()
 	oapiWriteLine(f, K("; (Note there is no 'help window was open' flag, on purpose - the help"));
 	oapiWriteLine(f, K(";  window never reopens by itself, only its SIZE is remembered.)"));
 	oapiWriteLine(f, K(""));
+	oapiWriteLine(f, K("; DialogScale = the panel's size on screen, in percent. There is no"));
+	oapiWriteLine(f, K("; slider for it: ORO reads your screen height and picks 100 up to"));
+	oapiWriteLine(f, K("; 1620 lines, 150 above that, 200 at 4K, and so on. Add the line"));
+	oapiWriteLine(f, K("; below (any value from 100 to 300) if you want a different size."));
+	oapiWriteLine(f, K(";   DialogScale = 150"));
+	oapiWriteLine(f, K("; DialogHeight is measured BEFORE that scaling, so it means the same"));
+	oapiWriteLine(f, K("; amount of panel whatever DialogScale says."));
+	oapiWriteLine(f, K(""));
+	if (s_dlgScale > 0) oapiWriteItem_int(f, K("DialogScale"), s_dlgScale);
 	if (s_dlgH  > 0) oapiWriteItem_int(f, K("DialogHeight"), s_dlgH);
 	if (s_helpW > 0) oapiWriteItem_int(f, K("HelpWidth"),    s_helpW);
 	if (s_helpH > 0) oapiWriteItem_int(f, K("HelpHeight"),   s_helpH);
@@ -1560,6 +1705,7 @@ static void WindowCfgWrite()
 }
 
 int  OroSettings_LoadDlgHeight()       { WindowCfgRead(); return s_dlgH; }
+int  OroSettings_LoadDlgScale()        { WindowCfgRead(); return s_dlgScale; }
 void OroSettings_SaveDlgHeight(int h)  { if (h > 0) { WindowCfgRead(); s_dlgH = h; WindowCfgWrite(); } }
 
 void OroSettings_LoadHelpSize(int& w, int& h) { WindowCfgRead(); w = s_helpW; h = s_helpH; }
@@ -1843,7 +1989,7 @@ static void ThrReadGroups(FILEHANDLE f)
 			nloaded++;
 		}
 		if (nloaded)
-			oapiWriteLogV("ORO: loaded %d per-thruster override block%s.",
+			OroLog(1, "ORO: loaded %d per-thruster override block%s.",
 			              nloaded, nloaded == 1 ? "" : "s");
 	}
 	OroThr_SyncIn();      // and show the selection on the sliders
@@ -2180,7 +2326,7 @@ static bool ThrCacheLoad(ThrClassCache& c, VESSEL* v, const char* cls)
 			nloaded++;
 		}
 		oapiCloseFile(f, FILE_IN);
-		oapiWriteLogV("ORO: cached thruster settings for class %s (%d override block%s).",
+		OroLog(1, "ORO: cached thruster settings for class %s (%d override block%s).",
 		              cls, nloaded, nloaded == 1 ? "" : "s");
 	}
 	c.hasFile = true;
@@ -2202,7 +2348,7 @@ int OroThr_CacheFor(VESSEL* v)
 	if (freeSlot < 0) {
 		if (!g_thrCacheFullWarned) {
 			g_thrCacheFullWarned = true;
-			oapiWriteLogV("ORO: thruster class cache full (%d classes) - %s takes the "
+			OroLog(0, "ORO: thruster class cache full (%d classes) - %s takes the "
 			              "loaded class's settings.", ORO_THR_CACHE_MAX, cls);
 		}
 		return -1;                                     // degrade to today's behaviour
@@ -2353,7 +2499,7 @@ void OroSettings_LoadClass(const char* cls)
 	sprintf_s(rel, "ORO\\%s.cfg", fn);
 	FILEHANDLE f = oapiOpenFile(rel, FILE_IN, CONFIG);
 	if (!f) {
-		oapiWriteLogV("ORO: vessel class %s has no saved settings - keeping the current ones"
+		OroLog(1, "ORO: vessel class %s has no saved settings - keeping the current ones"
 		              " (pilot: global).", cls);
 		return;
 	}
@@ -2376,11 +2522,11 @@ void OroSettings_LoadClass(const char* cls)
 		if (!*mb.perClass) continue;
 		const int nb = ReadTable(f, mb.tbl, mb.n);
 		*mb.fromClass = true;            // so leaving this hull puts the global block back
-		oapiWriteLogV("ORO: vessel class %s carries its OWN %s settings (%d of %d).",
+		OroLog(1, "ORO: vessel class %s carries its OWN %s settings (%d of %d).",
 		              cls, mb.name, nb, mb.n);
 	}
 	oapiCloseFile(f, FILE_IN);
-	oapiWriteLogV("ORO: vessel class %s - loaded %d of %d settings.", cls, n, NCLASSSET);
+	OroLog(1, "ORO: vessel class %s - loaded %d of %d settings.", cls, n, NCLASSSET);
 }
 
 // Swap in a WORLD's aurora numbers. Called when the aurora's target body changes.
@@ -2411,7 +2557,7 @@ void OroSettings_LoadBody(const char* body)
 	sprintf_s(rel, "ORO\\bodies\\%s.cfg", fn);
 	FILEHANDLE f = oapiOpenFile(rel, FILE_IN, CONFIG);
 	if (!f) {
-		oapiWriteLogV("ORO: %s has no aurora file (Config\\%s) - defaults restored, no curtains there.",
+		OroLog(1, "ORO: %s has no aurora file (Config\\%s) - defaults restored, no curtains there.",
 		              body, rel);
 		return;
 	}
@@ -2444,7 +2590,7 @@ void OroSettings_LoadBody(const char* body)
 	if (g_fx.auroraTiltX < -90.0f) g_fx.auroraTiltX = -90.0f; else if (g_fx.auroraTiltX > 90.0f) g_fx.auroraTiltX = 90.0f;
 	if (g_fx.auroraTiltY < -90.0f) g_fx.auroraTiltY = -90.0f; else if (g_fx.auroraTiltY > 90.0f) g_fx.auroraTiltY = 90.0f;
 
-	oapiWriteLogV("ORO: %s aurora - loaded %d of %d settings, activity %.2f.",
+	OroLog(1, "ORO: %s aurora - loaded %d of %d settings, activity %.2f.",
 	              body, n, NBODYSET, g_fx.auroraActivity);
 }
 
@@ -2584,6 +2730,10 @@ bool OroStockExhaustSupported() { return g_stockExSupported; }
 // Patch (ac): the BASE LIGHTS pill greys out wholesale without the patch (18b's rule).
 bool g_baseLightsSupported = false;
 bool OroBaseLightsSupported() { return g_baseLightsSupported; }
+// Patch (aj): the RINGS page greys out wholesale without it - CanSetRingLook checks BOTH
+// pointers, the look and the profile; one without the other is no ring at all.
+static bool g_ringsSupported = false;
+bool OroRingsSupported() { return g_ringsSupported; }
 
 // ---------------------------------------------------------------------------
 // Patch (y) bridge: the PARTICLES page's COPY STOCK button. The core pointer
@@ -2731,7 +2881,7 @@ OroModule::OroModule(HINSTANCE hDLL) : oapi::Module(hDLL)
 	// Settings come back ONCE, here - not per simulation start, which would throw
 	// away any tuning done earlier in the same Orbiter run.
 	OroSettings_Load();
-	oapiWriteLogV("ORO: module constructed.");
+	OroLog(0, "ORO: module constructed.");
 }
 
 OroModule::~OroModule()
@@ -2825,6 +2975,9 @@ OroModule::~OroModule()
 	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = 0.0f; }
 	if (pCore && pCore->CanSetBaseLights())     { pCore->SetBaseLights(false, 1.0f, 1.0f); blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f; }   // patch (ac): stock lights back
 	if (pCore && pCore->CanSetVCNightLight())   { pCore->SetVCNightLight(1.0f); vcNightPushed = -1.0f; g_fx.vcNightLive = 1.0f; }   // patch (ad): the cabin lit as stock
+	if (pCore && pCore->CanDeferVCHUD())        { pCore->SetDeferVCHUD(false); hudDeferPushed = -1; }   // A7: the HUD back in the cockpit pass
+	if (pCore && pCore->CanSetWaterMirror())    { pCore->SetWaterMirror(0.0f); waterPushed = -1.0f; }   // the water mirror off - stock: nothing without rain
+	{ extern void OroRings_ReturnAll(gcCore2*); OroRings_ReturnAll(pCore); }   // patch (aj): every ringed planet back to stock, the profiles dropped - both exit paths, invariant 18c
 	if (rainLtgLight && rainLtgLightV && oapiIsVessel(rainLtgLightV)) {
 		VESSEL* lv = oapiGetVesselInterface(rainLtgLightV);
 		if (lv) lv->DelLightEmitter(rainLtgLight);      // invariant 14: hand it back
@@ -2850,6 +3003,7 @@ OroModule::~OroModule()
 	if (pCore && pIPIPlasma) { pCore->ReleaseIPInterface(pIPIPlasma); pIPIPlasma = nullptr; }
 	if (pCore && pIPIEclipse) { pCore->ReleaseIPInterface(pIPIEclipse); pIPIEclipse = nullptr; }
 	if (pCore && pIPIGodRay) { pCore->ReleaseIPInterface(pIPIGodRay); pIPIGodRay = nullptr; }
+	if (pCore && pIPILens)   { pCore->ReleaseIPInterface(pIPILens);   pIPILens   = nullptr; }
 	if (pCore && pIPIGloom)  { pCore->ReleaseIPInterface(pIPIGloom);  pIPIGloom  = nullptr; }
 	if (hFrameTex)         { oapiDestroySurface(hFrameTex); hFrameTex = NULL; }
 	if (hBlurTex)          { oapiDestroySurface(hBlurTex);  hBlurTex  = NULL; }
@@ -2869,7 +3023,7 @@ OroModule::~OroModule()
 	// Reentry plasma lights are BORROWED from other vessels - hand back anything still held.
 	ReleaseReentry();
 
-	oapiWriteLogV("ORO: module destroyed.");
+	OroLog(0, "ORO: module destroyed.");
 }
 
 void OroModule::clbkSimulationStart(RenderMode mode)
@@ -2892,16 +3046,17 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	OroRain_ShieldReset();   // same rule: re-probe the shield mesh next storm (he
 	                         // iterates on the file between runs)
 	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = fogNearDens0 = 0.0f; }
+	{ extern void OroRings_Reset(); OroRings_Reset(); }   // patch (aj): profiles are per SESSION (OBJHANDLEs die with it) - never reuse one (23m)
 	blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f;   // patch (ac): the first push of the session is unconditional
 	                         // and the fog's anchor + envelope (patch aa): a crash must
 	                         // not leave last session's world anchored under this one
 	pCore = gcGetCoreInterface();
 	if (!pCore) {
-		oapiWriteLogV("ORO: D3D9Client interface NOT found - effects disabled (is D3D9Client the active graphics client?).");
+		OroLog(0, "ORO: D3D9Client interface NOT found - effects disabled (is D3D9Client the active graphics client?).");
 		return;
 	}
 
-	oapiWriteLogV("ORO: D3D9Client interface connected (gcGetCoreInterface OK). Render mode %d.", (int)mode);
+	OroLog(0, "ORO: D3D9Client interface connected (gcGetCoreInterface OK). Render mode %d.", (int)mode);
 
 	// Client capability probe: patch (d), the additive Sketchpad blend the plasma
 	// geometry draws with. PROBED BY BINDING since 2026-08-08 (invariant 18a):
@@ -2932,36 +3087,52 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		vcShadowLastRad = -1.0f;      // force the first push
 		// Patch (ad): the cabin at night - the same binding probe.
 		vcNightSupported = pCore->CanSetVCNightLight();
+		// ORO A7 (2026-09-10): the deferred VC HUD - a fresh client state each session, so
+		// the first sense pass pushes whatever the view wants.
+		hudDeferPushed = -1;
+		OroLog(1, "ORO: deferred VC HUD (A7, probed by binding) %s.",
+		              pCore->CanDeferVCHUD() ? "available - the HUD is composited after the windscreen drops"
+		                                     : "NOT available - the HUD stays inside the drop layer");
+		// 2026-09-10: the reflection over water - a fresh client state each session too.
+		waterPushed = -1.0f; waterSampT = -1e9; waterBody = NULL;
+		OroLog(1, "ORO: water mirror (probed by binding) %s.",
+		              pCore->CanSetWaterMirror() ? "available - open water reflects the vessel, rain or not"
+		                                         : "NOT available - the reflection needs rain");
+		// 2026-09-12: PLANETARY RINGS (patch aj) - probed by binding, BOTH pointers.
+		OroLog(1, "ORO: planetary rings (patch aj, probed by binding) %s.",
+		              pCore->CanSetRingLook() ? "available - ORO rings, the ring's shadow on the planet, ships shaded inside it"
+		                                      : "NOT available - stock rings");
+		g_ringsSupported = pCore->CanSetRingLook();
 		g_vcNightSupported = vcNightSupported;
 		vcNightPushed = -1.0f;
 		// Patch (n): per-vessel stock-exhaust suppression, probed by binding like the
 		// rest. The dialog's STOCK EXHAUST pill greys out without it (invariant 18b).
 		g_stockExSupported = pCore->CanSuppressExhaust();
-		oapiWriteLogV("ORO: client VC shadows (patch f) %s.",
+		OroLog(1, "ORO: client VC shadows (patch f) %s.",
 		              vcShadowSupported ? "available" : "NOT available");
-		oapiWriteLogV("ORO: VC night light (patch ad) %s.",
+		OroLog(1, "ORO: VC night light (patch ad) %s.",
 		              vcNightSupported ? "available - the CABIN AT NIGHT section is live" : "NOT available - section greyed");
-		oapiWriteLogV("ORO: stock exhaust suppression (patch n) %s.",
+		OroLog(1, "ORO: stock exhaust suppression (patch n) %s.",
 		              g_stockExSupported ? "available" : "NOT available");
 		// Patch (y): stock stream-spec readback for the COPY STOCK buttons.
 		g_prtSpecCore = pCore->CanGetExhaustStreamSpec() ? pCore : nullptr;
-		oapiWriteLogV("ORO: stream-spec readback (patch y) %s.",
+		OroLog(2, "ORO: stream-spec readback (patch y) %s.",
 		              g_prtSpecCore ? "available - COPY STOCK live"
 		                            : "NOT available - COPY STOCK greyed");
-		oapiWriteLogV("ORO: surface wetness (patch s) %s.",
+		OroLog(1, "ORO: surface wetness (patch s) %s.",
 		              pCore->CanSetSurfaceWetness() ? "available - rain can wet the ground"
 		                                            : "NOT available - rain falls on dry ground");
-		oapiWriteLogV("ORO: storm light (patch s part 2) %s.",
+		OroLog(1, "ORO: storm light (patch s part 2) %s.",
 		              pCore->CanSetStormLight() ? "available - overcast collapses the sun"
 		                                        : "NOT available - storms stay sunlit");
-		oapiWriteLogV("ORO: fog layers (patch aa) %s; snow cover %s.",
+		OroLog(1, "ORO: fog layers (patch aa) %s; snow cover %s.",
 		              pCore->CanSetFogLayer() ? "available - the FOG page is live"
 		                                      : "NOT available - FOG page inert",
 		              pCore->CanSetSnowCover() ? "plumbed (dormant)" : "NOT available");
 		g_baseLightsSupported = pCore->CanSetBaseLights();
-		oapiWriteLogV("ORO: base lights (patch ac) %s.",
+		OroLog(1, "ORO: base lights (patch ac) %s.",
 		              g_baseLightsSupported ? "available - the BASE LIGHTS pill is live" : "NOT available - pill greyed");
-		oapiWriteLogV("ORO: additive sketchpad blend (patch d, probed by binding) %s; gcAPIVer reads %u (diagnostic only, known-broken).",
+		OroLog(1, "ORO: additive sketchpad blend (patch d, probed by binding) %s; gcAPIVer reads %u (diagnostic only, known-broken).",
 		              padAdditive ? "available" : "NOT available (plasma will alpha-blend)", specs.gcAPIVer);
 	}
 
@@ -2996,7 +3167,7 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		}
 		g_bloomOn    = bloomOn;                     // dialog-visible mirrors
 		g_bloomKnown = bloomKnown;
-		oapiWriteLogV("ORO: client post-processing (Light glow) %s.",
+		OroLog(1, "ORO: client post-processing (Light glow) %s.",
 		              !bloomKnown ? "UNKNOWN - D3D9Client.cfg unreadable; assuming ON"
 		                          : (bloomOn ? "ON - plasma and bell reach white through the bloom"
 		                                     : "OFF - plasma will read hard-edged and the bell will read amber; "
@@ -3010,9 +3181,9 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	if (!renderProcRegistered) {
 		if (pCore->RegisterRenderProc(OroRenderProc, RENDERPROC_HUD_2ND, this)) {
 			renderProcRegistered = true;
-			oapiWriteLogV("ORO: render proc registered (RENDERPROC_HUD_2ND). Ctrl+G toggles the test tint.");
+			OroLog(1, "ORO: render proc registered (RENDERPROC_HUD_2ND). Ctrl+G toggles the test tint.");
 		} else {
-			oapiWriteLogV("ORO: WARNING - RegisterRenderProc failed; no frame draw.");
+			OroLog(0, "ORO: WARNING - RegisterRenderProc failed; no frame draw.");
 		}
 	}
 
@@ -3024,7 +3195,7 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	if (!preResolveRegistered) {
 		if (pCore->RegisterRenderProc(OroPreResolveProc, RENDERPROC_PRE_RESOLVE, this)) {
 			preResolveRegistered = true;
-			oapiWriteLogV("ORO: pre-resolve proc registered (RENDERPROC_PRE_RESOLVE, patch i). Fires only on a Build >= 260808 client.");
+			OroLog(1, "ORO: pre-resolve proc registered (RENDERPROC_PRE_RESOLVE, patch i). Fires only on a Build >= 260808 client.");
 		}
 	}
 
@@ -3037,7 +3208,7 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	if (!wetMirrorRegistered) {
 		if (pCore->RegisterRenderProc(OroWetMirrorProc, RENDERPROC_WET_MIRROR, this)) {
 			wetMirrorRegistered = true;
-			oapiWriteLogV("ORO: wet-mirror proc registered (RENDERPROC_WET_MIRROR, patch u). Fires only on a Build >= 260825 client, and only in the rain near the ground.");
+			OroLog(1, "ORO: wet-mirror proc registered (RENDERPROC_WET_MIRROR, patch u). Fires only on a Build >= 260825 client, and only in the rain near the ground.");
 		}
 	}
 
@@ -3077,9 +3248,9 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	if (!shutdownProcRegistered) {
 		if (pCore->RegisterGenericProc(OroShutdownProc, GENERICPROC_SHUTDOWN, this)) {
 			shutdownProcRegistered = true;
-			oapiWriteLogV("ORO: shutdown proc registered (GENERICPROC_SHUTDOWN) - scene-owned borrows returned before the scene is deleted.");
+			OroLog(1, "ORO: shutdown proc registered (GENERICPROC_SHUTDOWN) - scene-owned borrows returned before the scene is deleted.");
 		} else {
-			oapiWriteLogV("ORO: WARNING - GENERICPROC_SHUTDOWN registration failed; exhaust streams will be handed back too late.");
+			OroLog(0, "ORO: WARNING - GENERICPROC_SHUTDOWN registration failed; exhaust streams will be handed back too late.");
 		}
 	}
 
@@ -3105,16 +3276,23 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	if (!pXRSound) pXRSound = XRSound::CreateInstance("ORO");
 	rainSndLoaded = false;   // re-proven every session, never inherited
 	if (pXRSound && pXRSound->IsPresent()) {
-		oapiWriteLogV("ORO: XRSound %.2f connected.", pXRSound->GetVersion());
+		OroLog(1, "ORO: XRSound %.2f connected.", pXRSound->GetVersion());
 		if (!pXRSound->LoadWav(SND_HEARTBEAT, "XRSound\\ORO\\heartbeat.wav", XRSound::PlaybackType::Global))
-			oapiWriteLogV("ORO: heartbeat.wav not found - drop a WAV at XRSound\\ORO\\heartbeat.wav (heartbeat sound stays off until then).");
+			OroLog(0, "ORO: heartbeat.wav not found - drop a WAV at XRSound\\ORO\\heartbeat.wav (heartbeat sound stays off until then).");
 		// Scenario clips (Induce_*/Recover_*): one per INDUCE_SEQ entry, id SND_SCEN_BASE + i.
 		// Missing files are fine - that button just runs silent; the user adds them over time.
 		for (int i = 0; i < NSCEN; i++) {
 			char path[MAX_PATH];
 			sprintf_s(path, "XRSound\\ORO\\%s", INDUCE_SEQ[i].wav);
 			if (!pXRSound->LoadWav(SND_SCEN_BASE + i, path, XRSound::PlaybackType::Global))
-				oapiWriteLogV("ORO: scenario clip %s not found - that button runs silent.", INDUCE_SEQ[i].wav);
+				// ⚠️ LEVEL 2, NOT 0: five of the six clips were CANCELLED on 2026-08-13 -
+				// one clip is the design, not a partial delivery - so these five lines
+				// reported a DECISION as a defect in every tester's log, and a tester duly
+				// read them as one ("I didn't hear human sound... but maybe it's not an
+				// issue as described in Readme"). An absence that is by design is not a
+				// failure and must not survive at the quiet level. Open as H7 since
+				// 2026-08-15; the level system is what finally answers it.
+				OroLog(2, "ORO: scenario clip %s not found - that button runs silent.", INDUCE_SEQ[i].wav);
 		}
 		// The RAIN loops (tools/raingen.py). All-or-nothing: a crossfade missing one
 		// tier would leave a silent hole in the middle of the envelope, so one missing
@@ -3127,11 +3305,11 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 			char path[MAX_PATH];
 			sprintf_s(path, "XRSound\\ORO\\%s", RAIN_WAVS[i]);
 			if (!pXRSound->LoadWav(SND_RAIN_BASE + i, path, XRSound::PlaybackType::Global)) {
-				oapiWriteLogV("ORO: %s not found - rain sound disabled (visuals unaffected).", RAIN_WAVS[i]);
+				OroLog(0, "ORO: %s not found - rain sound disabled (visuals unaffected).", RAIN_WAVS[i]);
 				rainSndLoaded = false;
 			}
 		}
-		if (rainSndLoaded) oapiWriteLogV("ORO: rain sound loops loaded (3 tiers).");
+		if (rainSndLoaded) OroLog(1, "ORO: rain sound loops loaded (3 tiers).");
 		// ... and their MUFFLED interior twins (tools/rainmuffle.py, 2026-08-27).
 		// All-or-nothing like the exterior set; absent, the mixer falls back to the
 		// old inside-the-hull volume duck rather than half a crossfade.
@@ -3143,7 +3321,7 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 			if (!pXRSound->LoadWav(SND_RAIN_IN_BASE + i, path, XRSound::PlaybackType::Global))
 				rainSndInLoaded = false;
 		}
-		oapiWriteLogV("ORO: interior (muffled) rain tiers %s.",
+		OroLog(1, "ORO: interior (muffled) rain tiers %s.",
 		              rainSndInLoaded ? "loaded" : "missing - volume duck fallback");
 		// The THUNDER set (sourced from freesound - the credit ledger is
 		// XRSound\ORO\README.txt; leveled by tools/thunderprep.py). Per-file
@@ -3161,10 +3339,10 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 				sprintf_s(path, "XRSound\\ORO\\Thunder_%s_%d_in.wav", THUN_CLS[i / 3], (i % 3) + 1);
 				thunInLoaded[i] = pXRSound->LoadWav(SND_THUNDER_IN_BASE + i, path, XRSound::PlaybackType::Global);
 			}
-			oapiWriteLogV("ORO: thunder set - %d of %d files loaded.", nThun, (int)THUN_FILES);
+			OroLog(1, "ORO: thunder set - %d of %d files loaded.", nThun, (int)THUN_FILES);
 		}
 	} else {
-		oapiWriteLogV("ORO: XRSound not present - sounds disabled (visuals unaffected).");
+		OroLog(1, "ORO: XRSound not present - sounds disabled (visuals unaffected).");
 	}
 	// Fresh session, fresh mixer: no loop is playing yet, whatever a previous
 	// session's state said (the 23(m) sweep - state reset belongs at START).
@@ -3232,7 +3410,7 @@ void OroModule::clbkSimulationEnd()
 	reentryScanT      = 0.0;
 	reentryFullWarned = false;
 
-	oapiWriteLogV("ORO: simulation end.");
+	OroLog(0, "ORO: simulation end.");
 	// AFTER every release path above, so the delta between this line and the next
 	// session's "session start" is what ORO failed to give back.
 	OroLogMemory("session end, after release");
@@ -3390,6 +3568,9 @@ void OroModule::ReleaseDeviceResources()
 	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = 0.0f; }
 	if (pCore && pCore->CanSetBaseLights())     { pCore->SetBaseLights(false, 1.0f, 1.0f); blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f; }   // patch (ac): stock lights back
 	if (pCore && pCore->CanSetVCNightLight())   { pCore->SetVCNightLight(1.0f); vcNightPushed = -1.0f; g_fx.vcNightLive = 1.0f; }   // patch (ad): the cabin lit as stock
+	if (pCore && pCore->CanDeferVCHUD())        { pCore->SetDeferVCHUD(false); hudDeferPushed = -1; }   // A7: the HUD back in the cockpit pass
+	if (pCore && pCore->CanSetWaterMirror())    { pCore->SetWaterMirror(0.0f); waterPushed = -1.0f; }   // the water mirror off - stock: nothing without rain
+	{ extern void OroRings_ReturnAll(gcCore2*); OroRings_ReturnAll(pCore); }   // patch (aj): every ringed planet back to stock, the profiles dropped - both exit paths, invariant 18c
 	if (rainLtgLight && rainLtgLightV && oapiIsVessel(rainLtgLightV)) {
 		VESSEL* lv = oapiGetVesselInterface(rainLtgLightV);
 		if (lv) lv->DelLightEmitter(rainLtgLight);      // invariant 14: hand it back
@@ -3417,6 +3598,7 @@ void OroModule::ReleaseDeviceResources()
 	if (pCore && pIPIPlasma) { pCore->ReleaseIPInterface(pIPIPlasma); pIPIPlasma = nullptr; }
 	if (pCore && pIPIEclipse) { pCore->ReleaseIPInterface(pIPIEclipse); pIPIEclipse = nullptr; }
 	if (pCore && pIPIGodRay) { pCore->ReleaseIPInterface(pIPIGodRay); pIPIGodRay = nullptr; }
+	if (pCore && pIPILens)   { pCore->ReleaseIPInterface(pIPILens);   pIPILens   = nullptr; }
 	if (pCore && pIPIGloom)  { pCore->ReleaseIPInterface(pIPIGloom);  pIPIGloom  = nullptr; }
 	if (hFrameTex)         { oapiDestroySurface(hFrameTex); hFrameTex = NULL; }
 	if (hBlurTex)          { oapiDestroySurface(hBlurTex);  hBlurTex  = NULL; }
@@ -3503,6 +3685,27 @@ void OroModule::SenseView()
 	// The PLUME follows the same recipe (2026-08-29): RCS jets are visible from the
 	// flight deck, so the jet draws in the VC too, cut at the window frame per pixel.
 	plumeVC = rainVC;
+
+	// THE VC HUD COMBINER GOES LAST (ORO A7, 2026-09-10, client patch - gcCore's
+	// SetDeferVCHUD). Buck Rogers: "getting rain on the HUD". The combiner is drawn by
+	// the cockpit render into the very frame the drops resample, so its symbology was
+	// lensed with the world outside - and it is INSIDE the cabin, where no drop can
+	// reach it. Masking its pixels out of the drop layer cannot fix that (a drop BESIDE
+	// a glyph still lenses the glyph into itself; flown 2026-09-10, seen, reverted);
+	// only draw ORDER can. Armed whenever the addon is live in a VIRTUAL cockpit (no
+	// drop gate: the HUD belongs after the god rays too, and it stops feeding their
+	// brightness sampling for free - patch (t)'s bonus again), the client holds the
+	// group back and this proc draws it after the world effects (DrawOverlay's
+	// internal branch). Ctrl+G / disarm = stock order, the borrow returned; the two
+	// session exit paths clear it explicitly. Pushed on CHANGE (invariant 18).
+	{
+		const int want = (g_fx.masterArmed && oapiCameraInternal()
+		                  && oapiCockpitMode() == COCKPIT_VIRTUAL) ? 1 : 0;
+		if (pCore && pCore->CanDeferVCHUD() && want != hudDeferPushed) {
+			pCore->SetDeferVCHUD(want != 0);
+			hudDeferPushed = want;
+		}
+	}
 
 	// ⚠️ THE FLAT INTERNAL VIEWS, ON DIFFERENT TERMS (2026-08-25). A tester asked for the
 	// rain in the 2D panel and the glass cockpit, and the reason it was VC-only turns out
@@ -3879,10 +4082,16 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	// gate below like everything else that can ask for a resample.
 	UpdateEclipse();
 
-	// GOD RAYS: where the sun is on screen, and whether there is any air to scatter in.
-	// MUST follow UpdateEclipse - it reads g_fx.eclipseObsc so a transit or an eclipse
-	// takes the shafts with it, and reading last frame's value would lag the sky.
-	UpdateGodRays();
+	// THE SUN, then its two consumers. MUST follow UpdateEclipse - the snapshot reads
+	// g_fx.eclipseObsc, so a transit or an eclipse takes both effects with it, and
+	// reading last frame's value would lag the sky.
+	// UpdateSun sits ABOVE both pills on purpose (2026-09-12): it used to be the first
+	// half of UpdateGodRays, which returns immediately when the shafts are switched
+	// off - so the flare would have died with them. Two effects that share a value
+	// must not share a gate.
+	UpdateSun();
+	UpdateGodRays();      // how much light there is to SCATTER: air, elevation
+	UpdateLensFlare();    // ... and how CONCENTRATED it is: the view gate, the air fade
 
 	// AURORA: build the curtain triangles for this frame (main thread - invariant 1).
 	// Self-gates on enable/armed/atmospheric-planet-in-range. Additive geometry, no capture
@@ -3903,7 +4112,7 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	// window does; logged on CHANGE so that costs one line, not one per frame.
 	if (depthClipLogged != (depthClipOK ? 1 : 0)) {
 		depthClipLogged = depthClipOK ? 1 : 0;
-		oapiWriteLogV("ORO: client depth clip (patch g) %s.",
+		OroLog(1, "ORO: client depth clip (patch g) %s.",
 		              depthClipOK ? "available - aurora + VC plasma clip per pixel"
 		                          : "NOT available - screen-space overlay fallback");
 	}
@@ -3914,15 +4123,23 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	ipiDepthOK = pCore && pCore->CanSetIPISceneDepth() && pCore->HasDepthBuffer();
 	if (ipiDepthLogged != (ipiDepthOK ? 1 : 0)) {
 		ipiDepthLogged = ipiDepthOK ? 1 : 0;
-		oapiWriteLogV("ORO: client scene depth in IPI (patch h) %s.",
+		OroLog(1, "ORO: client scene depth in IPI (patch h) %s.",
 		              ipiDepthOK ? "available - raindrops on the VC glass"
 		                         : "NOT available - no drops on the glass");
 	}
-	// TEMPORARY DIAGNOSTIC (2026-08-26) - see glassDiag. One line a second while the rain
-	// is live, so a short VC flight says which link is open. Removed on sign-off.
-	if (rainIntensityLive > 0.002f && simt - glassDiagT > 1.0) {
+	// THE GLASS DIAGNOSTIC - see glassDiag. One line a second saying which link in the
+	// windscreen chain is open, which is the question a screenshot cannot answer.
+	// ⚠️ GATED ON MASK DEBUG SINCE 2026-09-12, and that is a fix rather than tidying: it
+	// used to fire for EVERY user whenever the rain was live, so a twenty-minute flight
+	// in rain buried ~1200 lines of bit-flags in the log a tester then sends us. ORO
+	// spends a client patch (q) on keeping Orbiter.log trustworthy; filling it with our
+	// own scaffolding undoes that. Kept rather than deleted for the same reason the
+	// slider was - it is the other half of the same instrument - and put behind the
+	// control that already means "I am debugging the glass", so asking a tester to
+	// reproduce with Mask Debug on now yields the picture AND the log line together.
+	if (g_fx.rainGlassDbg > 0.5f && rainIntensityLive > 0.002f && simt - glassDiagT > 1.0) {
 		glassDiagT = simt;
-		oapiWriteLogV("ORO GLASS DIAG: 0x%04X entry[call%d I%d ipi%d core%d tex%d gloom%d vgate%d]"
+		OroLog(2, "ORO GLASS DIAG: 0x%04X entry[call%d I%d ipi%d core%d tex%d gloom%d vgate%d]"
 		              " gate[vc%d ok%d ipiD%d sld%d vh%d cam%d bind%d]"
 		              " Irender %.3f Ipre %.3f dr %.3f dbg %.0f",
 		              glassDiag,
@@ -3968,6 +4185,10 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	PushBaseLights();          // the BASE LIGHTS pill + glow (patch ac), on change
 	SenseVCNight();            // the cabin at night (patch ad): the sun at the camera, every frame
 	PushVCNight();             //   ... and the scale to the client, on change
+	SenseBody();               // which world's per-body file is loaded - BEFORE SenseRings, which
+	                           //   asks that question (and behind no effect's pill: 2026-09-12)
+	SenseRings();              // PLANETARY RINGS (patch aj): which ringed world, the readout - every frame
+	PushRings();               //   profiles + looks to the client, on change
 	UpdateRainSound();         // the loop crossfade rides the envelope just published
 	UpdateThunder();           // flash events -> delayed one-shots (dist/340 s)
 	UpdateRainFlashLight();    // rain lightning's borrowed scene light - unconditional,
@@ -4151,6 +4372,9 @@ bool OroModule::clbkProcessKeyboardImmediate(char kstate[256], bool simRunning)
 	PushBaseLights();
 	SenseVCNight();                         // the cabin at night, same law (patch ad)
 	PushVCNight();
+	SenseBody();                            // the loaded per-body world, same law (2026-09-12)
+	SenseRings();                           // the rings' readout + target, same law (patch aj)
+	PushRings();
 	return false;                           // never consume - see the note above
 }
 
@@ -4161,7 +4385,7 @@ bool OroModule::clbkProcessKeyboardBuffered(DWORD key, char kstate[256], bool si
 	// 'G' (landing gear on most vessels) still passes through untouched.
 	if (key == OAPI_KEY_G && KEYMOD_CONTROL(kstate)) {
 		g_fx.masterArmed = !g_fx.masterArmed;
-		oapiWriteLogV("ORO: master %s.", g_fx.masterArmed ? "ARMED" : "SAFE");
+		OroLog(1, "ORO: master %s.", g_fx.masterArmed ? "ARMED" : "SAFE");
 		return true;
 	}
 	return false;
@@ -4182,7 +4406,7 @@ void OroModule::EnsureIPI()
 	// stay dormant (the additive VISION effects still work; only the premium
 	// resample effects need the patch).
 	if (!pCore->CanCaptureBackBuffer()) {
-		oapiWriteLogV("ORO: client exposes no backbuffer capture (unpatched D3D9Client?) - premium effects (grey-out, blur) OFF.");
+		OroLog(1, "ORO: client exposes no backbuffer capture (unpatched D3D9Client?) - premium effects (grey-out, blur) OFF.");
 		return;
 	}
 	ipiReady = true;   // the client can hand us the live frame
@@ -4200,9 +4424,10 @@ void OroModule::EnsureIPI()
 	pIPIPlasma  = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSPlasma", NULL, NULL);
 	pIPIEclipse = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSEclipse", NULL, NULL);
 	pIPIGodRay  = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSGodRay", NULL, NULL);
+	pIPILens    = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSLensFlare", NULL, NULL);
 	pIPIGloom   = pCore->CreateIPInterface("Modules/ORO/orofx.hlsl", "PSGloom",  NULL, NULL);
 
-	oapiWriteLogV("ORO: premium IPI pipeline ready - grey-out %s, blur %s, aberration %s, swim %s, tilt %s, shimmer %s, plasma %s, eclipse %s, god rays %s, gloom %s.",
+	OroLog(1, "ORO: premium IPI pipeline ready - grey-out %s, blur %s, aberration %s, swim %s, tilt %s, shimmer %s, plasma %s, eclipse %s, god rays %s, lens flare %s, gloom %s.",
 	              pIPIGrey   ? "live" : "FAILED (shader compile?)",
 	              pIPIBlur   ? "live" : "FAILED (shader compile?)",
 	              pIPIChroma ? "live" : "FAILED (shader compile?)",
@@ -4212,6 +4437,7 @@ void OroModule::EnsureIPI()
 	              pIPIPlasma ? "live" : "FAILED (shader compile?)",
 	              pIPIEclipse ? "live" : "FAILED (shader compile?)",
 	              pIPIGodRay ? "live" : "FAILED (shader compile?)",
+	              pIPILens   ? "live" : "FAILED (shader compile?)",
 	              pIPIGloom  ? "live" : "FAILED (shader compile?)");
 }
 
@@ -4339,7 +4565,7 @@ void OroModule::EnsureFrameTex()
 		if (hFrameTex) { oapiDestroySurface(hFrameTex); hFrameTex = NULL; }
 		if (hBlurTex)  { oapiDestroySurface(hBlurTex);  hBlurTex  = NULL; }
 		texW = texH = 0;
-		oapiWriteLogV("ORO: oapiCreateSurfaceEx(%ux%u) for premium capture FAILED - grey-out/blur OFF this size.", viewW, viewH);
+		OroLog(0, "ORO: oapiCreateSurfaceEx(%ux%u) for premium capture FAILED - grey-out/blur OFF this size.", viewW, viewH);
 	}
 }
 
@@ -5041,7 +5267,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 	// any ORO code. Requires the patched client, Build >= 260725.)
 	static bool loggedOnce = false;
 	if (!loggedOnce) {
-		oapiWriteLogV("ORO: DrawOverlay first invocation - render callback is live.");
+		OroLog(1, "ORO: DrawOverlay first invocation - render callback is live.");
 		loggedOnce = true;
 	}
 
@@ -5070,6 +5296,7 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		// the eye has just decided the brightness of, so they must follow the eclipse
 		// rather than precede it (a shaft does not dim because you are adapting - it is
 		// part of what you are adapting TO).
+		BuildSunScreen();      // shared with the lens flare below (2026-09-12)
 		BuildGodRayScreen();   // render-path since 2026-08-15 (the pause fix)
 		DrawGodRayPass();
 
@@ -5143,6 +5370,19 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		// cosmetic; both are light sources the eclipse's eye need not protect).
 		BuildLightningGeometry();
 		if (ltgActive) DrawLightningPoly(pSkp);
+
+		// THE LENS FLARE, LAST OF ALL, and that is the effect's own logic rather than a
+		// scheduling convenience. Everything above this line happens in the WORLD, in
+		// front of the camera: the eclipse's light, the shafts scattering in the air, the
+		// heat haze off a plume, the plasma, the curtains, the storms. A flare happens
+		// INSIDE the lens, so all of it has to be in the image before the glass gets to
+		// smear it - and as a bonus the god ray march can no longer find our ghosts and
+		// draw shafts out of them.
+		// EXTERNAL ONLY, by his ruling and by physics: a healthy eye has no lens elements,
+		// so there is no counterpart to this in any of the three cockpit views. That is
+		// also why there is no call in the internal branch below - not an omission.
+		BuildLensFlareScreen();
+		DrawLensFlarePass();
 		return;   // nothing physiological outside the cockpit
 	}
 
@@ -5218,8 +5458,24 @@ void OroModule::DrawOverlay(oapi::Sketchpad* pSkp)
 		// GOD RAYS - world light too, and they come through the window like anything
 		// else out there, so the physiological stack below treats them as scenery. After
 		// the eclipse for the reason given at the external call site.
+		// NO LENS FLARE HERE, deliberately: you are looking through the pilot's eyes,
+		// and an eye has no lens elements to bounce light between. His ruling, and the
+		// one that makes every awkward case (VC glass, HUD ordering) disappear.
+		BuildSunScreen();      // shared, though only the shafts consume it in here
 		BuildGodRayScreen();   // render-path since 2026-08-15 (the pause fix)
 		DrawGodRayPass();
+
+		// THE VC HUD GOES HERE (ORO A7, 2026-09-10 - client-deferred, see gcCore's
+		// SetDeferVCHUD and the arm in the sense pass). Everything ABOVE this line is the
+		// WORLD seen through the glass: the eclipse's light, the storm and its drops on
+		// the canopy, the sun's shafts. The combiner is an instrument INSIDE the cabin, so
+		// it is composited now - crisp over the lensed world - and everything BELOW (swim,
+		// tilt, blur, aberration, grey-out, the washes) is the EYE, which sees the
+		// instrument exactly as it sees the world: a blackout still takes the HUD with it.
+		// A no-op when nothing was deferred; the client draws it at the end of the stage
+		// on its own if this line is never reached. A client call, not an oapi one
+		// (invariant 1 holds).
+		if (pCore && pCore->CanDeferVCHUD()) pCore->DrawDeferredVCHUD();
 
 		// PERIPHERAL SWIM - a woozy periphery-weighted UV warp. First in the stack, so
 		// the geometric distortion happens before the other resamples process the frame.
@@ -5734,7 +5990,7 @@ namespace {
 		// which would therefore hide a leak completely).
 		MEMORYSTATUSEX ms; ZeroMemory(&ms, sizeof(ms)); ms.dwLength = sizeof(ms);
 		GlobalMemoryStatusEx(&ms);
-		oapiWriteLogV("ORO MEM [%s]: private %u MB, working set %u MB, "
+		OroLog(1, "ORO MEM [%s]: private %u MB, working set %u MB, "
 		              "process address space free %u MB of %u MB.",
 		              when,
 		              (unsigned)(pmc.PrivateUsage    / (1024 * 1024)),
@@ -5763,7 +6019,7 @@ namespace {
 		OroCrashFile(line);
 
 		sprintf_s(line, "ORO: *** %s *** stack follows (module+offset):", what);
-		oapiWriteLog(line);
+		OroLog(1, line);
 		OroCrashFile(line);
 		for (USHORT i = 0; i < n; i++) {
 			HMODULE hm = NULL;
@@ -5778,7 +6034,7 @@ namespace {
 			}
 			sprintf_s(line, "ORO:   [%02u] %s + 0x%08X", (unsigned)i, mod,
 			          (unsigned)((BYTE*)fr[i] - (BYTE*)hm));
-			oapiWriteLog(line);
+			OroLog(1, line);
 			OroCrashFile(line);
 		}
 	}
@@ -5818,17 +6074,17 @@ namespace {
 		char line[512], frame[MAX_PATH + 32];
 		const LONG seen = g_throwSeq;
 		sprintf_s(line, "ORO: last C++ throws seen (%d total this run), newest first:", (int)seen);
-		oapiWriteLog(line); OroCrashFile(line);
+		OroLog(1, line); OroCrashFile(line);
 
 		const int lim = (seen < 4) ? (int)seen : 4;
 		for (int k = 0; k < lim; k++) {
 			const ThrowRec& r = g_throws[(seen - k) & 3];
 			sprintf_s(line, "ORO:  throw -%d  type: %s", k, r.type[0] ? r.type : "(unknown)");
-			oapiWriteLog(line); OroCrashFile(line);
+			OroLog(1, line); OroCrashFile(line);
 			for (USHORT i = 0; i < r.n; i++) {
 				OroFrameStr(r.fr[i], frame, sizeof(frame));
 				sprintf_s(line, "ORO:    [%02u] %s", (unsigned)i, frame);
-				oapiWriteLog(line); OroCrashFile(line);
+				OroLog(1, line); OroCrashFile(line);
 			}
 		}
 
@@ -5860,13 +6116,13 @@ DLLCLBK void InitModule(HINSTANCE hDLL)
 		(char*)"ORO control",
 		(char*)"Open the ORO immersion control panel.",
 		OpenOroDlgClbk, NULL);
-	oapiWriteLogV("ORO: InitModule - registered global module + custom command.");
+	OroLog(0, "ORO: InitModule - registered global module + custom command.");
 }
 
 DLLCLBK void ExitModule(HINSTANCE hDLL)
 {
 	// Per the oapiRegisterModule contract, the DLL owns the instance and deletes it here.
-	oapiWriteLogV("ORO: ExitModule.");
+	OroLog(0, "ORO: ExitModule.");
 	OroDlg_Close();
 	oapiUnregisterCustomCmd(g_customCmd);
 	delete g_oro;

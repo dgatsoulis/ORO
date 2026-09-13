@@ -47,6 +47,7 @@
 // ============================================================================
 
 #include "OroModule.h"
+#include "OroLog.h"
 #include "OroState.h"
 #include <math.h>
 
@@ -310,12 +311,61 @@ namespace {
 	bool    s_aurPoolLogged = false;
 }
 
+// ----------------------------------------------------------------------------
+// WHICH WORLD'S PER-BODY FILE IS LOADED - and it is NOT any one effect's business.
+// ----------------------------------------------------------------------------
+// Config\ORO\bodies\<name>.cfg is SHARED: the aurora's curtains, the orbital
+// lightning's storms, and (2026-09-12) the rings' three trims all live in the one
+// file. But until now the identify-and-load ran ONLY inside UpdateAurora and
+// UpdateLightning, and BOTH sit behind their own pill:
+//     UpdateAurora     if (!masterArmed || !auroraEnabled) return;   <- before the load
+//     UpdateLightning  if (!masterArmed || !ltgEnabled)    return;   <- before the load
+// So which world's settings were loaded depended on which effects happened to be
+// switched on. He found the rings' face of it on 2026-09-12 - "the pill on and off
+// button of the aurora effects how the rings look" - and it did: at Saturn the
+// lightning bows out anyway (no cloud layer, so it returns at the HASCLOUDS gate),
+// which left the AURORA'S PILL as the only thing that could load Saturn's file. With
+// it off, no world was ever loaded and the ring trims fell back to neutral.
+//
+// He is right that the two should be independent, and the honest fix is not to make
+// the rings a third loader with a fourth opinion about which world we are at - two
+// finders that can name DIFFERENT bodies would thrash the loaded state every frame,
+// which is the trap OroLightning.cpp:730 already documents. Instead the question
+// moves OUT of every effect: ONE finder, run EVERY FRAME, behind no gate at all.
+// The two existing calls stay where they are as harmless no-ops.
+//
+// Runs from the pre-step AND the keyboard tick (the SenseView/SenseRain law: what
+// SENSES the world runs every frame, what EVOLVES over time does not) so the loaded
+// settings follow the camera while the sim is paused. Idempotent by construction -
+// OroSettings_LoadBody returns immediately unless the name actually changed - which
+// is what makes the double call free.
+//
+// !! Out of range does NOT clear it. There is exactly one set of per-body values live
+// at a time and it is what the panel edits; blanking them on the way out of a system
+// would leave the sliders editing nothing.
+// ----------------------------------------------------------------------------
+void OroModule::SenseBody()
+{
+	OBJHANDLE hP = FindAuroraBody();
+	if (!hP) return;
+	const double R = oapiGetSize(hP);
+	if (R < 1.0) return;
+	// oapiCameraGlobalPos, not the pre-step snapshot: this has to be true while paused,
+	// and the snapshot is only refreshed by clbkPreStep, which pause does not run.
+	VECTOR3 cam; oapiCameraGlobalPos(&cam);
+	VECTOR3 O;   oapiGetGlobalPos(hP, &O);
+	if (length(O - cam) > 40.0 * R) return;        // too far to be "the world you are at"
+	char nm[32];
+	oapiGetObjectName(hP, nm, sizeof(nm));
+	OroSettings_LoadBody(nm);
+}
+
 void OroModule::UpdateAurora()
 {
 	// The render path's deferred warning, written here where oapi is legal.
 	if (s_aurPoolFull && !s_aurPoolLogged) {
 		s_aurPoolLogged = true;
-		oapiWriteLogV("ORO: aurora triangle pool FULL (%d tri) - curtains are being clipped. "
+		OroLog(0, "ORO: aurora triangle pool FULL (%d tri) - curtains are being clipped. "
 		              "Lower Ribbons or Thickness.", AUR_MAX_TRI);
 	}
 
@@ -356,6 +406,10 @@ void OroModule::UpdateAurora()
 	// target body changes. Same pattern as the per-vessel-class load on a focus change, and
 	// cheap for the same reason: the compare is a string already in memory and the read only
 	// fires on an actual change. A world with no file gets the built-in DEFAULTS back.
+	// 2026-09-12: the load itself now belongs to SenseBody() above, which runs every frame
+	// behind no effect's pill - this call is the no-op that proves it already happened.
+	// `auroraBody` stays the AURORA'S READOUT name, cleared whenever the curtains are not in
+	// play, which is why it must not be what another effect asks "which world is loaded".
 	OroSettings_LoadBody(g_fx.auroraBody);
 
 	// ---- from here on it is only about DRAWING -------------------------------

@@ -22,14 +22,21 @@
     <ClCompile Include="OroRain.cpp" />
     <ClCompile Include="OroFog.cpp" />
     <ClCompile Include="OroVapour.cpp" />
+    <ClCompile Include="OroTree.cpp" />
     <ClCompile Include="OroPlume.cpp" />
     <ClCompile Include="OroBell.cpp" />
     <ClCompile Include="OroParticles.cpp" />
+    <ClCompile Include="OroDDS.cpp" />
+    <ClCompile Include="OroRingProfile.cpp" />
+    <ClCompile Include="OroRings.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="OroModule.h" />
     <ClInclude Include="OroDialog.h" />
     <ClInclude Include="OroState.h" />
+    <ClInclude Include="OroTree.h" />
+    <ClInclude Include="OroDDS.h" />
+    <ClInclude Include="OroRingProfile.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>

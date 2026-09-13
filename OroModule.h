@@ -126,6 +126,10 @@ public:
 
 	// The two SENSING halves, split out 2026-08-24 so they can run while paused. The rule
 	// they embody: WHAT SENSES THE WORLD RUNS EVERY FRAME, WHAT EVOLVES OVER TIME DOES NOT.
+	void SenseBody();                       // which world's per-body file is loaded (2026-09-12).
+	                                        // Defined in OroAurora.cpp beside the finder; behind
+	                                        // NO effect's pill, because Config\ORO\bodies\<x>.cfg
+	                                        // is shared by the aurora, the lightning AND the rings.
 	void SenseView();                       // view/cockpit domain gates + viewport size
 	void SenseRain();                       // where the storm is relative to the camera
 	void SenseMarker();                     // Phase B: validate the header-row thruster
@@ -501,6 +505,11 @@ private:
 	                                         // COCKPIT (reentryVC toggle && COCKPIT_VIRTUAL);
 	                                         // computed in clbkPreStep like the other gates
 	bool     rainVC = false;                 // 2026-08-23: the RAIN in the VIRTUAL cockpit
+	int      hudDeferPushed = -1;            // ORO A7 (2026-09-10): the client-side "hold the
+	                                         // VC HUD back" arm as last PUSHED (1/0; -1 =
+	                                         // never, so the first sense pass pushes). Client
+	                                         // state, pushed on change (invariant 18), cleared
+	                                         // on every exit path like the night light.
 	bool plumeVC = false;   // ORO 2026-08-29: the jet in the VIRTUAL COCKPIT - RCS made
 	                        // "your own engines are behind the cockpit" false (the OMS
 	                        // pods sit outside the aft windows). rainVC's recipe: VC +
@@ -761,9 +770,59 @@ private:
 	// by the time we capture, so the shader's light source and its occlusion both
 	// arrive for free. Everything below is computed on the MAIN thread and read by
 	// the render path (invariant 1).
+	// THE SUN ITSELF IS SHARED (2026-09-12), and deliberately sits ABOVE both effects'
+	// pills: it used to live inside UpdateGodRays, which returns on its first line when
+	// the shafts are switched off - so the lens flare would have died whenever the god
+	// rays did. The rings' lesson of the same week: two effects that share a value must
+	// not share a gate. UpdateSun is the oapi half, BuildSunScreen the render-path half.
+	void  UpdateSun();          // MAIN thread: star, air at the camera, elevation, eclipse
+	void  BuildSunScreen();     // RENDER PATH: where the sun lands on screen (patch (k))
+	float sunU       = 0.5f;    // sun in UV; MAY lie outside [0,1] - consumers decide
+	float sunV       = 0.5f;
+	bool  sunScrValid = false;  // false = no star / no camera / behind the camera plane
+	const char* sunScrWhy = ""; // ... and which of those, for the readouts
+
 	void  UpdateGodRays();      // MAIN thread: the light budget (air / elevation / eclipse)
 	void  BuildGodRayScreen(); // RENDER PATH: where the sun is on screen (2026-08-15)
 	void  DrawGodRayPass();     // the IPI resample; self-gating, called from both branches
+
+	// --- THE LENS FLARE (OroGodRays.cpp + PSLensFlare, 2026-09-12) --------
+	// EXTERNAL VIEWS ONLY - his ruling, and a physical one: a flare is made between the
+	// elements of a LENS and a healthy eye has none, so through the pilot's eyes there
+	// is no flare and through a camera there is. Reads the sun's concentration straight
+	// out of the captured frame (the client has already drawn and occluded the disc), so
+	// it carries no brightness rule of its own - which is what keeps it clear of the
+	// 2026-09-01 sun-disc graveyard, where every such rule misread haze as sunset.
+	void  UpdateLensFlare();       // MAIN thread: view gate, the air fade, the eclipse
+	void  BuildLensFlareScreen();  // RENDER PATH: screen fade + whether the probe is valid
+	void  DrawLensFlarePass();     // the IPI resample; EXTERNAL branch only
+	float lfSunU     = 0.5f;    // the same sun, its own fade band (much wider - a lens
+	float lfSunV     = 0.5f;    //   still ghosts with the source just out of shot)
+	float lfFade     = 0.0f;    // 0..1 screen proximity x air x eclipse
+	float lfSamp     = 0.0f;    // 0..1 how much the shader's contrast probe may be
+	                            //   trusted: 0 once the disc's UV is so near the frame
+	                            //   edge that the probe's ring would clamp
+	bool  lfActive   = false;   // is there anything to draw this frame?
+
+	// --- PLANETARY RINGS (OroRings.cpp, 2026-09-12, client patch aj) ------
+	// ORO draws NOTHING here - invariant 18's category: it derives one radial profile
+	// per ringed planet (OroRingProfile), hands the client the profile and a look, and
+	// the client's ring pass, planet pass and per-object sun do the rest. SenseRings runs
+	// EVERY frame (pre-step AND the keyboard tick - the SenseView/SenseRain law), so the
+	// readout is alive while paused; PushRings pushes on CHANGE (client state). Every
+	// ringed planet within range gets a push - its own derived profile, the tuned trims
+	// when it is the body whose per-body file is loaded (OroSettings_Body()), neutral trims
+	// otherwise - so nothing regresses to stock while the pill is on.
+	void  SenseRings();         // MAIN thread, every frame: which ringed planet, the readout
+	void  PushRings();          // MAIN thread: profiles + looks to the client, on change
+
+	// ROUND 2 (2026-09-12) - THE CLOSE-UP: grooves and grain in the SHEET'S OWN TEXTURE,
+	// faded in octave by octave with each pixel's camera distance. That lives in the
+	// client's ring shader; OroRings.cpp feeds it the amplitude and the grain's anchor
+	// through the look's lanes 4..11, and ORO still draws nothing. (A physical boulder
+	// swarm was built, flown twice and reverted; then a dust halo ORO drew itself and
+	// bright specks in the texture were built, flown five times and cut by him -
+	// RINGS_PLAN.md 11.8-11.9 and 12.8.)
 	float grSunU     = 0.5f;    // sun position in UV - MAY LIE OUTSIDE [0,1]: the shafts
 	float grSunV     = 0.5f;    //   still converge correctly on an off-screen source, and
 	                            //   grFade is what retires the effect before it degrades
@@ -917,6 +976,11 @@ private:
 	// of state, frozen under pause because animT is.
 	float   rainSheetPh  = 0.0f;
 	float   rainSheetPhT = -1.0f;           // last animT the integral advanced to
+	float   rainGlassShear  = 0.0f;         // 0..1 how hard the airflow is stripping
+	                                        //   standing drops off the pane, from DYNAMIC
+	                                        //   PRESSURE (so it is honest at altitude):
+	                                        //   drops thin out, runners multiply, and the
+	                                        //   film comes up. Triage A4, 2026-09-12.
 	float   rainGlassRunMag = 9.81f;        // |gravity + airflow| at the glass - the
 	                                        //   runners' speed source (25e: bound to the
 	                                        //   physics, not to a hull axis or a knob)
@@ -927,8 +991,9 @@ private:
 	float   rainGlassRunPh  = 0.0f;
 	float   rainGlassRunPhT = -1.0f;        // last animT the integral advanced to
 	bool    rainGlassOK = false;            // the sensing succeeded this frame
-	// TEMPORARY DIAGNOSTIC (2026-08-26) - the render path cannot log (invariant 1), so
-	// DrawGloomPass records and clbkPreStep writes the line. Out once the drops work.
+	// THE GLASS DIAGNOSTIC - the render path cannot log (law 1), so DrawGloomPass records
+	// bits here and clbkPreStep writes the line. Gated on Mask Debug, so it costs a few
+	// ORs per frame and nothing in the log unless someone is actually debugging glass.
 	int     glassDiag   = 0;
 	float   glassDiagDr = 0.0f;
 	float   glassDiagI  = -1.0f;            // the intensity the RENDER PATH sees
@@ -1152,6 +1217,15 @@ private:
 	float   grainSizePushed = -1.0f;        // last grain size handed to the client
 	float   reflBlurPushed  = -1.0f;        // last reflection-blur amount handed to the client
 
+	// THE REFLECTION OVER WATER (2026-09-10, his ask: "always on when the vessel is over a
+	// water surface"). Once a second the planet's own water mask (Mask.tree, the shared
+	// OroTree reader) is sampled under the FOCUS vessel - the point the client's mirror
+	// plane is anchored to - and the fraction is pushed to the client on change
+	// (gcCore::SetWaterMirror, guard #21). 1 = open sea, 0 = inland, soft at a coast.
+	float     waterUnder  = 0.0f;           // last sample, 0..1
+	double    waterSampT  = -1e9;           // sim time of that sample
+	OBJHANDLE waterBody   = NULL;           // the body it was taken on (a switch resets it)
+	float     waterPushed = -1.0f;          // last value handed to the client
 	float   wetPushed   = -1.0f;            // last value handed to the client, so the push
 	                                        //   happens ON CHANGE and not every frame - it is
 	                                        //   client STATE, not a frame parameter
@@ -1532,6 +1606,8 @@ private:
 	gcIPInterface* pIPIPlasma  = nullptr;// PSPlasma (reentry cockpit glow, INTERNAL view); per session
 	gcIPInterface* pIPIEclipse = nullptr;// PSEclipse (shadow dim + dark adaptation, BOTH views); per session
 	gcIPInterface* pIPIGodRay  = nullptr;// PSGodRay (crepuscular shafts, BOTH views); per session
+	gcIPInterface* pIPILens    = nullptr;// PSLensFlare (the camera's own artefact, EXTERNAL
+	                                     //   only - a healthy eye has no lens elements)
 	gcIPInterface* pIPIGloom   = nullptr;// PSGloom  (the overcast, EXTERNAL only); per session
 	bool           ipiTried  = false;    // one-shot creation guard (don't retry failed compiles every frame)
 	bool           ipiReady  = false;    // the client exposes backbuffer capture (patch b present)

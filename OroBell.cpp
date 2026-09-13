@@ -49,6 +49,7 @@
 // ============================================================================
 
 #include "OroModule.h"
+#include "OroLog.h"
 #include "OroState.h"
 #include <stdio.h>
 #include <string.h>
@@ -265,7 +266,7 @@ namespace {
 						c.mat[fam] = pendMat - 1;        // -1 when the line was absent/0
 					}
 					else if (pendMat - 1 != c.mat[fam])
-						oapiWriteLogV("ORO bell: extra %s group %d uses material %d - the family drives material %d only.",
+						OroLog(1, "ORO bell: extra %s group %d uses material %d - the family drives material %d only.",
 						              FAM_NAME[fam], grpIdx, pendMat, c.mat[fam] + 1);
 					if (pendGim && c.nGim < BELL_GIM_MAX) {
 						BellGim& G = c.gim[c.nGim++];
@@ -276,7 +277,7 @@ namespace {
 					}
 				}
 				else if (pendGim)
-					oapiWriteLogV("ORO bell: GIMBAL on group %d without a family label - ignored.", grpIdx);
+					OroLog(1, "ORO bell: GIMBAL on group %d without a family label - ignored.", grpIdx);
 				grpIdx++;
 				pendLabel[0] = 0;
 				pendMat = -1;
@@ -289,16 +290,16 @@ namespace {
 		for (int k = 0; k < BELL_NFAM; k++) {
 			if (c.grp[k] < 0) continue;
 			if (c.mat[k] < 0) {
-				oapiWriteLogV("ORO bell: group %s has no MATERIAL line - family disabled.", FAM_NAME[k]);
+				OroLog(1, "ORO bell: group %s has no MATERIAL line - family disabled.", FAM_NAME[k]);
 				c.grp[k] = -1;
 				continue;
 			}
 			if (c.mat[k] < nMatNames && _stricmp(matNames[c.mat[k]], FAM_NAME[k]) != 0)
-				oapiWriteLogV("ORO bell: group %s uses material '%s' (expected '%s') - driving it anyway.",
+				OroLog(1, "ORO bell: group %s uses material '%s' (expected '%s') - driving it anyway.",
 				              FAM_NAME[k], matNames[c.mat[k]], FAM_NAME[k]);
 			for (int j = 0; j < k; j++)
 				if (c.grp[j] >= 0 && c.mat[j] == c.mat[k])
-					oapiWriteLogV("ORO bell: %s and %s share material %d - it will follow the hotter of the two.",
+					OroLog(1, "ORO bell: %s and %s share material %d - it will follow the hotter of the two.",
 					              FAM_NAME[j], FAM_NAME[k], c.mat[k] + 1);
 		}
 		return true;
@@ -484,27 +485,27 @@ void OroModule::UpdateBellGlow(double simdt)
 					for (int gi = 0; gi < s_cfg.nGim; gi++) {
 						if (DeriveGimGeom(s_cfg.hTmpl, s_cfg.gim[gi])) {
 							nGimOk++;
-							oapiWriteLogV("ORO bell: gimbal group %d (%s): axis (%.3f, %.3f, %.3f), pivot (%.3f, %.3f, %.3f)%s.",
+							OroLog(1, "ORO bell: gimbal group %d (%s): axis (%.3f, %.3f, %.3f), pivot (%.3f, %.3f, %.3f)%s.",
 							              s_cfg.gim[gi].grp, FAM_NAME[s_cfg.gim[gi].fam],
 							              s_cfg.gim[gi].axis.x, s_cfg.gim[gi].axis.y, s_cfg.gim[gi].axis.z,
 							              s_cfg.gim[gi].pivot.x, s_cfg.gim[gi].pivot.y, s_cfg.gim[gi].pivot.z,
 							              s_cfg.gim[gi].hasOvr ? " [authored pivot]" : "");
 						} else {
-							oapiWriteLogV("ORO bell: gimbal group %d - axis/pivot derivation failed, group stays static.",
+							OroLog(0, "ORO bell: gimbal group %d - axis/pivot derivation failed, group stays static.",
 							              s_cfg.gim[gi].grp);
 							s_cfg.gim[gi].grp = -1;
 						}
 					}
 					if (nGimOk) sprintf_s(s_cfg.info, "bell: %s (%d gimbal)", fam[0] ? fam : "?", nGimOk);
 					else        sprintf_s(s_cfg.info, "bell: %s", fam[0] ? fam : "no usable groups");
-					oapiWriteLogV("ORO bell: %s -> %s.", name, s_cfg.info);
+					OroLog(1, "ORO bell: %s -> %s.", name, s_cfg.info);
 				} else {
 					sprintf_s(s_cfg.info, "bell mesh failed to load");
-					oapiWriteLogV("ORO bell: oapiLoadMeshGlobal failed for %s.", name);
+					OroLog(0, "ORO bell: oapiLoadMeshGlobal failed for %s.", name);
 				}
 			} else {
 				sprintf_s(s_cfg.info, "bell mesh: no MAIN/HOVER/RETRO/USER labels");
-				oapiWriteLogV("ORO bell: %s has no labelled groups - inert.", path);
+				OroLog(1, "ORO bell: %s has no labelled groups - inert.", path);
 			}
 		} else {
 			sprintf_s(s_cfg.info, "no bell mesh (Meshes\\ORO\\%s_bell.msh)", leaf);
@@ -591,7 +592,7 @@ void OroModule::UpdateBellGlow(double simdt)
 	if (!sceneRendered) {
 		if (!lendDeferLogged) {
 			lendDeferLogged = true;
-			oapiWriteLogV("ORO: deferring AddMesh (bell glow shell) - scene has not rendered "
+			OroLog(0, "ORO: deferring AddMesh (bell glow shell) - scene has not rendered "
 			              "a frame yet (invariant 23k). Will attach once it has.");
 		}
 		return;
@@ -625,7 +626,7 @@ void OroModule::UpdateBellGlow(double simdt)
 				if (dd < best) { best = dd; G.exIdx = (int)e; }
 			}
 			if (G.exIdx < 0)
-				oapiWriteLogV("ORO bell: gimbal group %d (%s) - no %s exhaust to follow on this vessel.",
+				OroLog(1, "ORO bell: gimbal group %d (%s) - no %s exhaust to follow on this vessel.",
 				              G.grp, FAM_NAME[G.fam], FAM_NAME[G.fam]);
 		}
 	}

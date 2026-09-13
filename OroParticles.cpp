@@ -80,8 +80,10 @@
 // ============================================================================
 
 #include "OroModule.h"
+#include "OroLog.h"
 #include "OroState.h"
 #include "gcCoreAPI.h"       // patch (l): UpdateTexture2D, for the colour picker
+#include "OroDDS.h"          // the shared DDS reader (was private here until 2026-09-12)
 #include <math.h>
 #include <string.h>
 
@@ -119,92 +121,11 @@ namespace {
 	// question, no rebuild-for-texture) and the Colour swatch keeps working: white
 	// = the file exactly as authored. ⚠️ Files must be 2x2 ATLASES (23j) - a single
 	// centred blob renders as corner wedges; the folder README says so.
-	// Own DDS reader on purpose: deterministic, no dependence on lock semantics of
-	// loaded D3D surfaces, and phase 2's thumbnails need exactly this decoder.
-	// DXT1/3/5 + uncompressed 32-bit, top mip only, any size (bilinear to 256).
+	// The DDS reader that was born here (own decoder on purpose: deterministic, no
+	// dependence on the lock semantics of loaded D3D surfaces) moved to OroDDS.cpp on
+	// 2026-09-12 when the RINGS needed it too - shared, not copied (26a). Same decoder,
+	// DXT1/3/5 + uncompressed 32-bit, top mip only; the size guard grew for 8192 x 1.
 	// ------------------------------------------------------------------------
-	static void Dxt1Colours(const BYTE* b, DWORD c[4], bool dxt1)
-	{
-		const WORD c0 = *(const WORD*)b, c1 = *(const WORD*)(b + 2);
-		const int r0 = ((c0 >> 11) & 31) * 255 / 31, g0 = ((c0 >> 5) & 63) * 255 / 63, b0 = (c0 & 31) * 255 / 31;
-		const int r1 = ((c1 >> 11) & 31) * 255 / 31, g1 = ((c1 >> 5) & 63) * 255 / 63, b1 = (c1 & 31) * 255 / 31;
-		c[0] = 0xFF000000u | (r0 << 16) | (g0 << 8) | b0;
-		c[1] = 0xFF000000u | (r1 << 16) | (g1 << 8) | b1;
-		if (!dxt1 || c0 > c1) {
-			c[2] = 0xFF000000u | (((2*r0 + r1) / 3) << 16) | (((2*g0 + g1) / 3) << 8) | ((2*b0 + b1) / 3);
-			c[3] = 0xFF000000u | (((r0 + 2*r1) / 3) << 16) | (((g0 + 2*g1) / 3) << 8) | ((b0 + 2*b1) / 3);
-		} else {
-			c[2] = 0xFF000000u | (((r0 + r1) / 2) << 16) | (((g0 + g1) / 2) << 8) | ((b0 + b1) / 2);
-			c[3] = 0x00000000u;                            // DXT1 3-colour mode: transparent black
-		}
-	}
-
-	// Decode the top mip of a DDS into malloc'd ARGB. Caller frees. False = cannot use.
-	static bool LoadDDSRGBA(const char* path, DWORD** outPix, int* outW, int* outH)
-	{
-		FILE* fp = NULL;
-		if (fopen_s(&fp, path, "rb") || !fp) return false;
-		BYTE hdr[128];
-		if (fread(hdr, 1, 128, fp) != 128 || *(DWORD*)hdr != 0x20534444u) { fclose(fp); return false; }
-		const int   h       = *(int*)(hdr + 12), w = *(int*)(hdr + 16);
-		const DWORD pfFlags = *(DWORD*)(hdr + 80);
-		const DWORD fourCC  = *(DWORD*)(hdr + 84);
-		const DWORD bits    = *(DWORD*)(hdr + 88);
-		if (w < 4 || h < 4 || w > 4096 || h > 4096) { fclose(fp); return false; }
-		DWORD* pix = (DWORD*)malloc((size_t)w * h * 4);
-		if (!pix) { fclose(fp); return false; }
-		bool ok = false;
-		if (pfFlags & 0x4) {                               // DDPF_FOURCC - compressed
-			const bool dxt1 = (fourCC == 0x31545844u);     // 'DXT1'
-			const bool dxt3 = (fourCC == 0x33545844u);     // 'DXT3'
-			const bool dxt5 = (fourCC == 0x35545844u);     // 'DXT5'
-			if (dxt1 || dxt3 || dxt5) {
-				const int bw = (w + 3) / 4, bh = (h + 3) / 4, bsz = dxt1 ? 8 : 16;
-				BYTE* blocks = (BYTE*)malloc((size_t)bw * bh * bsz);
-				if (blocks && fread(blocks, 1, (size_t)bw * bh * bsz, fp) == (size_t)bw * bh * bsz) {
-					for (int by = 0; by < bh; by++) for (int bx = 0; bx < bw; bx++) {
-						const BYTE* blk = blocks + ((size_t)by * bw + bx) * bsz;
-						const BYTE* cb  = dxt1 ? blk : blk + 8;      // colour half
-						DWORD col[4]; Dxt1Colours(cb, col, dxt1);
-						DWORD cidx = *(const DWORD*)(cb + 4);
-						BYTE  a5[8] = {};                            // DXT5 alpha palette
-						if (dxt5) {
-							a5[0] = blk[0]; a5[1] = blk[1];
-							if (a5[0] > a5[1]) for (int k = 0; k < 6; k++) a5[2+k] = (BYTE)(((6-k)*a5[0] + (k+1)*a5[1]) / 7);
-							else { for (int k = 0; k < 4; k++) a5[2+k] = (BYTE)(((4-k)*a5[0] + (k+1)*a5[1]) / 5); a5[6] = 0; a5[7] = 255; }
-						}
-						for (int py = 0; py < 4; py++) for (int px = 0; px < 4; px++) {
-							const int x = bx*4 + px, y = by*4 + py;
-							if (x >= w || y >= h) continue;
-							DWORD c = col[(cidx >> ((py*4 + px)*2)) & 3];
-							if (dxt3) {
-								const int an = py*4 + px;
-								BYTE a = (blk[an >> 1] >> ((an & 1) * 4)) & 0xF; a = (BYTE)(a * 17);
-								c = (c & 0x00FFFFFFu) | ((DWORD)a << 24);
-							} else if (dxt5) {
-								const UINT64 aidx = *(const UINT64*)blk >> 16;   // 48 bits of 3-bit indices
-								BYTE a = a5[(aidx >> ((py*4 + px)*3)) & 7];
-								c = (c & 0x00FFFFFFu) | ((DWORD)a << 24);
-							}
-							pix[(size_t)y * w + x] = c;
-						}
-					}
-					ok = true;
-				}
-				free(blocks);
-			}
-		} else if ((pfFlags & 0x40) && bits == 32) {       // DDPF_RGB, 32-bit A8R8G8B8/X8R8G8B8
-			const DWORD aMask = *(DWORD*)(hdr + 104);
-			if (fread(pix, 4, (size_t)w * h, fp) == (size_t)w * h) {
-				if (!aMask) for (size_t i = 0; i < (size_t)w * h; i++) pix[i] |= 0xFF000000u;
-				ok = true;
-			}
-		}
-		fclose(fp);
-		if (!ok) { free(pix); return false; }
-		*outPix = pix; *outW = w; *outH = h;
-		return true;
-	}
 
 	// The A/B split by DEST quadrant: diagonal pairs (TL+BR = A, TR+BL = B), so both
 	// tints appear in every one of the renderer's eight orientation variants and the
@@ -226,13 +147,13 @@ namespace {
 		char path[MAX_PATH];
 		DWORD* pix = NULL; int w = 0, h = 0;
 		sprintf_s(path, "Textures\\ORO\\Particles\\%s.dds", name);
-		if (!LoadDDSRGBA(path, &pix, &w, &h)) {
+		if (!OroDDS_LoadFile(path, &pix, &w, &h)) {
 			sprintf_s(path, "Textures\\%s.dds", name);      // the stock names live here
-			if (!LoadDDSRGBA(path, &pix, &w, &h)) {
+			if (!OroDDS_LoadFile(path, &pix, &w, &h)) {
 				static char lastFail[48] = "";
 				if (_stricmp(lastFail, name)) {
 					strcpy_s(lastFail, name);
-					oapiWriteLogV("ORO: particle texture '%s' missing or undecodable - synthesized fallback.", name);
+					OroLog(0, "ORO: particle texture '%s' missing or undecodable - synthesized fallback.", name);
 				}
 				return false;
 			}
@@ -487,13 +408,13 @@ void OroModule::UpdateParticles(double simdt)
 				                                  OAPISURFACE_TEXTURE | OAPISURFACE_NOMIPMAPS |
 				                                  OAPISURFACE_ALPHA);
 		prtTexMode = (hPrtTex[0] != NULL);
-		oapiWriteLogV("ORO: particle tinting (patch l) %s.",
+		OroLog(1, "ORO: particle tinting (patch l) %s.",
 		              prtTexMode ? "available - synthesized 2x2 particle atlas"
 		                         : "NOT available - stock particle texture, colour pick disabled");
 		// Patch (o) decides whether our streams survive STOCK EXHAUST being turned
 		// off. Without it the tab still works, but only alongside stock's streams -
 		// a degradation that is invisible on screen, so it names itself here.
-		oapiWriteLogV("ORO: stream exemption (patch o) %s.",
+		OroLog(1, "ORO: stream exemption (patch o) %s.",
 		              (pCore && pCore->CanExemptStream())
 		                ? "bound - ORO streams survive stock-exhaust suppression"
 		                : "NOT available - ORO streams die with stock's when suppressed");
@@ -624,7 +545,7 @@ void OroModule::UpdateParticles(double simdt)
 			if (pCore->UpdateTexture2D(hPrtTex[gi], s_ptex, PT_DIM, PT_DIM)) hTexG[gi] = hPrtTex[gi];
 			else {
 				prtTexMode = false;
-				oapiWriteLog("ORO: particle texture upload FAILED - stock texture from here on.");
+				OroLog(0, "ORO: particle texture upload FAILED - stock texture from here on.");
 				break;
 			}
 		}
@@ -855,7 +776,7 @@ void OroModule::ReleaseParticles(const char* why)
 	// DIAGNOSTIC (2026-08-11): the reload CTD is a corrupted `ncontrail` in Orbiter's
 	// Vessel - the array this feeds. Log every release with its count so the teardown
 	// order is visible in the log instead of inferred. Cheap: a few lines per session.
-	if (prtStrN) oapiWriteLogV("ORO PRT: released %d stream(s) [%s].", prtStrN, why ? why : "?");
+	if (prtStrN) OroLog(1, "ORO PRT: released %d stream(s) [%s].", prtStrN, why ? why : "?");
 	prtStrN = 0;
 	g_fx.prtCount = 0;
 	s_haveApplied = false;                      // next update rebuilds from scratch

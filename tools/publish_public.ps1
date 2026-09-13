@@ -28,7 +28,28 @@ $Source = Split-Path -Parent $PSScriptRoot     # the repo root, whatever it is c
 
 # Files that exist in the private repo and must NEVER reach the public one.
 # Keep this list short and obvious; anything subtle belongs in .gitignore instead.
-$Private = @('CLAUDE.md')
+#
+# OroParticlesSprites.cpp.shelved is a complete, designed, never-flown sprite particle
+# system, kept here because its header carries the whole design and it may be revisited.
+# It is held back (2026-09-12) because it is not in the project, does not build, and in a
+# public repo it reads as abandoned code rather than as a shelf - which is the opposite of
+# what someone reading this project for the first time needs. The private repo keeps it.
+$Private = @('CLAUDE.md', 'OroParticlesSprites.cpp.shelved')
+
+# Directory prefixes held back wholesale. Entries end in '/' and match on the path prefix.
+# beta/reports/ carries the internal working documents - triage lists of tester reports and
+# the per-effect plans. They are TRACKED (they must not exist only on one disk - the same rule
+# that regenerates the client patch file every session), but they are not the project's public
+# face: they quote testers by name and describe unreleased design. Move one out of this tree,
+# or delete the prefix, to publish it. The testers' screenshots beside them are not tracked at
+# all, so this script never sees those.
+$PrivateDirs = @('beta/reports/')
+
+function Test-Private([string]$rel) {
+    if ($Private -contains $rel) { return $true }
+    foreach ($d in $PrivateDirs) { if ($rel.StartsWith($d, 'OrdinalIgnoreCase')) { return $true } }
+    return $false
+}
 
 Write-Host ""
 Write-Host "ORO public staging" -ForegroundColor Cyan
@@ -43,14 +64,19 @@ finally { Pop-Location }
 
 if ($tracked.Count -eq 0) { throw "git ls-files returned nothing - is $Source a git repository?" }
 
-$publish = @($tracked | Where-Object { $Private -notcontains $_ })
-$held    = @($tracked | Where-Object { $Private -contains $_ })
+$publish = @($tracked | Where-Object { -not (Test-Private $_) })
+$held    = @($tracked | Where-Object {      (Test-Private $_) })
 
 # A private file that is NOT in the tracked list means this script's exclusion list has
 # drifted from reality - fail loudly rather than quietly publishing everything.
 foreach ($p in $Private) {
     if ($tracked -notcontains $p) {
         Write-Host "  NOTE: '$p' is not tracked in the source repo - exclusion had no effect." -ForegroundColor Yellow
+    }
+}
+foreach ($d in $PrivateDirs) {
+    if (-not ($tracked | Where-Object { $_.StartsWith($d, 'OrdinalIgnoreCase') })) {
+        Write-Host "  NOTE: no tracked file under '$d' - exclusion had no effect." -ForegroundColor Yellow
     }
 }
 
@@ -83,7 +109,7 @@ if (-not $WhatIf) {
         ''
         '# Private to the development repository - never published. See'
         '# tools/publish_public.ps1, which is what stages this tree.'
-    ) + $Private
+    ) + $Private + $PrivateDirs
     Add-Content -Path $gi -Value ($stanza -join "`n") -Encoding utf8
 }
 

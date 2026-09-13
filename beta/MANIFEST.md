@@ -41,17 +41,21 @@ column (which is relative to `<OrbiterRoot>`).
 | `Modules\Plugin\ORO.dll` | `Modules\Plugin\ORO.dll` | ours |
 | `Modules\Plugin\D3D9Client.dll` | `Modules\Plugin\D3D9Client.dll` | ⚠️ **PATCHED — overwrites stock** |
 
-The patched client logs `[Build 260906]`; stock logs `[Build 241231]`. That one log line
-is the fastest way to confirm an install took. (The stamp refreshes only when `D3D9Client.cpp` recompiles; it did for 260906. Probe-by-binding
+The patched client logs `[Build 260913]`; stock logs `[Build 241231]`. That one log line
+is the fastest way to confirm an install took. (The stamp refreshes only when `D3D9Client.cpp` recompiles; it did for 260913 - twice on that day, the log-collapse rebuild and the moire fix, which the stamp cannot tell apart. Probe-by-binding
 means nothing depends on it.)
 
-## 2. The ELEVEN deployed shaders — ⚠️ ALL OVERWRITE STOCK
+## 2. The TWELVE deployed shaders — ⚠️ ALL OVERWRITE STOCK
 
 They are compiled at RUN TIME, so they must always match the DLL. Never ship a patched
 DLL with stock shaders or vice versa. ⚠️ `Mesh.fx` joined the set with patch (s)'s
 base-tile ground work (wet runways ARE base tiles) — the 260823 release audit caught it
 live in the sim but missing from every ship list, which is exactly the class of skew
 the 2026-08-13 rule exists for.
+
+⚠️ `Planet.fx` joined on 2026-09-12 with patch (aj)'s ring shadow on the planet - an
+`#include` of `D3D9Client.fx` that was byte-stock until then, and the THIRD file to join
+this list by being INCLUDED rather than named. Count the table, never the sentence.
 
 | Source | Goes to |
 |---|---|
@@ -66,6 +70,7 @@ the 2026-08-13 rule exists for.
 | `Modules\D3D9Client\Particle.fx` | same path |
 | `Modules\D3D9Client\BeaconArray.fx` | same path |
 | `Modules\D3D9Client\Common.hlsl` | same path |
+| `Modules\D3D9Client\Planet.fx` | same path |
 
 ## 3. ORO's own runtime assets
 
@@ -117,21 +122,86 @@ judging. These carry your numbers.
 | `Config\ORO\ProjectAlpha_ISS.cfg` | same path |
 | `Config\ORO\bodies\*.cfg` (12 files) | same path |
 
-## 6. Scenarios - four, to point testers at the effects
+## 6. Scenarios - sixteen, in six folders, each one explaining itself
 
-His own, and every vessel in them is stock (ISS, ProjectAlpha_ISS, Mir, Wheel,
-DeltaGlider, DG-S, Atlantis, ShuttleA, ShuttlePB - all verified present in a stock
-Config\Vessels), so they load on the clean install testers were told to use.
+GENERATED, not hand-kept: `tools/scenarios.py` holds one table and writes the scenarios,
+their launchpad pages and the folder pages from it. The old `Scenarios\ORO_beta` folder
+shipped seven and FOUR of them had an empty description - a user loaded one and was told
+nothing about which pill to turn on. The description is the deliverable now, so it lives
+beside the state it describes and cannot drift from it.
+
+Every vessel used is stock (DeltaGlider, DG-S, Atlantis), so they load on the clean install
+testers are told to use. Airborne and orbital states were computed by `tools/scnstate.py`,
+which validates itself against states Orbiter WROTE (the stock "Cruising above Florida"
+reads back over central Florida; the sub-solar point tracks the seasons). The two ring
+orbits come from `tools/ringplane.py`.
+
+⚠️ **AND SINCE 2026-09-13 THE FLOWN STATE WINS.** He flew all sixteen, moved vessels and
+cameras, added a second ship to two of them and re-saved - and Orbiter's own save is a
+better answer than the computation for those, because it is the state he judged on screen.
+His ruling: *"All my changes must remain as the true scenarios now."* So `tools/scnfreeze.py`
+captures everything after `END_DESC` into `tools/scenarios.frozen.json` and the generator
+replays it verbatim; the table keeps the PROSE and the derivation that built the scenario in
+the first place. `scnfreeze.py --check` proves the frozen data still matches the live tree,
+and the generator's manifest refuses to overwrite a file edited since it was written.
+⚠️ A first cut froze only the environment date, the camera and the ships, and silently
+dropped the MFD configuration he had set in two scenarios (the Orbit MFD's `PROJ`/`FRAME`/
+`REF`, the Surface MFD's `SPDMODE`) - caught by diffing a regeneration against his files
+before anything was written. The seam is `END_DESC` for that reason: the generator owns the
+description, Orbiter owns everything it writes itself. The house rules the generator used to
+guarantee by construction - Orbit left, Surface right, an empty `BEGIN_VC` before the ships -
+are asserted by the freeze tool now instead of being quietly retired with the block.
 
 | Source | Goes to |
 |---|---|
-| `Scenarios\ORO_beta\Atlantis reentry.scn` | same path |
-| `Scenarios\ORO_beta\DG reentry.scn` | same path |
-| `Scenarios\ORO_beta\Habana Spaceport.scn` | same path |
-| `Scenarios\ORO_beta\Thruster effects.scn` | same path |
+| `Scenarios\ORO\**` (16 `.scn` + 7 `Description.txt`) | same path |
+| `Html\Scenarios\ORO\*.htm` (23) | same path |
+| `Images\ORO\*.jpg` (as delivered) | same path |
 
-The uninstaller removes this folder under the same rule as everything else - shipped
-and unchanged goes, anything a tester saved into it stays.
+All three are staged RECURSIVELY by `build_staging.ps1` - the generator owns the list, and
+a hand-kept one would go stale the first time a scenario was added.
+
+The folders are `1 The pilot`, `2 Reentry`, `3 Engines`, `4 Weather`, `5 Night and lights`
+and `6 The sky`; the digit is there because the launchpad sorts alphabetically.
+
+**How a page gets a picture.** `TabScenario.cpp:477`: a `BEGIN_URLDESC` line with NO COMMA
+resolves to a loose file, `<Orbiter>\Html\Scenarios\<path>.htm` - no compiled help, no
+`hhc.exe` (which is not even on this machine). The page scales its picture with
+`width="100%"`, which is what stock's own `Images\CurrentState.jpg` (1920x1080) does, and is
+the whole answer to "what resolution is the user's launchpad". Shoot at 1920 wide so the
+image is always scaled DOWN; masters live in the repo at `beta/pics/`, named there.
+
+**Every scenario also carries a plain `DESC` block, and that is not belt-and-braces.**
+`UseHtmlInline()` is false with HTML scenario descriptions switched off AND **under WINE on
+the default setting**, and that branch never even looks for `URLDESC` - so a picture-only
+scenario would show a blank description to every Linux user. `FindLine` rewinds the stream
+before each scan, so the two blocks coexist happily.
+
+`5 Night and lights\Lights and shadows.scn` carries `Script testlights` in its environment
+block, so Orbiter runs `Script\testlights.lua` at load; that script and the two lamp vessel
+classes it spawns (`Config\Vessels\ORO_LampSpot.cfg` / `ORO_LampPost.cfg`, meshes
+`Meshes\ORO\lamp_spot.msh` / `lamp_post.msh`, all generated by `tools/lampgen.py`) ship with
+it. The script and the two cfgs live in SHARED folders, so the uninstaller removes them by
+the byte-identical rule rather than by deleting the folder.
+
+## 6b. The retired tree - `legacy\`
+
+`Scenarios\ORO_beta` was replaced by `Scenarios\ORO`. The uninstaller only ever deletes a
+file that is **byte-identical to something we shipped**, so the moment the old scenarios
+left the payload that rule would have KEPT every one of them forever, and every upgraded
+install would carry a dead folder that nothing could ever remove.
+
+So they ship under `ORO_beta\legacy\Scenarios\ORO_beta\` (7 files) and get exactly the same
+comparison, through `:cleanLegacy` in both scripts. The INSTALLER runs it before the copy,
+so nobody ends up looking at two trees; the UNINSTALLER runs it as well, for anyone who
+goes straight there.
+
+Four of the seven are taken from `ORO-beta-260906.zip` itself - what users actually have -
+and the other three never shipped and come from the working tree. A file the user edited is
+kept and labelled, anything of their own is kept, and the folder is removed only once it is
+empty. Tested on three mock trees: all untouched, edited-plus-a-user-file, and no old
+folder at all.
+
 
 ## 7. The restore bundle
 
@@ -196,12 +266,14 @@ one is ever dropped in, so nothing has to change if that decision is ever revisi
 
 ## The built archive
 
-**CURRENT: `beta/dist/ORO-beta-260823.zip`** — the first PUBLIC beta: the whole rain
-system (storm, lightning bolts, rain + thunder sound, the VC storm and the rain
-shields), the upgrade-in-place installer, seven deployed shaders, sounds under
-`XRSound\ORO\` with the freesound credit ledger.
-Previous: `ORO-beta-260812.zip` — 3.75 MB, 55 entries, built 2026-08-12.
-The first package under the ORO name, and **the next thing testers receive.**
+**CURRENT: `beta/dist/ORO-beta-260913.zip`** — the sixteen self-describing scenarios in
+six folders (`legacy\` retires the old seven), the lens flare, the rings, the windscreen
+airflow, the panel scaling, the wet pavement and open-water mirror, twelve deployed
+shaders, the log-level system, and the moire fix in Cascaded mode. Previous public
+releases: 260906 (cascaded shadows, fog, the cabin at night), 260831, 260826, 260823 (the
+first PUBLIC beta: the whole rain system, the upgrade-in-place installer, sounds under
+`XRSound\ORO\` with the freesound credit ledger), 260817, 260815, 260813; 260812 was
+built and never shipped.
 
 ⚠️ **Two older zips sit beside it and BOTH keep their PULSE names — they are history,
 not typos.** Do not "fix" them in a rename sweep:
@@ -244,7 +316,10 @@ and **both scripts refusing while Orbiter is running**.
 It picks the NEWEST `dist\ORO-beta-*.zip` rather than a hardcoded name, which used
 to go stale every release, and it exits on its own result rather than on the last
 `.bat`'s exit code.
-Last run 2026-08-15 on `ORO-beta-260815.zip`: **59 passed, 0 failed.**
+Last run 2026-09-13 on `ORO-beta-260913.zip` (64,470,255 bytes, 182 entries):
+**128 passed, 0 failed.** The staged payload was hash-checked against the live install
+(both DLLs, the twelve shaders, orofx.hlsl, the rain-surfaces cfg), the staged client
+against the build in the clone, and the stock bundle's client against `.orig-241231`.
 
 ⚠️ **Cases I, J and K exist because this suite passed 44/44 on the build that
 bricked a tester's Orbiter** (2026-08-15). Every case up to then ran against a
@@ -266,7 +341,7 @@ Then the part only a human can do:
 
 1. Unzip into a scratch copy of a **clean** Orbiter 2024, run `ORO_Install.bat`,
    then start a scenario.
-2. `Orbiter.log` should show `Module D3D9Client.dll ... [Build 260906, API 260725]` and,
+2. `Orbiter.log` should show `Module D3D9Client.dll ... [Build 260913, API 260725]` and,
    ⚠️ **it is the BUILD that discriminates, not the API** — the patched client is compiled
    from the clone, so its API number tracks the clone's SDK (260725) and does NOT match
    stock's 241231. Both docs said 241231 until 2026-08-12, which would have had a tester

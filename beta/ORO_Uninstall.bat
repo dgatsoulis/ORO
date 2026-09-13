@@ -28,6 +28,7 @@ set "HERE=%~dp0"
 set "HERE=%HERE:~0,-1%"
 for %%I in ("%HERE%\..") do set "ROOT=%%~fI"
 set "PAY=%HERE%\payload"
+set "LEG=%HERE%\legacy"
 set "STOCK=%HERE%\stock"
 set "BACKUP=%HERE%\backup"
 set /a KEPT=0
@@ -156,7 +157,7 @@ if exist "%SRC%\Modules\Plugin\D3D9Client.dll" (
   echo   [ok] D3D9Client.dll restored and verified
 )
 
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl) do (
+for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
   if exist "%SRC%\Modules\D3D9Client\%%F" (
     call :copyVerify "%SRC%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client" "%%F"
     if defined CVFAIL goto :restorefailed
@@ -186,7 +187,15 @@ call :cleanTree "Modules\ORO"
 call :cleanTree "XRSound\ORO"
 call :cleanTree "Meshes\ORO"
 call :cleanTree "Textures\ORO"
-call :cleanTree "Scenarios\ORO_beta"
+call :cleanTree "Scenarios\ORO"
+call :cleanTree "Html\Scenarios\ORO"
+call :cleanTree "Images\ORO"
+rem  The RETIRED scenario folder. Scenarios\ORO_beta was replaced by
+rem  Scenarios\ORO, so its files are no longer in the payload - and the
+rem  byte-identical rule would therefore KEEP every one of them forever. They
+rem  ship under legacy\ instead, and get exactly the same comparison, so an
+rem  upgraded install is cleaned up and anything you edited is still kept.
+call :cleanLegacy "Scenarios\ORO_beta"
 call :cleanTree "Config\ORO"
 call :cleanFile "Config\ORO.cfg"
 rem  Two ORO files living in SHARED folders (added 2026-09-04) - a cleanTree on
@@ -195,6 +204,11 @@ rem  single byte-identical cleanFile. The ecam config had been missing from this
 rem  list since 260831 - the same gap, closed in the same sweep.
 call :cleanFile "Script\focusall.lua"
 call :cleanFile "Config\GC\Atlantis_ecam_oro.cfg"
+rem  The lights test rig (2026-09-10): its script and its two config-only lamp
+rem  classes also live in shared folders; the lamp meshes are under Meshes\ORO.
+call :cleanFile "Script\testlights.lua"
+call :cleanFile "Config\Vessels\ORO_LampSpot.cfg"
+call :cleanFile "Config\Vessels\ORO_LampPost.cfg"
 
 set "LEFT="
 if exist "%ROOT%\Modules\Plugin\ORO.dll" set "LEFT=1"
@@ -295,7 +309,7 @@ call :copyVerify "%SRC%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin" "
 if defined CVFAIL goto :restorefailed
 echo   [ok] D3D9Client.dll restored and verified
 
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl) do (
+for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
   if exist "%SRC%\Modules\D3D9Client\%%F" (
     call :copyVerify "%SRC%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client" "%%F"
     if defined CVFAIL goto :restorefailed
@@ -420,6 +434,33 @@ for /r "%ROOT%\%SUB%" %%F in (*) do (
   )
 )
 rem remove directories that are now empty, deepest first
+for /f "delims=" %%D in ('dir "%ROOT%\%SUB%" /ad /b /s 2^>nul ^| sort /r') do rd "%%D" >nul 2>&1
+rd "%ROOT%\%SUB%" >nul 2>&1
+goto :eof
+
+rem ===========================================================================
+rem  cleanLegacy - cleanTree, but against what a PREVIOUS release shipped
+rem ===========================================================================
+:cleanLegacy
+set "SUB=%~1"
+if not exist "%ROOT%\%SUB%" goto :eof
+if not exist "%LEG%" goto :eof
+for /r "%ROOT%\%SUB%" %%F in (*) do (
+  set "FULL=%%F"
+  set "REL=!FULL:%ROOT%\=!"
+  if exist "%LEG%\!REL!" (
+    fc /b "%%F" "%LEG%\!REL!" >nul 2>&1
+    if errorlevel 1 (
+      set /a KEPT+=1
+      echo     kept ^(you changed this^): !REL!
+    ) else (
+      del /q "%%F" >nul 2>&1
+    )
+  ) else (
+    set /a KEPT+=1
+    echo     kept ^(yours^): !REL!
+  )
+)
 for /f "delims=" %%D in ('dir "%ROOT%\%SUB%" /ad /b /s 2^>nul ^| sort /r') do rd "%%D" >nul 2>&1
 rd "%ROOT%\%SUB%" >nul 2>&1
 goto :eof

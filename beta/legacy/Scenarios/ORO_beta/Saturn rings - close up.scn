@@ -1,0 +1,76 @@
+BEGIN_HYPERDESC
+<h1>ORO - the rings, close up</h1>
+<p>The judging rig for ORO's ring CLOSE-UP (round 2). Two DeltaGliders on orbits that lie
+in Saturn's ring plane; switch with F3. <b>The effect follows the camera, not the ship</b>,
+so the whole test is done with the external view: pull it out and above the ring and come
+back down.</p>
+<ul>
+<li><b>GL-01</b> rides in the <b>Cassini Division</b> - thin, so from a few thousand
+kilometres up the grooves and pebbles of the texture read against a dark band, and the
+halo in the last kilometres is faint.</li>
+<li><b>GL-02</b> rides just inside the outer <b>B ring</b> - dense, so the texture is
+bright and the halo in the last kilometres is a real fog.</li>
+</ul>
+<p>What to look for, from far to near: at thousands of km the ring is exactly round 1;
+below about 600 km the broad grooves come in; below ~150 km the fine ones and the first
+pebbles; below ~50 km the specks; and inside five kilometres of the plane the halo. ORO
+panel: WORLD -&gt; RINGS - <i>Detail</i>, <i>Particles</i> and <i>Halo</i> are each an
+exact A/B at 0, and the pill is still the whole A/B. <i>Above plane</i> reads the camera's
+own height.</p>
+<p><i>On the orbits:</i> the elements look eccentric because Orbiter turns an ELEMENTS
+line into a state vector with pure Kepler and then flies the ship in Saturn's real J2
+field, so a plain "e = 0" line is NOT a circular orbit here. These are the ones that come
+out circular under J2 (tools\ringplane.py derives them).</p>
+END_HYPERDESC
+
+BEGIN_ENVIRONMENT
+  System Sol
+  Date MJD 57897.25
+END_ENVIRONMENT
+
+BEGIN_FOCUS
+  Ship GL-01
+END_FOCUS
+
+BEGIN_CAMERA
+  TARGET GL-01
+  MODE Extern
+  POS 0.08 -12.0 25.0
+  TRACKMODE TargetRelative
+  FOV 50.00
+END_CAMERA
+
+BEGIN_HUD
+  TYPE Orbit
+END_HUD
+
+BEGIN_MFD Left
+  TYPE Orbit
+  REF Saturn
+END_MFD
+
+BEGIN_MFD Right
+  TYPE Map
+  REF Saturn
+END_MFD
+
+BEGIN_SHIPS
+GL-01:DeltaGlider
+  STATUS Orbiting Saturn
+  ELEMENTS 120502527.1 0.005829978 28.052253 169.525414 169.525414 169.525414 57897.25
+  AROT 0.0 0.0 0.0
+  PRPLEVEL 0:1.000 1:1.000
+  NAVFREQ 0 0 0 0
+  GEAR 0 0.0000
+  AAP 0:0 0:0 0:0
+END
+GL-02:DeltaGlider
+  STATUS Orbiting Saturn
+  ELEMENTS 115732215.9 0.006326811 28.052253 169.525414 169.525414 169.525414 57897.25
+  AROT 0.0 0.0 0.0
+  PRPLEVEL 0:1.000 1:1.000
+  NAVFREQ 0 0 0 0
+  GEAR 0 0.0000
+  AAP 0:0 0:0 0:0
+END
+END_SHIPS

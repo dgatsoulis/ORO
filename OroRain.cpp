@@ -54,8 +54,10 @@
 // ============================================================================
 
 #include "OroModule.h"
+#include "OroLog.h"
 #include "OroState.h"
 #include "gcCoreAPI.h"       // gcCore::GetRenderObjPos (client patch k2)
+#include "OroTree.h"         // the water mask under the focus vessel (the reflection over water)
 #include "XRSound.h"         // UpdateRainSound - the loop crossfade (invariant 12;
                              //   OroModule.h only forward-declares the class)
 #include <math.h>
@@ -351,7 +353,7 @@ void OroModule::UpdateRain()
 	if (!boltTexTried && pCore && pCore->CanDrawTexPoly()) {
 		boltTexTried = true;
 		hBoltTex = oapiLoadTexture("ORO\\bolt_atlas.dds");
-		oapiWriteLogV("ORO: rain bolt atlas %s.",
+		OroLog(1, "ORO: rain bolt atlas %s.",
 		              hBoltTex ? "loaded (16 slots)" : "missing - in-cloud flashes only");
 	}
 	if (pCore && pCore->CanDrawTexPoly()) {
@@ -486,7 +488,7 @@ void OroModule::SenseRain()
 						}
 					}
 				}
-				oapiWriteLogV("ORO: rain shield %s - %d roof triangle(s) (%s).",
+				OroLog(1, "ORO: rain shield %s - %d roof triangle(s) (%s).",
 				              mfile, (int)(s_shieldTri.size() / 3), v->GetName());
 			}
 		}
@@ -628,23 +630,75 @@ void OroModule::SenseRain()
 	// SENSING, so it belongs here and it runs every frame, paused included (invariant
 	// 1's law). GRAVITY AND AIRFLOW ARE SUMMED AS FORCES in the VESSEL frame: parked,
 	// the run direction is straight down the glass; at ~20 m/s the two terms are equal;
-	// in flight it is essentially straight aft. A sum rather than a blend means there is
-	// no threshold to tune and no airspeed at which the direction jumps.
+	// in flight the airflow dominates. A sum rather than a blend means there is no
+	// threshold to tune and no airspeed at which the direction jumps.
 	// ⚠️ Bound to GetAirspeedVector, never to a hull axis - invariant 25(e). A tail-sitter
 	// on hover engines gets drops running over its canopy the way its own air actually
 	// moves, and nothing here had to know that such a vessel exists.
+	//
+	// ⚠️⚠️ THE AIRFLOW TERM POINTS AT THE STAGNATION POINT, NOT DOWN THE AIRSPEED VECTOR
+	// (2026-09-12, triage A3, a tester report). The shader's chart is polar AROUND this
+	// axis and the runners radiate from it, so the axis IS the radiant - and the old
+	// `-wind` put it at the airspeed vector's direction AT INFINITY, which in level
+	// flight is the middle of the front window. Stebb saw exactly that: "they radiate
+	// from a point near to the centre of the front window such that below centre, the
+	// runners sweep down the window, and above centre the runners sweep up", and asked
+	// for the radiant to move down toward the instrument panel.
+	// The physics says the same thing and says WHERE: air does not diverge from a
+	// direction, it diverges from the STAGNATION POINT where it first meets the
+	// airframe - on the nose, BELOW the glass - so every point on the pane flows up and
+	// outward. His reference footage settled that the two answers agree: "it turns out
+	// that the physics oriented approach is also the good look... we should have runners
+	// moving up the glass as the speed increases."
+	// So the point is CONSTRUCTED rather than dialled: the hull's forward point
+	// (`unit(wind) * GetSize()`, which self-scales to any vessel and needs no per-class
+	// number), seen FROM THE EYE. On a DeltaGlider that lands ~17 deg below the forward
+	// axis - which is where the tester's eye said it belonged, arrived at from the other
+	// end. No origin slider, therefore (25i: the sim owns where things land).
+	// ⚠️ THE MAGNITUDE LAW IS UNCHANGED (0.5 x airspeed against gravity's 9.81), so only
+	// the DIRECTION moved: the speed at which the airflow takes over is the flown one,
+	// and the swing from overhead to the nose is visible across a takeoff roll.
 	rainGlassRot = s_rn.vRot;
 	{
 		VECTOR3 wind = _V(0, 0, 0);
 		v->GetAirspeedVector(FRAME_LOCAL, wind);                 // already vessel frame
 		const VECTOR3 downV = tmul(s_rn.vRot, unit(pC - vp));    // toward the planet centre
-		const VECTOR3 run   = downV * 9.81 - wind * 0.5;
+		const double  ws    = length(wind);
+
+		VECTOR3 aero = _V(0, 0, 0);                              // unit, eye -> stagnation
+		if (ws > 1e-3) {
+			const VECTOR3 S    = (wind / ws) * s_rn.vSize;       // the hull's forward point
+			const VECTOR3 stag = S - CleanCameraOffset(v);       // ... seen from the eye
+			const double  sl   = length(stag);
+			// The degenerate case is an eye AT the stagnation point, which cannot
+			// happen in a cockpit; falling back to the old direction keeps it defined.
+			aero = (sl > 1e-3) ? (stag / sl) : (wind / ws);
+		}
+		const VECTOR3 run   = downV * 9.81 - aero * (ws * 0.5);
 		const double  rl    = length(run);
 		rainGlassRun    = (rl > 1e-6) ? run / rl : downV;
 		rainGlassRunMag = (float)rl;   // the RUNNERS' speed source: ~9.8 parked (gravity
 		                               //   alone), growing with airspeed - so streaks
 		                               //   crawl on the pad and whip aft in flight, with
 		                               //   no threshold anywhere (invariant 25e)
+
+		// THE SHEAR (2026-09-12, triage A4). How hard the airflow is stripping standing
+		// drops off the glass, and therefore how far the pane has moved from a field of
+		// drops toward a moving FILM. Stebb: "round blobby rain drops remain on the
+		// windscreen even at high speeds... reduce the appearance of rain drops and
+		// increase the amount of runners dynamically as the DG speed increases... a
+		// 'vision disturbance'... to mimic a film of water on the glass."
+		// ⚠️ KEYED ON DYNAMIC PRESSURE, NOT SPEED, and that is the whole reason it needs
+		// no per-world tuning: what tears a drop loose is the force the air puts on it,
+		// so the same number covers 200 m/s in the thin air at 15 km (where drops sit
+		// happily) and 60 m/s at sea level (where they do not). The band is ~44 m/s to
+		// ~140 m/s at Earth sea level, smoothstepped so there is no knee to see.
+		{
+			const double q = v->GetDynPressure();
+			double t = (q - 1200.0) / 10800.0;
+			t = (t < 0.0) ? 0.0 : (t > 1.0 ? 1.0 : t);
+			rainGlassShear = (float)(t * t * (3.0 - 2.0 * t));
+		}
 		rainGlassOK  = true;
 	}
 
@@ -713,7 +767,7 @@ void OroModule::BuildRainCloudTex(int N)
 		hRainCloudTex = NULL;
 	}
 	rainCloudN = hRainCloudTex ? N : 0;
-	oapiWriteLogV("ORO: rain cloud-deck texture %s (%d px).",
+	OroLog(1, "ORO: rain cloud-deck texture %s (%d px).",
 	              hRainCloudTex ? "synthesized (patch l)" : "unavailable - Gouraud deck fallback", N);
 }
 
@@ -873,6 +927,58 @@ void OroModule::PushSurfaceWet()
 			grainOpPushed = go; grainSizePushed = gsz;
 			pCore->SetWetGrain(go, gsz);
 		}
+	}
+
+	// THE REFLECTION OVER WATER (2026-09-10, his ask: "always on when the vessel is over a
+	// water surface"). The client's planar mirror only ever ran while the ground was wet;
+	// open water is a mirror in any weather. Once a second the planet's own water mask is
+	// sampled under the FOCUS vessel - where the client anchors the mirror plane - and the
+	// fraction goes to the client on change: it opens the pass rain or not (with its own
+	// height law, 500 m full to 1500 m gone - see Scene.cpp) and the terrain adds it to the
+	// mirror strength where the mask says sea. Level 9 with walk-up: the finest the tree
+	// holds, so a coastline reads sharp rather than a 5 km blur; a body with no Mask.tree
+	// reads 0, so nothing happens anywhere the mask does not exist. Not multiplied by
+	// s_gateF: that is the RAIN's altitude gate, and the mirror pass has its own. Disarmed
+	// = 0 (the exit paths clear it as they clear the night light).
+	if (pCore->CanSetWaterMirror()) {
+		static OroTileTree s_wmask;                  // the shared reader, own instance (own cache)
+		const double simt = oapiGetSimTime();
+		VESSEL* fv = oapiGetFocusInterface();
+		OBJHANDLE hRef = fv ? fv->GetSurfaceRef() : NULL;
+		if (hRef != waterBody) { waterBody = hRef; waterUnder = 0.0f; waterSampT = -1e9; }
+		s_wmask.NewFrame();
+		if (fv && hRef && simt - waterSampT >= 1.0) {
+			char bname[64]; oapiGetObjectName(hRef, bname, sizeof(bname));
+			if (s_wmask.Open(bname, "Mask", "water mirror")) {
+				double lon, lat, rad; fv->GetEquPos(lon, lat, rad);
+				// ⚠️⚠️ LEVEL 7, NOT 9, AND COMMIT ONLY ON SUCCESS - THE FIRST BUILD GOT BOTH
+				// WRONG AND THE WATER MIRROR NEVER FIRED ONCE. Level 7 is the finest FULLY
+				// POPULATED level of Mask.tree (~5 km/texel); level 8 upward has holes over
+				// open ocean - the vapour cone measured exactly that in 2026-09-07 and this
+				// code ignored its own finding. A miss returns -1 ("unknown this frame"),
+				// and the first build wrote that into the value as ZERO and stamped the
+				// sample time anyway, so over the sea it pushed 0 for a second at a time,
+				// every time: bWater never went true and what looked like the water mirror
+				// was the ordinary RAIN-driven one, which is precisely why it "needed rain".
+				// Now an unknown keeps the last good value and retries on the next frame.
+				// Coarse on purpose: this answers "is the ship over water", and the terrain
+				// shader's own per-pixel mask draws the shoreline.
+				const float alpha = s_wmask.Sample(lat, lon, 7, true);   // mask alpha: 0 = water
+				if (alpha >= 0.0f) {
+					waterUnder = clampf(1.0f - alpha, 0.0f, 1.0f);
+					waterSampT = simt;
+				}
+			} else {
+				waterUnder = 0.0f; waterSampT = simt;    // no mask on this world = no water
+			}
+		}
+		g_fx.rainWaterLive = waterUnder;                 // the panel's readout - see RAIN
+		// ⚠️ NOT gated on the rain pill, s_gateF or the storm: a sea mirrors a ship in any
+		// weather (his ask). The only gates are the master arm, the user's slider, and the
+		// client's own height law + "a vessel near the camera" (Scene.cpp).
+		const float wm = (g_fx.masterArmed ? waterUnder : 0.0f)
+		               * clampf(g_fx.rainWaterRefl, 0.0f, 2.0f);
+		if (fabsf(wm - waterPushed) >= 0.02f) { waterPushed = wm; pCore->SetWaterMirror(wm); }
 	}
 }
 
@@ -1896,9 +2002,15 @@ void OroModule::BuildRainGeometry()
 	// a patch of ground at 200 m packs its splashes into a small fraction of the pixels it
 	// would occupy at 20 m, so a lower world density there lands at a similar density in
 	// the frame. Same shape of reasoning as the streak sheet's three layers.
-	if (camAGL < 150.0f && camAGL > -5.0f && g_fx.rainPuddle > 0.001f) {
+	if (camAGL < 150.0f && camAGL > -5.0f && g_fx.rainPuddle > 0.001f
+	    && g_fx.rainSplashSize > 0.001f) {
 		const float RING_LIFE = 0.55f;               // s, birth -> gone
-		const float RING_R    = 0.85f;               // m, final radius
+		// Splash size (2026-09-10, his Bell 206 screenshot: rings that suit a DG dwarf a
+		// small addon hull) scales the RADIUS only; count, cadence and opacity are the
+		// Splashes knob's. The LOD below keys on PROJECTED size, so smaller rings walk
+		// down to rhombuses and triangles on their own and drop out under 1.1 px -
+		// nothing else needs to know the slider exists.
+		const float RING_R    = 0.85f * clampf(g_fx.rainSplashSize, 0.0f, 2.0f);   // m, final radius
 		const float STRAT_FIELD[3] = { 26.0f, 82.0f, 240.0f };   // m, wrap period
 		// LOD GEOMETRY (round 4, his design: "hexagons close, rhombuses mid range and
 		// triangles farther away") - the vertex ceiling made more splashes impossible

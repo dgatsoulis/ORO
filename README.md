@@ -81,6 +81,11 @@ Output goes to `Modules\Plugin\ORO.dll`. You will also need the patched D3D9Clie
 [`oro-patches`](https://github.com/dgatsoulis/orbiter-oro/tree/oro-patches) branch where the
 patches are already applied.
 
+**Reading the code?** Start with [`ARCHITECTURE.md`](ARCHITECTURE.md) — the file map, how
+the three execution contexts differ (and why confusing them is the main source of bugs
+here), the rules that will break things if you change them, and a graveyard of approaches
+that were built, flown and abandoned, with the reasons.
+
 ## Licence
 
 ORO is dual licensed under **GPL v3** and **LGPL v3** — the same licence as D3D9Client, the
@@ -94,7 +99,8 @@ modifications of Jarmo Nikkanen's and Martin Schweiger's GPL/LGPL code and carry
 
 - **Orbiter** — Martin Schweiger. MIT licensed.
 - **D3D9Client** — Jarmo Nikkanen and Martin Schweiger. ORO would not exist without it, and
-  seventeen small patches to it are what make these effects possible.
+  forty-one patches to it are what make these effects possible — capabilities it did not expose,
+  ways to switch stock behaviour off, and a number of plain stock bug fixes.
 - **XRSound** — Douglas Beachy. MIT licensed.
 
 Built by **Dimitris "dgatsoulis" Gatsoulis**, with Claude.

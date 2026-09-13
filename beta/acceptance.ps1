@@ -30,7 +30,7 @@ function Reset-Mock([string]$exeDate, [bool]$withPulse, [bool]$withPulseBackup) 
   Set-Content "$MOCK\Orbiter_ng.exe" "mock orbiter ng binary"    -NoNewline
   Set-Content "$MOCK\Config\Vessels\DeltaGlider.cfg" "mock dg cfg"
   Set-Content "$MOCK\Modules\Plugin\D3D9Client.dll"  "STOCK CLIENT DLL"
-  foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx','NewMesh.hlsl','Particle.fx','BeaconArray.fx','Common.hlsl') {
+  foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx','NewMesh.hlsl','Particle.fx','BeaconArray.fx','Common.hlsl','Planet.fx') {
     Set-Content "$MOCK\Modules\D3D9Client\$s" "STOCK SHADER $s"
   }
   if ($exeDate) {
@@ -61,7 +61,7 @@ function Reset-Mock([string]$exeDate, [bool]$withPulse, [bool]$withPulseBackup) 
     New-Item -ItemType Directory -Force -Path `
       "$MOCK\PULSE_beta\backup\Modules\Plugin","$MOCK\PULSE_beta\backup\Modules\D3D9Client" | Out-Null
     Set-Content "$MOCK\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "STOCK CLIENT DLL"
-    foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx','NewMesh.hlsl','Particle.fx','BeaconArray.fx','Common.hlsl') {
+    foreach ($s in 'D3D9Client.fx','Vessel.fx','PBR.fx','Metalness.fx','Sketchpad.fx','NewPlanet.hlsl','Mesh.fx','NewMesh.hlsl','Particle.fx','BeaconArray.fx','Common.hlsl','Planet.fx') {
       Set-Content "$MOCK\PULSE_beta\backup\Modules\D3D9Client\$s" "STOCK SHADER $s"
     }
   }
@@ -216,10 +216,39 @@ Check "E6 Config\ORO.cfg installed"    (Test-Path "$MOCK\Config\ORO.cfg") "missi
 Check "E7 12 body cfgs installed"      ((Get-ChildItem "$MOCK\Config\ORO\bodies\*.cfg" -EA SilentlyContinue).Count -eq 12) "count wrong"
 Check "E8 meshes installed"            (Test-Path "$MOCK\Meshes\ORO\DG-S_bell.msh") "missing"
 Check "E9 texture installed"           (Test-Path "$MOCK\Textures\ORO\bell_glow.dds") "missing"
-Check "E10 scenarios installed"        ((Get-ChildItem "$MOCK\Scenarios\ORO_beta\*.scn" -EA SilentlyContinue).Count -eq 4) "count wrong"
+$scnN = @(Get-ChildItem "$MOCK\Scenarios\ORO" -Recurse -Filter *.scn -EA SilentlyContinue).Count
+Check "E10 scenarios installed"        ($scnN -ge 14) "too few scenarios staged"
+Check "E10b every folder explains itself" ((Get-ChildItem "$MOCK\Scenarios\ORO" -Recurse -Filter Description.txt -EA SilentlyContinue).Count -eq 7) "a folder has no Description.txt"
+# E10c-E10e: the launchpad pages. A scenario whose URLDESC names a page that is not
+# there shows a browser error where its description should be, and nothing in the
+# build would have said so - the pages are generated, but the ZIP is what ships.
+# one page per scenario, one per folder, plus the index - RELATIONAL, because a
+# hardcoded 23 went stale the first time a scenario was added or removed.
+$htmN = @(Get-ChildItem "$MOCK\Html\Scenarios\ORO\*.htm" -EA SilentlyContinue).Count
+Check "E10c launchpad pages installed" ($htmN -eq $scnN + 7) "expected one page per scenario plus six folders plus the index"
+$scnAll = Get-ChildItem "$MOCK\Scenarios\ORO" -Recurse -Filter *.scn -EA SilentlyContinue
+$missPage = @($scnAll | Where-Object {
+  $u = (Select-String -Path $_.FullName -Pattern '^ORO\\(.+)$' -EA SilentlyContinue)
+  (-not $u) -or (-not (Test-Path "$MOCK\Html\Scenarios\ORO\$($u.Matches[0].Groups[1].Value).htm"))
+})
+Check "E10d every URLDESC resolves"    ($missPage.Count -eq 0) "a scenario points at a page that is not in the zip"
+# E10e: the PLAIN fallback. With HTML descriptions off - and under WINE on the
+# default setting - the launchpad never even looks for URLDESC, so a scenario
+# carrying only the rich page would show a blank description to those users.
+$noDesc = @($scnAll | Where-Object { -not ((Get-Content $_.FullName -Raw) -match "BEGIN_DESC") })
+Check "E10e every scenario has a fallback" ($noDesc.Count -eq 0) "a scenario has URLDESC but no DESC block"
+Check "E29 lights scenario runs the rig" ((Get-Content "$MOCK\Scenarios\ORO\5 Night and lights\Lights and shadows.scn" -Raw -EA SilentlyContinue) -match 'Script testlights') "the Script line that starts the rig is missing"
+# E30: CONTENT, not presence - the in-plane rig is worthless with the wrong node, and
+# the wrong node is the plausible-looking one (lan_ecl instead of lan_ecl + 180, which
+# is 99,441 km out of Saturn's ring plane). tools\ringplane.py derives and verifies it.
+Check "E30 ring rig carries the verified node" ((Get-Content "$MOCK\Scenarios\ORO\6 The sky\Rings - the crossing.scn" -Raw -EA SilentlyContinue) -match '28\.152253321 169\.525414') "the ring elements are not the ones tools\ringplane.py verified"
+Check "E30b ring rig starts above the plane" ((Get-Content "$MOCK\Scenarios\ORO\6 The sky\Rings - the crossing.scn" -Raw -EA SilentlyContinue) -match '348\.945073') "the argument of latitude is the asin-collapsed one - the ship would climb away from the rings"
+# E31: the retired tree. Without the legacy set the uninstaller can never remove
+# Scenarios\ORO_beta again - its byte-compare has nothing to compare against.
+Check "E31 legacy scenario set ships"  ((Get-ChildItem "$MOCK\ORO_beta\legacy\Scenarios\ORO_beta\*.scn" -EA SilentlyContinue).Count -eq 7) "the retired scenarios are not in the zip"
 Check "E11 client REPLACED by patched" ((Get-Content "$MOCK\Modules\Plugin\D3D9Client.dll" -Raw) -notmatch 'STOCK CLIENT') "still stock"
 Check "E12 backup of THEIR client made" ((Get-Content "$MOCK\ORO_beta\backup\Modules\Plugin\D3D9Client.dll" -Raw) -match 'STOCK CLIENT') "backup wrong"
-Check "E13 backup of their 11 shaders" ((Get-ChildItem "$MOCK\ORO_beta\backup\Modules\D3D9Client\*" -EA SilentlyContinue).Count -eq 11) "count wrong"
+Check "E13 backup of their 12 shaders" ((Get-ChildItem "$MOCK\ORO_beta\backup\Modules\D3D9Client\*" -EA SilentlyContinue).Count -eq 12) "count wrong"
 Check "E14 no PULSE-named file landed" ((Get-ChildItem $MOCK -Recurse -File | Where-Object { $_.Name -match 'PULSE' }).Count -eq 0) "PULSE file present"
 Check "E15 27 sounds at XRSound\ORO"   ((Get-ChildItem "$MOCK\XRSound\ORO\*.wav" -EA SilentlyContinue).Count -eq 27) "wav count wrong"
 Check "E15b 12 interior _in variants"  ((Get-ChildItem "$MOCK\XRSound\ORO\*_in.wav" -EA SilentlyContinue).Count -eq 12) "the VC storm would be silent"
@@ -234,8 +263,13 @@ Check "E23 exp reflection ecam"        (Test-Path "$MOCK\Config\GC\Atlantis_ecam
 # E24 is CONTENT-based, not Test-Path: the mock pre-creates these two as stock
 # (a real 2024 tree has them), so mere presence would pass without any install.
 Check "E24 Common.hlsl + BeaconArray PATCHED" (((Get-Content "$MOCK\Modules\D3D9Client\Common.hlsl" -Raw) -notmatch 'STOCK SHADER') -and ((Get-Content "$MOCK\Modules\D3D9Client\BeaconArray.fx" -Raw) -notmatch 'STOCK SHADER')) "still the mock's stock copy"
+# E31 (2026-09-12, patch aj): Planet.fx joined the deployed set - the third file to join by
+# being #included rather than named, and the Mesh.fx miss of 260823 is why this row exists.
+Check "E31 Planet.fx PATCHED"          ((Get-Content "$MOCK\Modules\D3D9Client\Planet.fx" -Raw) -notmatch 'STOCK SHADER') "still the mock's stock copy"
 Check "E25 focusall.lua shipped"       (Test-Path "$MOCK\Script\focusall.lua") "the vessel-unlock tool is missing"
 Check "E26 rain-surfaces cfg shipped"  ((Get-Content "$MOCK\Config\ORO\VesselsRainSurfaces.cfg" -Raw -EA SilentlyContinue) -match 'deltaglider_vc') "the stock DG windscreen declaration is missing"
+Check "E27 testlights.lua shipped"     (Test-Path "$MOCK\Script\testlights.lua") "the lights test rig is missing"
+Check "E28 lamp classes shipped"       ((Test-Path "$MOCK\Config\Vessels\ORO_LampSpot.cfg") -and (Test-Path "$MOCK\Config\Vessels\ORO_LampPost.cfg") -and (Test-Path "$MOCK\Meshes\ORO\lamp_spot.msh") -and (Test-Path "$MOCK\Meshes\ORO\lamp_post.msh")) "a lamp cfg or mesh is missing"
 
 # --- F: a second install is an UPGRADE (changed 2026-08-23 for the public beta) ---
 # The old refusal became an in-place upgrade: "they run the install bat and
@@ -285,9 +319,12 @@ Check "G11 Mesh.fx restored"           ((Get-Content "$MOCK\Modules\D3D9Client\M
 Check "G12 Particle.fx restored"       ((Get-Content "$MOCK\Modules\D3D9Client\Particle.fx" -Raw) -match 'STOCK SHADER') "not restored"
 Check "G13 NewMesh.hlsl restored"      ((Get-Content "$MOCK\Modules\D3D9Client\NewMesh.hlsl" -Raw) -match 'STOCK SHADER') "not restored"
 Check "G14 Common.hlsl restored"       ((Get-Content "$MOCK\Modules\D3D9Client\Common.hlsl" -Raw) -match 'STOCK SHADER') "not restored"
+Check "G20 Planet.fx restored"         ((Get-Content "$MOCK\Modules\D3D9Client\Planet.fx" -Raw) -match 'STOCK SHADER') "not restored"
 Check "G15 BeaconArray.fx restored"    ((Get-Content "$MOCK\Modules\D3D9Client\BeaconArray.fx" -Raw) -match 'STOCK SHADER') "not restored"
 Check "G16 focusall.lua removed"       (-not (Test-Path "$MOCK\Script\focusall.lua")) "left behind in the shared Script folder"
 Check "G17 ecam cfg removed"           (-not (Test-Path "$MOCK\Config\GC\Atlantis_ecam_oro.cfg")) "left behind in the shared Config\GC folder"
+Check "G18 testlights.lua removed"     (-not (Test-Path "$MOCK\Script\testlights.lua")) "left behind in the shared Script folder"
+Check "G19 lamp classes removed"       (-not ((Test-Path "$MOCK\Config\Vessels\ORO_LampSpot.cfg") -or (Test-Path "$MOCK\Config\Vessels\ORO_LampPost.cfg"))) "left behind in the shared Config\Vessels folder"
 
 # --- H: double uninstall -----------------------------------------------------
 # H2 is deliberately narrow. Since 2026-08-15 there are TWO "ORO is not here"

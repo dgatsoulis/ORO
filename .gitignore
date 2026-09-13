@@ -27,10 +27,30 @@ x64/
 # Beta packaging output: the staged tree and the zip. Not source, and it
 # carries a 920 KB third-party binary (the stock D3D9Client.dll).
 beta/dist/
+# Testers' forum screenshots, saved per build for triage (their content, not ours to publish).
+# IMAGES ONLY. This used to ignore the whole beta/reports/ tree, which swept up the WORKING
+# DOCUMENTS that live beside them - the triage lists and the effect plans - and left them with
+# no copy outside this one disk, one of them referenced by name from CLAUDE.md (2026-09-11).
+# The rule was written about the screenshots and was too broad. The .md files are tracked now
+# and held back from the PUBLIC repo by tools/publish_public.ps1 instead, so the public surface
+# is unchanged.
+beta/reports/**/*.jpg
+beta/reports/**/*.jpeg
+beta/reports/**/*.png
+beta/reports/**/*.gif
+beta/reports/**/*.bmp
 
 # The mock Orbiter tree beta/acceptance.ps1 builds and tears down each run.
 beta/_testtmp/
+tools/fxeff/fxeff.exe
+tools/fxeff/*.obj
+tools/__pycache__/
+tools/ringprofile_test/ringprofile_test.exe
+tools/ringprofile_test/*.obj
+tools/ringprofile_test/*.txt
 
 # Private to the development repository - never published. See
 # tools/publish_public.ps1, which is what stages this tree.
 CLAUDE.md
+OroParticlesSprites.cpp.shelved
+beta/reports/

@@ -66,6 +66,7 @@
 
 #include "OroModule.h"
 #include "OroState.h"
+#include "OroTree.h"
 #include <math.h>
 
 namespace {
@@ -75,8 +76,39 @@ namespace {
 	// the effect needs WATER in the air, and the water is in the troposphere. Every
 	// photograph of one - and there are thousands, because it is the shot every
 	// airshow photographer wants - is taken low and usually over the sea.
-	const double VAP_RHO_FULL = 0.60;    // [kg/m^3] full strength at or above (~6 km)
-	const double VAP_RHO_MIN  = 0.10;    // [kg/m^3] nothing at or below   (~18 km)
+	// ⚠️ THE DENSITY GATE (0.60 -> 0.10 kg/m^3, ~6 -> ~18 km) WAS RETIRED 2026-09-07 -
+	// his open item 2: "vapour cones are a bit more unpredictable than that. At low
+	// altitude (and high humidity, which isn't modeled in Orbiter), you are guaranteed
+	// to get the effect. On high altitude and no humidity, you are guaranteed to not get
+	// it." THE AIR decides now, per transonic TRANSIT (the VapAir block below):
+	//   chance = Max chance x WATER x (1 - h / CEILING) x EXPANSION
+	//   WATER     the planet's own water mask (Mask.tree alpha, 0 = sea - the terrain
+	//             shader's specular term) sampled at the sub-vessel point and a 25 km
+	//             ring: sea 1.0 .. deep inland 0.60. The marine boundary layer, which is
+	//             why every reference photograph is over the sea. No mask at all (the
+	//             Moon, an addon world) = no water = no cone.
+	//   CEILING   drawn once per transit, 15 km +-10% by default (the Dry ceiling
+	//             slider): the water content's own falloff, zero above it by law.
+	//   EXPANSION dynamic pressure / 20 kPa clamped to 1 - the size of the temperature
+	//             drop the flow's expansion produces (64 kPa at sea level at M 0.95,
+	//             17 kPa at 10 km, 8 kPa at 15 km): the physics that makes the top of
+	//             the band condense a little more readily than the bottom, and the
+	//             SHAPE of the altitude law instead of an arbitrary straight line.
+	// One humidity draw u per transit; the cone exists where the LIVE margin
+	// chance(h now) - u is positive, which is one rule for every case: a cone that formed
+	// low thins and dies as the ship climbs toward its ceiling, a descending ship with no
+	// cone grows one at the altitude where the air gets humid enough, a marginal draw is
+	// a faint cone. Everything the user touches is a BOUND (invariant 25i). Static
+	// pressure was considered and adds nothing: at a given Mach it is altitude.
+	const float  VAP_CEIL_SPREAD  = 0.10f;   // the ceiling's per-transit spread, +-fraction
+	const double VAP_Q_REF        = 20000.0; // [Pa] the expansion term saturates here
+	const double VAP_WATER_RING   = 25000.0; // [m] the water sample ring's radius
+	const float  VAP_WATER_INLAND = 0.60f;   // water factor with no sea in the ring
+	const float  VAP_WATER_SEA    = 1.00f;   // ... and over open water
+	const float  VAP_MARGIN_SOFT  = 0.12f;   // margin over which the envelope reaches full
+	const double VAP_BAND_HYST    = 0.03;    // [Mach] past the widest window = the transit is over
+	const int    VAP_MASK_LVL     = 7;       // Mask.tree level: fully populated, ~5 km/texel
+	const double VAP_WATER_DT     = 1.0;     // [s, sim] between water samples
 
 	// The Mach band. Condensation starts a little before M = 1 (the flow over the wing
 	// goes supersonic well before the vehicle does - that is what "transonic" means) and
@@ -223,6 +255,8 @@ namespace {
 		OBJHANDLE hV;      // for the render-epoch anchor (invariant 21a)
 		double  size, mUse;
 		float   fGate1, fGate2;   // per cone since 2026-08-29: two Mach windows, one air
+		float   fCertain;         // 2026-09-07: how much room the humidity draw had
+		                          //   (1 = certain, 0 = marginal) - feeds the intermittency
 		VECTOR3 Cg, fwdG, downG;
 		MATRIX3 Rv;        // the radial basis is anchored to the HULL (invariant 25e) -
 		                   //   without it the theta-keyed boil spins on attitude change
@@ -232,6 +266,38 @@ namespace {
 	};
 	VapSnap s_vap;
 	bool    s_vapValid = false;
+
+	// THE AIR (2026-09-07): one humidity draw per transonic transit. An EVENT TOKEN like
+	// the trail's chain id, not accumulated state: nothing integrates, and leaving the
+	// band (with hysteresis) discards it. Seeded from the sim time at band ENTRY, so two
+	// climbs through the band on one day differ - the unpredictability he asked for -
+	// while nothing re-rolls frame to frame.
+	struct VapAir {
+		OBJHANDLE hV      = NULL;     // the vessel the transit belongs to
+		bool      inBand  = false;
+		int       transit = 0;
+		float     u       = 0.0f;     // the humidity draw, 0..1
+		float     ceiling = 15000.f;  // the drawn dry ceiling [m]
+		double    waterT  = -1e9;     // simt of the last water sample
+		float     water   = -1.0f;    // water fraction around the vessel, 0..1; -1 = none yet
+		OBJHANDLE hWater  = NULL;     // the body the water sample belongs to
+	};
+	VapAir      s_air;
+	OroTileTree s_mask;               // the planet's water mask (Mask.tree, OroTree.h)
+
+	// A tiny integer hash -> 0..1 (the draw), and 1-D value noise on it (the
+	// intermittency's clock): pure functions, nothing stored.
+	inline float Hash01(unsigned h)
+	{
+		h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+		return (float)(h & 0xffffffu) / 16777215.0f;
+	}
+	inline float VNoise1(float x)
+	{
+		const float fl = floorf(x); const int i = (int)fl; const float f = x - fl;
+		const float a = Hash01((unsigned)i * 0x27d4eb2du), b = Hash01((unsigned)(i + 1) * 0x27d4eb2du);
+		return a + (b - a) * sstepf(f);
+	}
 }
 
 void OroModule::UpdateVapour()
@@ -242,6 +308,7 @@ void OroModule::UpdateVapour()
 	g_fx.vapMach   = 0.0f;
 	g_fx.vapVis    = 0.0f;
 	g_fx.vapWhy[0] = '\0';
+	g_fx.vapAirWhy[0] = '\0';
 
 	const bool live = g_fx.masterArmed && (g_fx.vapEnabled || g_fx.vapTest);
 	if (!live) { strcpy_s(g_fx.vapWhy, sizeof(g_fx.vapWhy), "off"); return; }
@@ -273,6 +340,87 @@ void OroModule::UpdateVapour()
 	// window in which he needs to know whether to switch to an external view. Same shape
 	// as the aurora's rule that identifying the world must precede every gate that only
 	// decides drawing (invariant 17): a number and a picture are different questions.
+	// --- THE AIR (2026-09-07) - does a cone FORM? ------------------------------
+	// Runs BEFORE the view gate on purpose: the draw is made at band ENTRY, and a
+	// transit begun from the cockpit must hold its draw when the view goes external.
+	// The constants block at the top of the file has the model; this is its bookkeeping.
+	float env = 1.0f, certain = 1.0f;
+	{
+		const double simt = oapiGetSimTime();
+		// The widest window any VISIBLE cone has - one transit for the vehicle, two
+		// collars share the air - with hysteresis, so edge jitter cannot re-roll it.
+		double lo = 9.0, hi = 0.0;
+		if (cone1) { lo = min(lo, (double)g_fx.vapMachMin);  hi = max(hi, (double)g_fx.vapMachMax);  }
+		if (cone2) { lo = min(lo, (double)g_fx.vapMachMin2); hi = max(hi, (double)g_fx.vapMachMax2); }
+		if (s_air.hV != hV) { s_air.hV = hV; s_air.inBand = false; s_air.water = -1.0f; s_air.hWater = NULL; }
+		if (!s_air.inBand && mach >= lo && mach <= hi) {
+			s_air.inBand = true;
+			s_air.transit++;
+			// (fmod first: a double past 2^32 cast straight to unsigned is undefined, and a
+			//  long scenario's simt x 1000 gets there in fifty days)
+			const unsigned seed = (unsigned)fmod(fabs(simt) * 1000.0, 4294967296.0) * 0x9E3779B1u
+			                    + (unsigned)s_air.transit * 0x85EBCA77u;
+			s_air.u       = Hash01(seed);
+			s_air.ceiling = 1000.0f * clampf(g_fx.vapCeiling, 5.0f, 25.0f)
+			              * (1.0f + VAP_CEIL_SPREAD * (2.0f * Hash01(seed ^ 0x5bd1e995u) - 1.0f));
+		} else if (s_air.inBand && (mach < lo - VAP_BAND_HYST || mach > hi + VAP_BAND_HYST)) {
+			s_air.inBand = false;
+		}
+
+		// THE WATER: the planet's own mask around the vessel, once a second of sim time.
+		// Nine samples - the sub-vessel point and a ring at 25 km - off level 7's block
+		// grid (~20 km cells), forced past the decode budget because a second's worth of
+		// tiles is two or three at most. 0 in the mask is water.
+		OBJHANDLE hRef = v->GetSurfaceRef();
+		if (hRef != s_air.hWater) { s_air.hWater = hRef; s_air.water = -1.0f; s_air.waterT = -1e9; }
+		s_mask.NewFrame();
+		if (hRef && simt - s_air.waterT >= VAP_WATER_DT) {
+			char bname[64]; oapiGetObjectName(hRef, bname, sizeof(bname));
+			if (s_mask.Open(bname, "Mask", "vapour")) {
+				double lon, lat, rad;
+				v->GetEquPos(lon, lat, rad);
+				const double dl = VAP_WATER_RING / max(rad, 1.0);          // the ring, in radians
+				const double cl = max(cos(lat), 0.05);
+				double sum = 0.0; int n = 0;
+				for (int k = 0; k < 9; k++) {
+					double la = lat, lo2 = lon;
+					if (k > 0) { const double a = (k - 1) * (PI / 4.0); la += dl * sin(a); lo2 += dl * cos(a) / cl; }
+					if (la >  PI * 0.5 - 1e-4) la =  PI * 0.5 - 1e-4;
+					if (la < -PI * 0.5 + 1e-4) la = -PI * 0.5 + 1e-4;
+					const float alpha = s_mask.Sample(la, lo2, VAP_MASK_LVL, true);
+					if (alpha >= 0.0f) { sum += 1.0 - alpha; n++; }
+				}
+				if (n) { s_air.water = (float)(sum / n); s_air.waterT = simt; }
+			} else {
+				s_air.water = 0.0f; s_air.waterT = simt;                    // no water map = dry
+			}
+		}
+
+		if (g_fx.vapTest) {
+			strcpy_s(g_fx.vapAirWhy, sizeof(g_fx.vapAirWhy), "test - bypassed");
+		} else {
+			const double h  = v->GetAltitude(ALTMODE_MEANRAD);              // sea level, not the ground
+			const double q  = v->GetDynPressure();
+			const float  W  = (s_air.water < 0.0f) ? 0.0f
+			                : VAP_WATER_INLAND + (VAP_WATER_SEA - VAP_WATER_INLAND) * clampf(s_air.water, 0.0f, 1.0f);
+			const float  E  = (float)clampd(q / VAP_Q_REF, 0.0, 1.0);
+			const float  hK = clampf(1.0f - (float)h / s_air.ceiling, 0.0f, 1.0f);
+			const float  chance = clampf(g_fx.vapChance, 0.0f, 1.0f) * W * hK * E;
+			const float  margin = s_air.inBand ? (chance - s_air.u) : 0.0f;
+			env     = sstepf(margin / VAP_MARGIN_SOFT);
+			certain = (chance > 1e-3f) ? clampf(margin / chance, 0.0f, 1.0f) : 0.0f;
+			// The readout: the geography and the live chance, then the verdict. "no cone"
+			// has to be distinguishable from "broken" (the lightning count's lesson).
+			const char* geo = (s_air.water < 0.0f) ? "no water map"
+			                : (s_air.water >= 0.85f) ? "sea" : (s_air.water >= 0.15f) ? "coast" : "inland";
+			if (s_air.water < 0.0f)  strcpy_s(g_fx.vapAirWhy, sizeof(g_fx.vapAirWhy), geo);
+			else if (hK <= 0.0f)     sprintf_s(g_fx.vapAirWhy, sizeof(g_fx.vapAirWhy), "dry above %.1f km", s_air.ceiling * 0.001f);
+			else if (!s_air.inBand)  sprintf_s(g_fx.vapAirWhy, sizeof(g_fx.vapAirWhy), "%s %.0f%%", geo, chance * 100.0f);
+			else if (margin > 0.0f)  sprintf_s(g_fx.vapAirWhy, sizeof(g_fx.vapAirWhy), "%s %.0f%% formed", geo, chance * 100.0f);
+			else                     sprintf_s(g_fx.vapAirWhy, sizeof(g_fx.vapAirWhy), "%s %.0f%% no cone", geo, chance * 100.0f);
+		}
+	}
+
 	if (!extGate) { strcpy_s(g_fx.vapWhy, sizeof(g_fx.vapWhy), "internal"); return; }
 
 	// --- the gates ------------------------------------------------------------
@@ -286,13 +434,8 @@ void OroModule::UpdateVapour()
 	if (g_fx.vapTest) {
 		mUse = VAP_TEST_M;
 	} else {
-		const double rho = v->GetAtmDensity();
-		const float fAir = ramp(rho, VAP_RHO_MIN, VAP_RHO_FULL);
-		if (fAir <= 0.001f) {
-			// Two honest reasons, and they are worth telling apart: a ship in orbit and
-			// a ship at 25 km are both "no cone" but only one of them is ever going to
-			// produce one by flying differently.
-			strcpy_s(g_fx.vapWhy, sizeof(g_fx.vapWhy), rho < 1e-6 ? "vacuum" : "thin air");
+		if (v->GetAtmDensity() < 1e-6) {
+			strcpy_s(g_fx.vapWhy, sizeof(g_fx.vapWhy), "vacuum");
 			return;
 		}
 		// The user's window, with the ramps as fixed fractions INSIDE it (invariant 23b).
@@ -315,8 +458,13 @@ void OroModule::UpdateVapour()
 			strcpy_s(g_fx.vapWhy, sizeof(g_fx.vapWhy), mach < hiAll ? "subsonic" : "past band");
 			return;
 		}
-		fGate1 = fAir * fM1;
-		fGate2 = fAir * fM2;
+		// THE AIR's verdict (drawn above): no margin, no cone - the Air readout says why.
+		if (env <= 0.001f) {
+			strcpy_s(g_fx.vapWhy, sizeof(g_fx.vapWhy), (s_air.water < 0.0f) ? "no water" : "no cone");
+			return;
+		}
+		fGate1 = env * fM1;
+		fGate2 = env * fM2;
 	}
 
 	// --- the flow axis --------------------------------------------------------
@@ -373,7 +521,7 @@ void OroModule::UpdateVapour()
 	// --- hand the world state to the render path and stop ---------------------
 	s_vap.hV   = hV;
 	s_vap.size = size;   s_vap.mUse = mUse;
-	s_vap.fGate1 = fGate1;  s_vap.fGate2 = fGate2;
+	s_vap.fGate1 = fGate1;  s_vap.fGate2 = fGate2;  s_vap.fCertain = certain;
 	s_vap.Cg   = Cg;     s_vap.fwdG = fwdG;   s_vap.downG = downG;
 	s_vap.Rv   = Rv;
 	s_vap.sunG = sunG;   s_vap.haveSun = haveSun; s_vap.dayF = dayF;
@@ -472,6 +620,8 @@ void OroModule::BuildVapourGeometry()
 		bool  baseOn;      // the BASE FILL pill - the closing disc, per cone
 		float baseOfs;     // BASE FILL OFFSET (2026-09-04): the cap centre's axial
 		                   //   displacement, x this cone's own reach, -1..+0.5
+		int   idx;         // 1 or 2 - the intermittency's phase (2026-09-07): the two
+		                   //   collars flutter on their own clocks, the Concorde's pair
 	};
 	float visMax = 0.0f;
 
@@ -494,6 +644,30 @@ void OroModule::BuildVapourGeometry()
 		               + 0.30f * sinf(t2 * fHz * 1.9f + 1.3f)
 		               + 0.15f * sinf(t2 * fHz * 2.8f + 2.7f);       // ~ -1 .. +1
 		const float flick = 1.0f + VAP_FLICK * fk;                   // 0.68 .. 1.32
+
+		// --- THE INTERMITTENCY (2026-09-07, his open item 2) ---------------------
+		// A real-time noise GATE on top of the flicker. The flicker dims and swells;
+		// this makes the cone APPEAR AND DIE in bursts of ~0.3-1 s with 50-100 ms
+		// edges, the way the airshow footage has it. The on-fraction is the
+		// Intermittency slider's, scaled by how much room the humidity draw had
+		// (fCertain): a certain draw at sea level flutters little (on 1 - 0.4 I of the
+		// time), a marginal one near its ceiling flutters most (on 1 - I). A pure
+		// function of REAL time and the cone's index - the two collars flutter on
+		// their own phases - so a paused sim keeps flickering and warp cannot strobe
+		// it (invariant 22d). OPACITY ONLY: the size keeps breathing on the flicker, a
+		// gate that scaled the geometry would be 25(k)'s distortion by another route.
+		// At 0 the gate is exactly 1 and the cone is bit-identical to before.
+		float gate = 1.0f;
+		{
+			const float I = clampf(g_fx.vapIntermit, 0.0f, 1.0f);
+			if (I > 0.001f) {
+				const float onFrac = 1.0f - I * (0.4f + 0.6f * (1.0f - clampf(s_vap.fCertain, 0.0f, 1.0f)));
+				const float ph = 37.1f * (float)K.idx;
+				const float n  = 0.72f * VNoise1(t2 / 0.75f + ph)
+				               + 0.28f * VNoise1(t2 / 0.22f + ph * 1.7f + 11.3f);
+				gate = sstepf((n - (1.0f - onFrac)) / 0.10f + 0.5f);
+			}
+		}
 
 		// THE THREE SIZES (his spec: "full control of the size, not just the radius").
 		// X and Y are BOTH radii in hull sizes - "same slider values for x and y = a
@@ -594,7 +768,7 @@ void OroModule::BuildVapourGeometry()
 		const float over   = (strK > 1.0f) ? (strK - 1.0f) : 0.0f;
 		const float strEff = strK + 7.5f * over * over;      // <=1 identical; 2 -> 9.5
 		const float fill   = sstepf(over);                   // 0 below 1, 1 at the top
-		const float tauK   = VAP_TAU * strEff * fGate * flick;  // the SAME flick that sized it
+		const float tauK   = VAP_TAU * strEff * fGate * flick * gate;  // the SAME flick that sized it; the gate is opacity-only
 
 		// The readout reports the strongest GATE, deliberately not the flickering
 		// value: he reads it to know where he is in the transonic window, and a number
@@ -919,13 +1093,13 @@ void OroModule::BuildVapourGeometry()
 	                      g_fx.vapPos,       g_fx.vapPosX,  g_fx.vapPosY,
 	                      g_fx.vapPitch,     g_fx.vapYaw,
 	                      g_fx.vapColour,    g_fx.vapStreakCol,
-	                      g_fx.vapBaseOn,    g_fx.vapBaseOfs };
+	                      g_fx.vapBaseOn,    g_fx.vapBaseOfs,   1 };
 	const VapKnobs k2 = { g_fx.vapStrength2, g_fx.vapSize2, g_fx.vapSizeY2, g_fx.vapSizeZ2,
 	                      g_fx.vapStreaks2,  g_fx.vapStreakChurn2, g_fx.vapFlickHz2,
 	                      g_fx.vapPos2,      g_fx.vapPosX2, g_fx.vapPosY2,
 	                      g_fx.vapPitch2,    g_fx.vapYaw2,
 	                      g_fx.vapColour2,   g_fx.vapStreakCol2,
-	                      g_fx.vapBaseOn2,   g_fx.vapBaseOfs2 };
+	                      g_fx.vapBaseOn2,   g_fx.vapBaseOfs2,  2 };
 	BuildCone(k1, s_vap.fGate1);
 	BuildCone(k2, s_vap.fGate2);
 
