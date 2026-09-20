@@ -102,8 +102,15 @@ namespace {
 // Session boundary: forget the anchor and the envelope, and make the next push
 // unconditional. Called at simulation start AND end (23m's rule - a crash must not leave
 // last session's world anchored under this one's).
+// BASE LIGHTS, the IN WEATHER latch (2026-09-19): whether the weather currently has the
+// bases' lights switched on. Hysteresis state, so it lives across frames and is cleared at
+// both session boundaries below (23m's rule) - a storm from last session must not leave
+// this session's airfield lit.
+static bool s_blWxLit = false;
+
 void OroFog_Reset()
 {
+	s_blWxLit = false;
 	s_envT = 0.0f; s_prevWant = false; s_prevPill = false; s_prevArmed = true;
 	s_anchored = false; s_hRef = NULL; s_valid = false; s_why[0] = 0;
 	for (int i = 0; i < 2; i++) { p_dens[i] = p_top[i] = p_scale[i] = -1.0f; p_base[i] = -1.0; }
@@ -222,11 +229,26 @@ void OroModule::PushFog()
 	}
 	// LAYER 1 - the storm's mist, on the same numbers the rain hands the client as storm
 	// light (rainIntensityLive already carries the rain's altitude/world gate).
+	// SNOW (2026-09-13): the same layer carries the falling snow's mist - an order denser
+	// than the rain's (moderate snow is ~1-2 km of visibility against the rain's ~9) and
+	// driven by what is FALLING (a standing cover on a clear day has no mist) through the
+	// snow's own Mist trim. The two storms are mutually exclusive, so the max is simply
+	// whichever is on; snowIntensityLive carries the rain's gate like its sibling.
 	{
 		const float st = on ? clampf(rainIntensityLive * clampf(g_fx.rainGloom, 0.0f, 2.0f) * 0.5f, 0.0f, 1.0f) : 0.0f;
 		const float k  = clampf(st * 1.4f, 0.0f, 1.0f);
-		if (k > 0.001f) {
-			dens[1] = MIST_DENS * k;
+		// ... on a LOG scale (2026-09-14, The Long Dark reference): a blizzard is a hundred
+		// metres of visibility and a light snow two kilometres, twenty times apart, which
+		// no linear slider reaches. Mist 0 = none; 0.5 = ~1.3 km; 1 = ~550 m; 1.5 = ~230 m;
+		// 2 = 100 m (Koschmieder 3.9 / V), at full snowfall; the first tenth fades it in.
+		const float m  = clampf(g_fx.snowMist, 0.0f, 2.0f);
+		const float sn = (on && m > 0.001f)
+		               ? clampf(snowIntensityLive * clampf(g_fx.snowFall, 0.0f, 1.0f), 0.0f, 1.0f) * clampf(m * 10.0f, 0.0f, 1.0f)
+		               : 0.0f;
+		const float dS = (3.9f / (3000.0f * powf(1.0f / 30.0f, m * 0.5f))) * sn;
+		const float d1 = fmaxf(MIST_DENS * k, dS);
+		if (d1 > 1.0e-7f) {
+			dens[1] = d1;
 			top[1]  = s_cloudAGL + BASE_MARGIN_M + MIST_ABOVE_M;
 			base[1] = s_rBaseStorm;
 		}
@@ -302,17 +324,69 @@ DWORD OroModule::FogColNearGround(DWORD c, float dist) const
 
 // ============================================================================
 // PushBaseLights - patch (ac). ORO draws none of it: the client owns the base's
-// day/night flip and its light sprites; this hands it the user's choice (the pill) and
-// the glow gain, on change. Borrow-and-return: the session sweeps push (false, 1).
-// The glow applies to whatever lights are lit - the stock night state too - so the
-// pill off with the gain at 1 is stock exactly.
+// day/night flip and its light sprites; this hands it the user's choice and the glow
+// gain, on change. Borrow-and-return: the session sweeps push (false, 1, 1).
+// ⚠️ STOCK IS STOCK AT ANY SLIDER VALUE (2026-09-17, his ruling). Until then the glow
+// gain applied to whatever lights were lit - the stock night state too - so the pill
+// off was stock only with the gain at 1. The settings file that shipped in 260913
+// carried the glow at 0.41, and every runway light, PAPI, VASI and base night texture
+// on every tester's install rendered at 41% (a forum report of "burgundy" PAPI). A
+// slider tuned for the fog-halo look must not dim the world's lights when the feature
+// it belongs to is off: stock pushes the same (false, 1, 1) the disarm does, the two
+// lit modes push the user's sliders.
+//
+// THREE MODES since 2026-09-19 (triage 37 - the same tester, with the pill on: "they
+// seem to be always turned on when they should only be on during the night"; the pill
+// WAS the force, and its help had promised weather). STOCK / IN WEATHER / ALWAYS:
+// ALWAYS is the old pill; IN WEATHER is the airfield rule the help described - the
+// lights switch on when the gloom justifies it and off again when it clears.
+// ⚠️ "THE GLOOM" IS READ OFF THE TWO NUMBERS THIS FRAME ALREADY HANDED THE CLIENT, so
+// the switch flips on exactly what is on screen and there is no second weather model:
+//   - the STORM LIGHT (stormPushed, PushSurfaceWet): the sun collapse the rain or the
+//     falling snow pushes, envelope x Gloom x 0.5 through the altitude gate. On past a
+//     quarter of the sun - with Gloom at 1 that is half the envelope, five seconds into
+//     a storm's ten-second build; a drizzle with Gloom under 0.5 never gets there.
+//   - the VISIBILITY from the two fog layers' pushed ground densities (p_dens: the
+//     ground fog plus the storm or snow mist), Koschmieder's 3.9 / density. On under
+//     5 km. Falling snow gets this for free (its mist at Mist 1 is 550 m); a standing
+//     cover on a clear day has no mist and no storm light, and stays stock.
+// Either trigger lights them; HYSTERESIS (off again only under 15% of the sun AND over
+// 6.5 km) so a hovering envelope cannot flicker; and a FLIP, not a fade - his 09-01
+// ruling ("that is a flip, not a ramp"), which is also what the client does with it,
+// one texture state per base, at most a second late (vBase::Update checks once a sim
+// second). Runs from both sensing sites AFTER PushSurfaceWet and PushFog (the order
+// in clbkPreStep and the keyboard tick), so the numbers it reads are this frame's.
+// The readout (baseLightsLive) is the instrument: stock / waiting / lit / forced.
 // ============================================================================
+static const float BL_STORM_ON  = 0.25f;    // storm light (0..1 of the sun taken) to switch on
+static const float BL_STORM_OFF = 0.15f;    // ... and to let go
+static const float BL_VIS_ON    = 5000.0f;  // m, the fog layers' ground visibility to switch on
+static const float BL_VIS_OFF   = 6500.0f;  // ... and to let go
+
 void OroModule::PushBaseLights()
 {
-	if (!pCore || !pCore->CanSetBaseLights()) return;
-	const int   on = (g_fx.masterArmed && g_fx.baseLightsOn) ? 1 : 0;
-	const float g  = clampf(g_fx.baseLightsGlow, 0.25f, 3.0f);
-	const float h  = clampf(g_fx.baseLightsHalo, 0.0f, 3.0f);
+	if (!pCore || !pCore->CanSetBaseLights()) { g_fx.baseLightsLive = 0; return; }
+	int mode = g_fx.masterArmed ? g_fx.baseLightsMode : 0;   // Ctrl+G hands stock back (18c)
+	if (mode < 0 || mode > 2) mode = 0;
+
+	bool force = false;
+	if (mode == 2) {
+		force = true;
+	} else if (mode == 1) {
+		const float st = (stormPushed > 0.0f) ? stormPushed : 0.0f;   // -1 = never pushed
+		float d = 0.0f;
+		for (int i = 0; i < 2; i++) if (p_dens[i] > 0.0f) d += p_dens[i];
+		const float vis = (d > 1.0e-7f) ? 3.9f / d : 1.0e9f;
+		if (!s_blWxLit) { if (st >= BL_STORM_ON  || vis <= BL_VIS_ON)  s_blWxLit = true;  }
+		else            { if (st <= BL_STORM_OFF && vis >= BL_VIS_OFF) s_blWxLit = false; }
+		force = s_blWxLit;
+	}
+	if (mode != 1) s_blWxLit = false;         // the latch belongs to IN WEATHER alone
+	g_fx.baseLightsLive = (mode == 2) ? 3 : (mode == 1 ? (force ? 2 : 1) : 0);
+
+	const int   on = force ? 1 : 0;
+	const float g  = on ? clampf(g_fx.baseLightsGlow, 0.25f, 3.0f) : 1.0f;
+	const float h  = on ? clampf(g_fx.baseLightsHalo, 0.0f, 3.0f) : 1.0f;
 	if (on != blPushedOn || fabsf(g - blPushedGlow) > 0.002f || fabsf(h - blPushedHalo) > 0.002f) {
 		blPushedOn = on; blPushedGlow = g; blPushedHalo = h;
 		pCore->SetBaseLights(on != 0, g, h);

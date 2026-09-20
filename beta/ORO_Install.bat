@@ -158,7 +158,7 @@ if defined UPGRADE (
     if not exist "%BACKUP%\Modules\Plugin"     mkdir "%BACKUP%\Modules\Plugin"     >nul 2>&1
     if not exist "%BACKUP%\Modules\D3D9Client" mkdir "%BACKUP%\Modules\D3D9Client" >nul 2>&1
     copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx Scatter.hlsl) do (
       if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] backup reseeded from the shipped stock copies
@@ -270,7 +270,7 @@ if defined PULSEFOUND (
   if exist "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" (
     echo   Recovering your original graphics client from PULSE's backup...
     copy /y "%ROOT%\PULSE_beta\backup\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx Scatter.hlsl) do (
       if exist "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" copy /y "%ROOT%\PULSE_beta\backup\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] restored from PULSE's own backup
@@ -278,7 +278,7 @@ if defined PULSEFOUND (
     echo   PULSE's backup is gone - using the pristine Orbiter 2024 originals
     echo   shipped with this beta instead...
     copy /y "%STOCK%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin\" >nul 2>&1
-    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
+    for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx Scatter.hlsl) do (
       if exist "%STOCK%\Modules\D3D9Client\%%F" copy /y "%STOCK%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client\" >nul 2>&1
     )
     echo   [ok] restored from the shipped originals
@@ -290,7 +290,7 @@ if defined PULSEFOUND (
 rem --- 4. say plainly what is about to happen, and ask ------------------------
 echo.
 echo   This will:
-echo     - back up your D3D9 client and its eleven shaders into
+echo     - back up your D3D9 client and its thirteen shaders into
 echo       ORO_beta\backup\  (on an upgrade the first install's backup is
 echo       kept instead - that one holds your true originals)
 echo     - install a PATCHED D3D9 client. Stock Orbiter 2024 crashes when any
@@ -323,7 +323,7 @@ if defined UPGRADE (
   if not exist "%BACKUP%\Modules\D3D9Client"  mkdir "%BACKUP%\Modules\D3D9Client"  >nul 2>&1
 
   copy /y "%ROOT%\Modules\Plugin\D3D9Client.dll" "%BACKUP%\Modules\Plugin\" >nul || goto :copyfail
-  for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
+  for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx Scatter.hlsl) do (
     if exist "%ROOT%\Modules\D3D9Client\%%F" (
       copy /y "%ROOT%\Modules\D3D9Client\%%F" "%BACKUP%\Modules\D3D9Client\" >nul || goto :copyfail
     )
@@ -353,6 +353,17 @@ if exist "%ROOT%\Scenarios\ORO_beta" (
 )
 
 xcopy "%PAY%\*" "%ROOT%\" /E /I /Y /Q >nul || goto :copyfail
+
+rem --- 6a. sounds RETIRED by this release (2026-09-18) ------------------------
+rem  Rain_hull.wav and the three Rain_*_in.wav were replaced by the selectable
+rem  Rain_in_cabin_N / Hull_drum_N loops. They are not in the payload any more,
+rem  so the byte-identical rule alone would keep them forever; their last shipped
+rem  copies ride under legacy\ and each is removed here ONLY if it is still
+rem  byte-identical to that copy - a file the user replaced is kept and named.
+call :cleanLegacyFile "XRSound\ORO\Rain_hull.wav"
+call :cleanLegacyFile "XRSound\ORO\Rain_light_in.wav"
+call :cleanLegacyFile "XRSound\ORO\Rain_medium_in.wav"
+call :cleanLegacyFile "XRSound\ORO\Rain_heavy_in.wav"
 
 rem --- 6b. the old sound layout (pre-260823) ----------------------------------
 rem  ORO's sounds moved from Modules\ORO\sounds\ to XRSound\ORO\ - the Orbiter
@@ -390,6 +401,7 @@ if not exist "%ROOT%\Modules\D3D9Client\Particle.fx"      set "MISSING=Particle.
 if not exist "%ROOT%\Modules\D3D9Client\NewMesh.hlsl"     set "MISSING=NewMesh.hlsl"
 if not exist "%ROOT%\Modules\D3D9Client\Common.hlsl"      set "MISSING=Common.hlsl"
 if not exist "%ROOT%\Modules\D3D9Client\Planet.fx"        set "MISSING=Planet.fx"
+if not exist "%ROOT%\Modules\D3D9Client\Scatter.hlsl"     set "MISSING=Scatter.hlsl"
 if not exist "%ROOT%\Script\focusall.lua"                 set "MISSING=focusall.lua"
 if not exist "%ROOT%\Config\ORO\VesselsRainSurfaces.cfg"  set "MISSING=VesselsRainSurfaces.cfg"
 if not exist "%ROOT%\Textures\ORO\Particles\README.txt"  set "MISSING=Particles README"
@@ -551,5 +563,22 @@ for /r "%ROOT%\%SUB%" %%F in (*) do (
 )
 for /f "delims=" %%D in ('dir "%ROOT%\%SUB%" /ad /b /s 2^>nul ^| sort /r') do rd "%%D" >nul 2>&1
 rd "%ROOT%\%SUB%" >nul 2>&1
+goto :eof
+
+rem ===========================================================================
+rem  cleanLegacyFile - ONE file a PREVIOUS release shipped, inside a folder that
+rem  still holds current files: gone if byte-identical to its copy under legacy\,
+rem  kept (and said so) if the user changed it. cleanLegacy is for a whole tree.
+rem ===========================================================================
+:cleanLegacyFile
+set "REL=%~1"
+if not exist "%ROOT%\%REL%" goto :eof
+if not exist "%LEG%\%REL%" goto :eof
+fc /b "%ROOT%\%REL%" "%LEG%\%REL%" >nul 2>&1
+if errorlevel 1 (
+  echo     kept ^(you changed this^): %REL%
+) else (
+  del /q "%ROOT%\%REL%" >nul 2>&1
+)
 goto :eof
 

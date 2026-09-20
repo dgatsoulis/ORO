@@ -34,7 +34,10 @@ $Source = Split-Path -Parent $PSScriptRoot     # the repo root, whatever it is c
 # It is held back (2026-09-12) because it is not in the project, does not build, and in a
 # public repo it reads as abandoned code rather than as a shelf - which is the opposite of
 # what someone reading this project for the first time needs. The private repo keeps it.
-$Private = @('CLAUDE.md', 'OroParticlesSprites.cpp.shelved')
+$Private = @('CLAUDE.md', 'HISTORY.md', 'OroParticlesSprites.cpp.shelved')
+# HISTORY.md (2026-09-19): the session journals and superseded continuation blocks archived
+# out of CLAUDE.md so the notes file stops loading at 40% of a session's context. Same
+# audience as CLAUDE.md, same rule: tracked here, never published.
 
 # Directory prefixes held back wholesale. Entries end in '/' and match on the path prefix.
 # beta/reports/ carries the internal working documents - triage lists of tester reports and

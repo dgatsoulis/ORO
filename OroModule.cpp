@@ -277,7 +277,7 @@ void OroModule::DrawLightningPoly(oapi::Sketchpad* pSkp)
 // cockpit ONLY, so the GROUND cannot clip rain and the build does that by hand.
 void OroModule::DrawRainPoly(oapi::Sketchpad* pSkp)
 {
-	if ((rainVtxN <= 0 && gndVtxN <= 0 && ringCN <= 0 && ringVN <= 0 && deckN <= 0) || !pCore) return;
+	if ((rainVtxN <= 0 && gndVtxN <= 0 && ringCN <= 0 && ringVN <= 0 && deckN <= 0 && shedVtxN <= 0) || !pCore) return;
 
 	// TWO POLYS, ONE CEILING EACH (see RAIN_GND_TRI in OroModule.h): the 65535-vertex cap
 	// is per HPOLY, so the deck + ring fields and the streak sheet each get their own
@@ -352,15 +352,37 @@ void OroModule::DrawRainPoly(oapi::Sketchpad* pSkp)
 			pSkp->DrawPoly(hRainRingVPoly);
 		}
 	}
-	if (rainVtxN > 0) {
-		if (!hRainPoly) {
-			static gcCore::clrVtx zero[RAIN_MAX_TRI * 3];    // zero-init: degenerate, alpha 0
-			hRainPoly = pCore->CreateTriangles(NULL, zero, RAIN_MAX_TRI * 3, PF_TRIANGLES);
+	// THE SHED FLAKES (step E, 2026-09-20): world particles behind a hull that is blowing
+	// its cover off, drawn BEFORE the sheet (the sheet is the layer nearest the eye) with the
+	// same alpha state and the same per-pixel clip; their own poly, their own ceiling
+	if (shedVtxN > 0) {
+		if (!hShedPoly) {
+			static gcCore::clrVtx zeroS[SHED_MAX_TRI * 3];   // zero-init: degenerate, alpha 0
+			hShedPoly = pCore->CreateTriangles(NULL, zeroS, SHED_MAX_TRI * 3, PF_TRIANGLES);
 		}
-		if (hRainPoly) {
-			if (depthClipOK) pCore->CreateTrianglesDepth(hRainPoly, (const gcCore::clrVtx*)rainVtx, rainDepth, RAIN_MAX_TRI * 3, PF_TRIANGLES);
-			else             pCore->CreateTriangles(hRainPoly, (const gcCore::clrVtx*)rainVtx, RAIN_MAX_TRI * 3, PF_TRIANGLES);
-			pSkp->DrawPoly(hRainPoly);
+		if (hShedPoly) {
+			if (depthClipOK) pCore->CreateTrianglesDepth(hShedPoly, (const gcCore::clrVtx*)shedVtx, shedDepth, SHED_MAX_TRI * 3, PF_TRIANGLES);
+			else             pCore->CreateTriangles(hShedPoly, (const gcCore::clrVtx*)shedVtx, SHED_MAX_TRI * 3, PF_TRIANGLES);
+			pSkp->DrawPoly(hShedPoly);
+		}
+	}
+	if (rainVtxN > 0) {
+		// THE SHEET SPANS RAIN_POLYS GROUPS (snow round 3, 2026-09-19): 65535 vertices is a
+		// per-group cap and a blizzard that hides the scenery needs ~64k triangles, so the one
+		// buffer goes up as consecutive slices, each its own poly. A slice past rainVtxN is
+		// all zero-padding (invariant 3) and is neither uploaded nor drawn; every slice that
+		// IS drawn goes up whole, padded tail and all - the creation count, every frame.
+		for (int k = 0; k < RAIN_POLYS; k++) {
+			const int v0 = k * RAIN_POLY_TRI * 3;
+			if (v0 >= rainVtxN) break;
+			if (!hRainPoly[k]) {
+				static gcCore::clrVtx zero[RAIN_POLY_TRI * 3];    // zero-init: degenerate, alpha 0
+				hRainPoly[k] = pCore->CreateTriangles(NULL, zero, RAIN_POLY_TRI * 3, PF_TRIANGLES);
+			}
+			if (!hRainPoly[k]) break;
+			if (depthClipOK) pCore->CreateTrianglesDepth(hRainPoly[k], (const gcCore::clrVtx*)(rainVtx + v0), rainDepth + v0, RAIN_POLY_TRI * 3, PF_TRIANGLES);
+			else             pCore->CreateTriangles(hRainPoly[k], (const gcCore::clrVtx*)(rainVtx + v0), RAIN_POLY_TRI * 3, PF_TRIANGLES);
+			pSkp->DrawPoly(hRainPoly[k]);
 		}
 	}
 	pSkp->SetBlendState(oapi::Sketchpad::BlendState::ALPHABLEND);        // leave the pad as found
@@ -389,7 +411,17 @@ void OroModule::DrawGloomPass()
 	if (viewGate)                   glassDiag |= 0x2000;
 	glassDiagI = rainIntensityLive;
 
-	if (rainIntensityLive <= 0.002f || !ipiReady || !pCore || !hFrameTex || !pIPIGloom) return;
+	// THE FROST (snow round 3, step C, 2026-09-20): the ice on the glass runs this pass in a
+	// SNOWFALL too - the rain's envelope is zero then, and the gloom below stays the rain's.
+	// The ice's state is OroSnow.cpp's, the altitude gate the rain's (28g), the pill its own.
+	float frostWant = 0.0f;
+	if (g_fx.snowFrostOn && rainVC) {
+		float fs = g_fx.snowFrost; if (fs < 0.0f) fs = 0.0f; if (fs > 1.0f) fs = 1.0f;
+		float gt = rainGateLive;   if (gt < 0.0f) gt = 0.0f; if (gt > 1.0f) gt = 1.0f;
+		frostWant = fs * gt;
+	}
+	glassDiagFw = frostWant; glassDiagFr = 0.0f;   // the frost's want / what gets pushed (the diag line)
+	if ((rainIntensityLive <= 0.002f && frostWant <= 0.002f) || !ipiReady || !pCore || !hFrameTex || !pIPIGloom) return;
 	// The SLIDER is read HERE, in the render path, not in clbkPreStep - which does not run
 	// while paused, so folding it in on the main thread made the control dead in exactly
 	// the state the look gets judged in (invariant 1).
@@ -411,9 +443,10 @@ void OroModule::DrawGloomPass()
 	if (ipiDepthOK)              glassDiag |= 0x04;
 	if (g_fx.rainGlass > 0.001f) glassDiag |= 0x08;
 	if (viewH > 0)               glassDiag |= 0x10;
-	if (rainVC && rainGlassOK && ipiDepthOK && g_fx.rainGlass > 0.001f &&
-	    g_fx.rainGlassSize > 0.05f && viewH > 0 &&
-	    FillProjCam(cpos, Rcam, tanAp)) {
+	float fr = 0.0f;   // the frost, once the chart it rides can be built
+	const bool chartOK = rainVC && rainGlassOK && ipiDepthOK && viewH > 0 && FillProjCam(cpos, Rcam, tanAp);
+	if (chartOK && frostWant > 0.002f) fr = frostWant;
+	if (chartOK && g_fx.rainGlass > 0.001f && g_fx.rainGlassSize > 0.05f) {
 		glassDiag |= 0x20;
 		// COVERAGE = the user's target x the glass fill (2026-08-26, his build-up ask).
 		// rainGlassWet is the canopy's own soak scalar (UpdateRain, GLASS_RISE), so the
@@ -438,7 +471,7 @@ void OroModule::DrawGloomPass()
 
 	// Nothing to do at all - and BOTH terms have to be idle, because the drops must
 	// survive a Gloom slider at zero (they are not the overcast, they are on the window).
-	if (gl <= 0.002f && dr <= 0.002f) return;
+	if (gl <= 0.002f && dr <= 0.002f && fr <= 0.002f) return;
 
 	SURFHANDLE hBB = pCore->GetBackBufferHandle();
 	if (!hBB || !pCore->CopyResource(hFrameTex, hBB)) return;
@@ -446,17 +479,18 @@ void OroModule::DrawGloomPass()
 	pIPIGloom->SetOutput(0, hBB);
 	pIPIGloom->SetFloat("fGloom", gl > 1.0f ? 1.0f : gl);
 
-	if (dr > 0.002f) {
+	if (dr > 0.002f || fr > 0.002f) {   // the drops and the ice both read the glass mask and ride its chart (step C)
 		// ⚠️ PATCH (h). If the bind FAILS the buffer does not exist this session
 		// (SunGlare off) and the mask would be a constant - which would paper drops
 		// across the instrument panel. Degrade to no drops rather than assume, exactly
 		// as the Sketchpad clip does, and let the RAIN caption carry the reason.
-		if (!pCore->SetIPISceneDepth(pIPIGloom, "tDepth", IPF_POINT | IPF_CLAMP)) dr = 0.0f;
+		if (!pCore->SetIPISceneDepth(pIPIGloom, "tDepth", IPF_POINT | IPF_CLAMP)) { dr = 0.0f; fr = 0.0f; }
 		else glassDiag |= 0x40;
 	}
 	glassDiagDr = dr;
+	glassDiagFr = fr;
 
-	if (dr > 0.002f) {
+	if (dr > 0.002f || fr > 0.002f) {   // the drops and the ice both read the glass mask and ride its chart (step C)
 		// THE CAMERA AXES, EXPRESSED IN THE VESSEL FRAME. This is what nails the drops
 		// to the glass while the pilot looks around: the shader turns each pixel into a
 		// view ray, rotates it here, and hashes the lattice on the result - so the field
@@ -500,6 +534,15 @@ void OroModule::DrawGloomPass()
 		// crawls the pane in ~20 s; at approach speeds it sweeps aft in under a second.
 		{
 			float ra = g_fx.rainGlassRunners; if (ra < 0.0f) ra = 0.0f; if (ra > 3.0f) ra = 3.0f;
+			// THE COUNT FOLLOWS THE RAIN (2026-09-17, Stebb's ask, promised on the thread):
+			// the Runners slider is the MAXIMUM, and the live count scales with the RAIN
+			// page's density - less rain, fewer runners. Capped at 1 so the default
+			// density (1.0) and anything above it are the flown look exactly; speed
+			// already multiplies them through the shear (fShear, dynamic pressure).
+			{
+				float dn = g_fx.rainDensity; if (dn < 0.0f) dn = 0.0f; if (dn > 1.0f) dn = 1.0f;
+				ra *= dn;
+			}
 			const float mag  = rainGlassRunMag;
 			float radS = 0.045f + mag * mag * 4.0e-5f;         // rad/s along the meridian
 			if (radS > 0.9f) radS = 0.9f;
@@ -577,6 +620,13 @@ void OroModule::DrawGloomPass()
 		pIPIGloom->SetTexture("tDepth", NULL, 0);
 	}
 
+	{
+		float rch = g_fx.snowFrostReach; if (rch < 0.0f) rch = 0.0f; if (rch > 1.0f) rch = 1.0f;
+		float blr = g_fx.snowFrostBlur;  if (blr < 0.0f) blr = 0.0f; if (blr > 2.0f) blr = 2.0f;
+		pIPIGloom->SetFloat("fFrost",      fr);
+		pIPIGloom->SetFloat("fFrostReach", rch);
+		pIPIGloom->SetFloat("fFrostBlur",  blr);
+	}
 	pIPIGloom->Execute((DWORD)0, true, gcIPInterface::Rect);
 }
 
@@ -914,8 +964,36 @@ namespace {
 		{ "FogFade",          &g_fx.fogFade,          ST_F },
 		{ "FogBrightness",    &g_fx.fogBright,        ST_F },
 		{ "FogSunGlow",       &g_fx.fogGlow,          ST_F },
+		// SNOW (2026-09-13) - the SNOW leaf. GLOBAL like the rain, Earth only for now;
+		// snowTest is transient and never written (23i's rule). Mutually exclusive with
+		// RainOn: a file carrying both reads as rain (OroSettings_Load resolves it).
+		{ "SnowOn",           &g_fx.snowEnabled,      ST_B },
+		{ "SnowFall",         &g_fx.snowFall,         ST_F },
+		{ "SnowFlakeSize",    &g_fx.snowFlake,        ST_F },
+		{ "SnowContrast",     &g_fx.snowContrast,     ST_F },
+		{ "SnowSpeed",        &g_fx.snowSpeed,        ST_F },
+		{ "SnowWander",       &g_fx.snowWander,       ST_F },
+		{ "SnowWind",         &g_fx.snowWind,         ST_F },
+		{ "SnowWindDir",      &g_fx.snowWindDir,      ST_F },
+		{ "SnowGloom",        &g_fx.snowGloom,        ST_F },
+		{ "SnowMist",         &g_fx.snowMist,         ST_F },
+		{ "SnowCover",        &g_fx.snowCover,        ST_F },
+		{ "SnowLine",         &g_fx.snowLine,         ST_F },
+		{ "SnowLineWidth",    &g_fx.snowLineW,        ST_F },
+		{ "SnowBuildMin",     &g_fx.snowBuild,        ST_F },
+		{ "SnowBright",       &g_fx.snowBright,       ST_F },
+		{ "SnowRelief",       &g_fx.snowRelief,       ST_F },
+		{ "SnowSparkle",      &g_fx.snowSparkle,      ST_F },
+		{ "SnowShed",         &g_fx.snowShed,         ST_F },   // step E (2026-09-20)
+		{ "SnowFrostOn",      &g_fx.snowFrostOn,      ST_B },
+		{ "SnowFrostReach",   &g_fx.snowFrostReach,   ST_F },
+		{ "SnowFrostMin",     &g_fx.snowFrostMin,     ST_F },
+		{ "SnowFrostBlur",    &g_fx.snowFrostBlur,    ST_F },
+		{ "SnowTracksOn",     &g_fx.snowTracksOn,     ST_B },   // TIRE MARKS (step D, 2026-09-20)
+		{ "SnowTrackFade",    &g_fx.snowTrackFade,    ST_F },
 		// BASE LIGHTS (patch ac) - one setting, two pages (RAIN + FOG), GLOBAL.
-		{ "BaseLightsOn",     &g_fx.baseLightsOn,     ST_B },
+		{ "BaseLightsMode",   &g_fx.baseLightsMode,   ST_I },   // 0 stock / 1 in weather / 2 always (2026-09-19);
+		                                                         //   a pre-09-19 BaseLightsOn is resolved in OroSettings_Load
 		{ "BaseLightsGlow",   &g_fx.baseLightsGlow,   ST_F },
 		{ "BaseLightsHalo",   &g_fx.baseLightsHalo,   ST_F },
 		{ "RainOn",           &g_fx.rainEnabled,      ST_B },
@@ -1076,6 +1154,8 @@ namespace {
 		{ "VCRainSound",      &g_fx.vcRainSound,      ST_F },   // the cabin's own rain loops (2026-09-06)
 		{ "RainHullVol",      &g_fx.rainHullVol,      ST_F },   // moved here from the RAIN table the same
 		                                                        //   day - the drum is about the HULL (28q)
+		{ "VCRainLoop",       &g_fx.vcRainSndSel,     ST_I },   // which Rain_in_cabin_<n>.wav (2026-09-18)
+		{ "HullDrumLoop",     &g_fx.hullDrumSel,      ST_I },   // which Hull_drum_<n>.wav
 		{ "ShakeOn",          &g_fx.shakeEnabled,     ST_B },
 		{ "ShakeAmpX",        &g_fx.shakeAmpX,        ST_F },
 		{ "ShakeAmpY",        &g_fx.shakeAmpY,        ST_F },
@@ -1164,6 +1244,12 @@ namespace {
 	{ "PrtColour2",       &g_fx.prtColour2,       ST_I },
 	{ "PrtTexStock",      &g_fx.prtTexStock,      ST_B },
 		{ "ReentryTrim",      &g_fx.reentry,          ST_F },
+		// THE HEAT CURVE (2026-09-15). Per class, and CLASSIC by default - see the
+		// parking note in OroSettings_LoadClass, which is what makes "default" mean
+		// UNREACHABLE rather than merely unset for every hull tuned before today.
+		{ "PlasHeatModel",    &g_fx.plasHeatModel,    ST_I },   // 0 CLASSIC, 1 PHYSICAL
+		{ "PlasGlowOnset",    &g_fx.plasGlowOnset,    ST_F },   // [K] first visible glow
+		{ "PlasGlowFull",     &g_fx.plasGlowFull,     ST_F },   // [K] full plasma
 		{ "PlasSaturation",   &g_fx.plasSat,          ST_F },
 		{ "PlasHullLight",    &g_fx.plasLight,        ST_F },
 		{ "PlasStreakLen",    &g_fx.plasStreakLen,    ST_F },
@@ -1173,6 +1259,7 @@ namespace {
 		{ "PlasFinRake",      &g_fx.plasFinRake,      ST_F },   // ... and how far it splays
 		{ "PlasVCGlow",       &g_fx.plasVCGlow,       ST_F },   // the cockpit sheath
 		{ "PlasCabinWash",    &g_fx.plasCabin,        ST_F },   // where the cockpit glow lands
+		{ "PlasVcChurn",      &g_fx.plasVcChurn,      ST_F },   // how fast the cockpit sheath lives (2026-09-17)
 		{ "PlasEdgeLight",    &g_fx.plasComa,         ST_F },
 		{ "PlasSpark",        &g_fx.plasSpark,        ST_F },
 		{ "PlasSparkLife",    &g_fx.plasSparkLife,    ST_F },
@@ -1626,6 +1713,7 @@ void OroSettings_Load()
 	}
 	FILEHANDLE f = oapiOpenFile(SETTINGS_FILE, FILE_IN, CONFIG);
 	if (!f) return;                         // no file yet - built-in defaults stand
+	g_fx.baseLightsMode = -1;               // parked = "the key was absent" (resolved below)
 	const int n = ReadTable(f, SETTINGS, NSETTINGS);
 	// The movable blocks are read UNCONDITIONALLY, whatever any hull says. This file is the
 	// fallback every unconfigured vessel lands on, so its copy is always wanted in memory.
@@ -1635,7 +1723,26 @@ void OroSettings_Load()
 		nmTot += MOVBLK[b].n;
 		SnapTable(MOVBLK[b].tbl, MOVBLK[b].n, MOVBLK[b].globalVal);
 	}
+	// BASE LIGHTS became a three-state mode on 2026-09-19 (STOCK / IN WEATHER / ALWAYS).
+	// A file from before carries the pill's bool instead, and TRUE lands on IN WEATHER:
+	// that is what the pill's own help had promised all along ("the way a real airfield
+	// lights up when the visibility drops"), and it closes the lights-on-at-noon report
+	// without the user touching a setting. The next SAVE writes the new key; the old one
+	// is gone with it (the writer truncates). A mode key out of range lands on STOCK.
+	if (g_fx.baseLightsMode < 0) {
+		bool b = false;
+		g_fx.baseLightsMode = (oapiReadItem_bool(f, (char*)"BaseLightsOn", b) && b) ? 1 : 0;
+	}
+	if (g_fx.baseLightsMode > 2) g_fx.baseLightsMode = 0;
 	oapiCloseFile(f, FILE_IN);
+	// RAIN AND SNOW ARE MUTUALLY EXCLUSIVE (his rule, 2026-09-13), and this is the ONE
+	// place besides the pill clicks where it is enforced - at load, never per pre-step
+	// (an every-pre-step arbitration silently rewrote loaded settings once, 2026-08-29).
+	// A file carrying both reads as RAIN, the older effect.
+	if (g_fx.rainEnabled && g_fx.snowEnabled) {
+		g_fx.snowEnabled = false;
+		OroLog(1, "ORO: RainOn and SnowOn both set - rain wins, snow off (mutually exclusive).");
+	}
 	OroLog(1, "ORO: global settings loaded (%d of %d items, movable %d of %d).",
 	              n, NSETTINGS, nm, nmTot);
 }
@@ -2494,6 +2601,18 @@ void OroSettings_LoadClass(const char* cls)
 		*mb.perClass  = false;
 	}
 
+	// AND THE HEAT CURVE RESETS WITH THEM, for the same reason and one more
+	// (2026-09-15). The class loader's rule for a missing key is "keep the current
+	// value", which is right for a slider and WRONG FOR A MODE: fly a hull whose cfg
+	// asks for PHYSICAL, switch to any other, and that other hull would inherit a
+	// different heat curve with no key anywhere saying so - which is exactly how a
+	// change made for one addon breaks the look for every other. Parked BEFORE the
+	// no-file early return, so a hull with no cfg at all gets CLASSIC too. The two
+	// KELVIN anchors reset with it because they are meaningless apart from it.
+	g_fx.plasHeatModel = 0;
+	g_fx.plasGlowOnset = 800.0f;
+	g_fx.plasGlowFull  = 2500.0f;
+
 	char fn[64], rel[128];
 	ClassFileName(cls, fn, sizeof(fn));
 	sprintf_s(rel, "ORO\\%s.cfg", fn);
@@ -2938,10 +3057,11 @@ OroModule::~OroModule()
 		pCore->DeletePoly(hPlumeDkPoly);
 		hPlumeDkPoly = NULL;
 	}
-	if (pCore && hRainPoly) {
-		pCore->DeletePoly(hRainPoly);
-		hRainPoly = NULL;
+	for (int k = 0; k < RAIN_POLYS; k++) if (pCore && hRainPoly[k]) {   // the sheet's groups (snow round 3)
+		pCore->DeletePoly(hRainPoly[k]);
+		hRainPoly[k] = NULL;
 	}
+	if (pCore && hShedPoly) { pCore->DeletePoly(hShedPoly); hShedPoly = NULL; }   // the shed flakes (step E)
 	if (pCore && hRainGndPoly) {
 		pCore->DeletePoly(hRainGndPoly);
 		hRainGndPoly = NULL;
@@ -2973,6 +3093,10 @@ OroModule::~OroModule()
 	// patch (aa): and its clear air - both fog layers to zero, the anchor forgotten
 	if (pCore && pCore->CanSetFogLayer())       { pCore->SetFogLayer(0, 0.0, 0.0f, 1.0f, 0.0f); pCore->SetFogLayer(1, 0.0, 0.0f, 1.0f, 0.0f); }
 	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = 0.0f; }
+	// the snow round (2026-09-13): bare ground back, the cover and the fall forgotten
+	if (pCore && pCore->CanSetSnowCover())      { pCore->SetSnowCover(0.0f, 0.0f, 300.0f); }
+	if (pCore && pCore->CanSetSnowLook())       { pCore->SetSnowLook(0.0f, 1.0f, 0.0f, 0.0f); }   // round 3: the look back to stock, nothing falling
+	{ extern void OroSnow_Reset(); OroSnow_Reset(); }
 	if (pCore && pCore->CanSetBaseLights())     { pCore->SetBaseLights(false, 1.0f, 1.0f); blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f; }   // patch (ac): stock lights back
 	if (pCore && pCore->CanSetVCNightLight())   { pCore->SetVCNightLight(1.0f); vcNightPushed = -1.0f; g_fx.vcNightLive = 1.0f; }   // patch (ad): the cabin lit as stock
 	if (pCore && pCore->CanDeferVCHUD())        { pCore->SetDeferVCHUD(false); hudDeferPushed = -1; }   // A7: the HUD back in the cockpit pass
@@ -3046,6 +3170,7 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	OroRain_ShieldReset();   // same rule: re-probe the shield mesh next storm (he
 	                         // iterates on the file between runs)
 	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = fogNearDens0 = 0.0f; }
+	{ extern void OroSnow_Reset(); OroSnow_Reset(); }   // the snow's envelope, cover and pushed markers (2026-09-13)
 	{ extern void OroRings_Reset(); OroRings_Reset(); }   // patch (aj): profiles are per SESSION (OBJHANDLEs die with it) - never reuse one (23m)
 	blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f;   // patch (ac): the first push of the session is unconditional
 	                         // and the fog's anchor + envelope (patch aa): a crash must
@@ -3125,10 +3250,13 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		OroLog(1, "ORO: storm light (patch s part 2) %s.",
 		              pCore->CanSetStormLight() ? "available - overcast collapses the sun"
 		                                        : "NOT available - storms stay sunlit");
-		OroLog(1, "ORO: fog layers (patch aa) %s; snow cover %s.",
+		OroLog(1, "ORO: fog layers (patch aa) %s; snow cover %s; snow look (round 3, guard #29) %s.",
 		              pCore->CanSetFogLayer() ? "available - the FOG page is live"
 		                                      : "NOT available - FOG page inert",
-		              pCore->CanSetSnowCover() ? "plumbed (dormant)" : "NOT available");
+		              pCore->CanSetSnowCover() ? "available - the SNOW page is live"
+		                                       : "NOT available - SNOW page inert",
+		              pCore->CanSetSnowLook()  ? "available"
+		                                       : "NOT available - Brightness inert, hulls re-cover at once");
 		g_baseLightsSupported = pCore->CanSetBaseLights();
 		OroLog(1, "ORO: base lights (patch ac) %s.",
 		              g_baseLightsSupported ? "available - the BASE LIGHTS pill is live" : "NOT available - pill greyed");
@@ -3297,9 +3425,10 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 		// The RAIN loops (tools/raingen.py). All-or-nothing: a crossfade missing one
 		// tier would leave a silent hole in the middle of the envelope, so one missing
 		// file disables the rain sound rather than degrading it confusingly. The
-		// fourth is the interior hull-tap loop (2026-08-23) - generated by the same
-		// tool, shipped with its siblings.
-		static const char* RAIN_WAVS[] = { "Rain_light.wav", "Rain_medium.wav", "Rain_heavy.wav", "Rain_hull.wav" };
+		// cabin loop and the hull drum are SELECTABLE files since 2026-09-18
+		// (Rain_in_cabin_<n>.wav / Hull_drum_<n>.wav), loaded on first use by
+		// RainVariantId - not here.
+		static const char* RAIN_WAVS[] = { "Rain_light.wav", "Rain_medium.wav", "Rain_heavy.wav" };
 		rainSndLoaded = true;
 		for (int i = 0; i < SND_RAIN_N; i++) {
 			char path[MAX_PATH];
@@ -3310,19 +3439,6 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 			}
 		}
 		if (rainSndLoaded) OroLog(1, "ORO: rain sound loops loaded (3 tiers).");
-		// ... and their MUFFLED interior twins (tools/rainmuffle.py, 2026-08-27).
-		// All-or-nothing like the exterior set; absent, the mixer falls back to the
-		// old inside-the-hull volume duck rather than half a crossfade.
-		static const char* RAIN_IN_WAVS[] = { "Rain_light_in.wav", "Rain_medium_in.wav", "Rain_heavy_in.wav" };
-		rainSndInLoaded = true;
-		for (int i = 0; i < 3; i++) {
-			char path[MAX_PATH];
-			sprintf_s(path, "XRSound\\ORO\\%s", RAIN_IN_WAVS[i]);
-			if (!pXRSound->LoadWav(SND_RAIN_IN_BASE + i, path, XRSound::PlaybackType::Global))
-				rainSndInLoaded = false;
-		}
-		OroLog(1, "ORO: interior (muffled) rain tiers %s.",
-		              rainSndInLoaded ? "loaded" : "missing - volume duck fallback");
 		// The THUNDER set (sourced from freesound - the credit ledger is
 		// XRSound\ORO\README.txt; leveled by tools/thunderprep.py). Per-file
 		// tolerant: a missing variant narrows the pick, an empty class skips.
@@ -3347,8 +3463,11 @@ void OroModule::clbkSimulationStart(RenderMode mode)
 	// Fresh session, fresh mixer: no loop is playing yet, whatever a previous
 	// session's state said (the 23(m) sweep - state reset belongs at START).
 	for (int i = 0; i < SND_RAIN_CH; i++) {
-		rainSndLvl[i] = 0.0f; rainSndOn[i] = false; rainSndPushed[i] = 0.0f;
+		rainSndLvl[i] = 0.0f; rainSndOn[i] = false; rainSndPushed[i] = 0.0f; rainSndId[i] = -1;
 	}
+	// ... and the twenty selectable loops are untried again (a file swapped on disk
+	// between sessions is picked up; a missing one gets its one log line again).
+	for (int v = 0; v < SND_VARIANTS; v++) { cabinSndSt[v] = 0; drumSndSt[v] = 0; }
 	for (int q = 0; q < THUN_Q; q++) thunQ[q].vol = 0.0f;
 	thunPrimed = false;
 	thunLastStrikeT0 = boltTestT0;   // whatever the stamp holds, it is not a NEW press
@@ -3395,8 +3514,8 @@ void OroModule::clbkSimulationEnd()
 			pXRSound->SetPaused(SND_SCEN_BASE + i, false);   // never leave a voice parked paused
 			pXRSound->StopWav(SND_SCEN_BASE + i);
 		}
-		for (int i = 0; i < SND_RAIN_N; i++) pXRSound->StopWav(SND_RAIN_BASE + i);
-		for (int i = 0; i < 3; i++)          pXRSound->StopWav(SND_RAIN_IN_BASE + i);
+		for (int i = 0; i < SND_RAIN_N; i++)   pXRSound->StopWav(SND_RAIN_BASE + i);
+		for (int v = 0; v < SND_VARIANTS; v++) { pXRSound->StopWav(SND_CABIN_BASE + v); pXRSound->StopWav(SND_DRUM_BASE + v); }
 		for (int i = 0; i < THUN_FILES; i++) pXRSound->StopWav(SND_THUNDER_BASE + i);
 		for (int i = 0; i < THUN_FILES; i++) pXRSound->StopWav(SND_THUNDER_IN_BASE + i);
 		delete pXRSound; pXRSound = nullptr;
@@ -3531,10 +3650,11 @@ void OroModule::ReleaseDeviceResources()
 		pCore->DeletePoly(hPlumeDkPoly);
 		hPlumeDkPoly = NULL;
 	}
-	if (pCore && hRainPoly) {
-		pCore->DeletePoly(hRainPoly);
-		hRainPoly = NULL;
+	for (int k = 0; k < RAIN_POLYS; k++) if (pCore && hRainPoly[k]) {   // the sheet's groups (snow round 3)
+		pCore->DeletePoly(hRainPoly[k]);
+		hRainPoly[k] = NULL;
 	}
+	if (pCore && hShedPoly) { pCore->DeletePoly(hShedPoly); hShedPoly = NULL; }   // the shed flakes (step E)
 	if (pCore && hRainGndPoly) {
 		pCore->DeletePoly(hRainGndPoly);
 		hRainGndPoly = NULL;
@@ -3566,6 +3686,10 @@ void OroModule::ReleaseDeviceResources()
 	// patch (aa): and its clear air - both fog layers to zero, the anchor forgotten
 	if (pCore && pCore->CanSetFogLayer())       { pCore->SetFogLayer(0, 0.0, 0.0f, 1.0f, 0.0f); pCore->SetFogLayer(1, 0.0, 0.0f, 1.0f, 0.0f); }
 	{ extern void OroFog_Reset(); OroFog_Reset(); fogNearDens = 0.0f; }
+	// the snow round (2026-09-13): bare ground back, the cover and the fall forgotten
+	if (pCore && pCore->CanSetSnowCover())      { pCore->SetSnowCover(0.0f, 0.0f, 300.0f); }
+	if (pCore && pCore->CanSetSnowLook())       { pCore->SetSnowLook(0.0f, 1.0f, 0.0f, 0.0f); }   // round 3: the look back to stock, nothing falling
+	{ extern void OroSnow_Reset(); OroSnow_Reset(); }
 	if (pCore && pCore->CanSetBaseLights())     { pCore->SetBaseLights(false, 1.0f, 1.0f); blPushedOn = -1; blPushedGlow = -1.0f; blPushedHalo = -1.0f; }   // patch (ac): stock lights back
 	if (pCore && pCore->CanSetVCNightLight())   { pCore->SetVCNightLight(1.0f); vcNightPushed = -1.0f; g_fx.vcNightLive = 1.0f; }   // patch (ad): the cabin lit as stock
 	if (pCore && pCore->CanDeferVCHUD())        { pCore->SetDeferVCHUD(false); hudDeferPushed = -1; }   // A7: the HUD back in the cockpit pass
@@ -4137,11 +4261,16 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	// slider was - it is the other half of the same instrument - and put behind the
 	// control that already means "I am debugging the glass", so asking a tester to
 	// reproduce with Mask Debug on now yields the picture AND the log line together.
-	if (g_fx.rainGlassDbg > 0.5f && rainIntensityLive > 0.002f && simt - glassDiagT > 1.0) {
+	// ... AND FOR THE FROST (step C, 2026-09-20): a snowfall has no rain envelope, so the line
+	// fires on the ice's state too, and at level 1 under Mask Debug 3 - the frost's own debug -
+	// so his night flight's log names the link that is open without a cfg edit.
+	if (g_fx.rainGlassDbg > 0.5f && (rainIntensityLive > 0.002f || (g_fx.snowFrostOn && g_fx.snowFrost > 0.01f))
+	    && simt - glassDiagT > 1.0) {
 		glassDiagT = simt;
-		OroLog(2, "ORO GLASS DIAG: 0x%04X entry[call%d I%d ipi%d core%d tex%d gloom%d vgate%d]"
+		OroLog((g_fx.rainGlassDbg >= 2.5f) ? 1 : 2,
+		              "ORO GLASS DIAG: 0x%04X entry[call%d I%d ipi%d core%d tex%d gloom%d vgate%d]"
 		              " gate[vc%d ok%d ipiD%d sld%d vh%d cam%d bind%d]"
-		              " Irender %.3f Ipre %.3f dr %.3f dbg %.0f",
+		              " Irender %.3f Ipre %.3f dr %.3f dbg %.0f frost %.2f want %.3f fr %.3f gate %.2f",
 		              glassDiag,
 		              (glassDiag & 0x0080) ? 1 : 0, (glassDiag & 0x0100) ? 1 : 0,
 		              (glassDiag & 0x0200) ? 1 : 0, (glassDiag & 0x0400) ? 1 : 0,
@@ -4151,7 +4280,8 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 		              (glassDiag & 0x04) ? 1 : 0, (glassDiag & 0x08) ? 1 : 0,
 		              (glassDiag & 0x10) ? 1 : 0, (glassDiag & 0x20) ? 1 : 0,
 		              (glassDiag & 0x40) ? 1 : 0,
-		              glassDiagI, rainIntensityLive, glassDiagDr, g_fx.rainGlassDbg);
+		              glassDiagI, rainIntensityLive, glassDiagDr, g_fx.rainGlassDbg,
+		              g_fx.snowFrost, glassDiagFw, glassDiagFr, rainGateLive);
 		glassDiag = 0;   // so a stale value can never be read as a fresh one
 	}
 	UpdateAurora();
@@ -4170,6 +4300,9 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	UpdateRain();              // EVOLVES the storm: the envelope ramp and the wetness
 	                           //   soak. Correctly frozen under pause - no sim time
 	                           //   passes, so nothing should get wetter (his rule).
+	UpdateSnow();              // THE SNOW (2026-09-13): the fall envelope (real time) and
+	                           //   the cover (SIM time) - BEFORE SenseRain, which publishes
+	                           //   its envelope through the rain's gate
 	SenseRain();               // SENSES it: which view, which world, how high the camera
 	                           //   is. Also called every frame from
 	                           //   clbkProcessKeyboardImmediate so it stays true while
@@ -4177,6 +4310,7 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	                           //   ⚠️ MUST FOLLOW UpdateRain here - it reads the envelope
 	                           //   that call just advanced.
 	PushSurfaceWet();          // patch (s) - client state, pushed on change (invariant 18)
+	PushSnow();                // the snow COVER to the client (patch aa's setter), on change
 	UpdateFog();               // THE FOG (patch aa): evolves the envelope + the anchor slew
 	SenseFog();                //   senses world/air/ground/altitude (also every frame from
 	                           //   the keyboard tick, so it stays true while paused)
@@ -4213,8 +4347,10 @@ void OroModule::clbkPreStep(double simt, double simdt, double mjd)
 	                 (g_fx.reentryEnabled    && plasmaGlow > 0.001f) ||
 	                 plumeCount > 0 ||
 	                 grActive ||                       // god rays - missing since 2026-08-11
-	                 rainIntensityLive > 0.002f))      // rain gloom + glass drops - since 2026-08-22
-		EnsureFrameTex();
+	                 rainIntensityLive > 0.002f ||     // rain gloom + glass drops - since 2026-08-22
+	                 snowIntensityLive > 0.002f ||     // the snow's glass (step C, 2026-09-20): a snowfall
+	                 (g_fx.snowFrostOn && g_fx.snowFrost > 0.01f)))   //   alone never asked - the ice showed only
+		EnsureFrameTex();                                  //   once the eclipse had asked at nightfall
 
 	// Animation clocks: REAL time, not sim time - the spot shimmer and the blink are
 	// physiological, they must not warp with time acc. (sysdt computed above.)
@@ -4367,6 +4503,7 @@ bool OroModule::clbkProcessKeyboardImmediate(char kstate[256], bool simRunning)
 	// WHEREVER THE SENSING RUNS; it is change-gated internally, so calling it here costs
 	// nothing when nothing moved.
 	PushSurfaceWet();
+	PushSnow();                             // the snow cover, same law (2026-09-13)
 	SenseFog();                             // the fog's gates, same law (patch aa)
 	PushFog();
 	PushBaseLights();

@@ -1,11 +1,12 @@
 -- ---------------------------------------------------------------------------
 -- testlights.lua - ORO's lights-and-shadows test rig
 --
--- An AUTOMATIC sequence of twelve cases that exercises the patched client's
+-- An AUTOMATIC sequence of thirteen cases that exercises the patched client's
 -- local-light work: spot shadow maps (one per light or per cluster, up to six),
 -- the sticky selection when there are more lights than maps, the wide stadium
 -- flood, point-light shadows (aimed map or five-face cube), spots ranking before
--- points, the sixteen-light budget, and the day/night split. Every case says on
+-- points, the sixteen-light budget, the day/night split, and the crowded pad's
+-- capped floods. Every case says on
 -- screen what it shows, what to expect, which Launchpad row it needs and what
 -- the ORO lcl dbg log line should read. A full pass is about six and a half
 -- minutes, so anyone can record it and send the video.
@@ -505,7 +506,7 @@ cases[#cases + 1] = { title = 'FOUR SPOTS IN A FAN', dur = 30,
 cases[#cases + 1] = { title = 'SIX SPOTS - THE ATLAS ROW FULL', dur = 30,
   text = 'Six lamps in a 150 deg fan, six tints, all aimed at the DG.\n' ..
          'Expect: six maps in the log; six rays on the HULL and hull-lit objects. The GROUND\n' ..
-         'shows only the four strongest lamps (terrain takes four lights per tile - a client limit).',
+         'shows ALL SIX (a terrain tile takes its eight strongest lights since 2026-09-19; it took four).',
   needs = mapsStr(6),
   dbg = cellsStr(6) .. ', 6 candidates, ' .. atlasName,
   setup = function()
@@ -527,18 +528,34 @@ cases[#cases + 1] = { title = 'A CLUSTER SHARES ONE MAP', dur = 30,
 cases[#cases + 1] = { title = 'MORE LIGHTS THAN MAPS', dur = 34,
   text = 'Eight white lamps round the DG at 45 deg, 90 deg cones; only ' .. math.min(S.maps, 8) .. ' can hold a map.\n' ..
          'Expect: the hull keeps ' .. math.min(S.maps, 8) .. ' shadows that must NOT flip as the camera orbits\n' ..
-         '(an incumbent loses its map only to a 1.5x stronger challenger); the ground shows four.',
+         '(an incumbent loses its map only to a 1.5x stronger challenger); the ground shows all eight.',
   needs = mapsStr(6),
   dbg = cellsStr(8) .. ', 8 candidates, ' .. atlasName,
   setup = function() spotRing(8, 40, 22.5, { COL.white }); camTarget(hDG, 8, 0.34, 0.3, 0.09) end }
 
-cases[#cases + 1] = { title = 'THE STADIUM FLOOD', dur = 30,
-  text = 'A mast 30 m off, a 180 deg hemisphere flood (the SSV pad\'s light shape).\n' ..
-         'Expect: a wide pool; the map narrows to the casters in the beam (field of\n' ..
-         'view in the log well under 180) so the DG shadow stays sharp, not 80 cm texels.',
-  needs = mapsStr(1),
-  dbg = cellsStr(1) .. ', 1 candidates, ' .. atlasName .. ' [0: spot light .. fov <100 rng 120 ..]',
-  setup = function() postLamp(1, -30, 0, COL.white, nil, { r = 0, f = 0, h = 1.5 }); camTarget(hDG, 7.5, 0.30, 0.9, 0.075) end }
+-- 2026-09-19: a hemisphere flood cannot be served by ONE perspective map - the caster fit
+-- widens back to the full 166 deg cone whenever a base structure sits inside the reach (his
+-- flight: fov 166, cast 2), a 24-49 cm texel at 30 m, and the two biases that scale with it
+-- lit the ground under the DG's belly. With Point light shadows = Cube and the four extra cells
+-- SPARE (no other spot loses its map - a pad full of floods keeps its single maps) the client
+-- now gives such a flood the five 93 deg faces round its own axis (the cube a point light gets,
+-- with the missing face behind the light) - the case says which of the two it shows.
+do
+  local cubeFlood = (S.point == 2) and (S.maps >= 5) and (S.shadows ~= 0)
+  cases[#cases + 1] = { title = 'THE STADIUM FLOOD', dur = 30,
+    text = 'A mast 30 m off, a 180 deg hemisphere flood (the SSV pad\'s light shape).\n' ..
+           (cubeFlood
+             and ('Expect: a wide pool; the flood casts as a five-face CUBE round its own axis\n' ..
+                  '(fov 93 in the log): the DG shadow is crisp and the ground under its belly is\n' ..
+                  'dark. One 166 deg map would put a 24-49 cm texel there instead.')
+             or  ('Expect: a wide pool; ONE 166 deg map (fov 166 in the log): the DG shadow is\n' ..
+                  'coarse and the ground under its belly reads lit - the launch pad look.\n' ..
+                  'Point light shadows Cube with 6 maps gives the flood a five-face cube.')),
+    needs = cubeFlood and ('Point light shadows Cube, ' .. mapsStr(5)) or mapsStr(1),
+    dbg = cubeFlood and ('5/' .. S.maps .. ' cells, 1 candidates, ' .. atlasName .. ' [0: CUBE-spot light .. fov 93 rng 120 ..]')
+                     or (cellsStr(1) .. ', 1 candidates, ' .. atlasName .. ' [0: spot light .. fov 166 rng 120 ..]'),
+    setup = function() postLamp(1, -30, 0, COL.white, nil, { r = 0, f = 0, h = 1.5 }); camTarget(hDG, 7.5, 0.30, 0.9, 0.075) end }
+end
 
 do
   local ptNeed
@@ -583,7 +600,7 @@ cases[#cases + 1] = { title = 'SPOTS RANK BEFORE POINTS', dur = 30,
 cases[#cases + 1] = { title = 'SIXTEEN LIGHTS', dur = 34, fps = true,
   text = 'Sixteen lamps round the DG at 22.5 deg, eight colours, all on the DG.\n' ..
          'Expect: the hull is LIT AND VISIBLE (the 4096-slot check), no mesh vanishes,\n' ..
-         'shadows on the strongest lights; a mesh tests shadows on its 8 strongest, the ground on four.',
+         'shadows on the strongest lights; a mesh tests shadows on its 8 strongest, the ground on its 8.',
   needs = need('Local lights 12x/16x (have ' .. (LIGHTCFG[S.lights] or S.lights) .. ')', maxLights >= 12) .. ', ' .. mapsStr(6),
   dbg = cellsStr(16) .. ', 16 candidates, ' .. atlasName,
   setup = function()
@@ -594,9 +611,9 @@ cases[#cases + 1] = { title = 'SIXTEEN LIGHTS', dur = 34, fps = true,
 
 cases[#cases + 1] = { title = 'DAY AND NIGHT', dur = 30,
   text = 'The four-lamp fan again, and the clock jumps twelve hours ahead.\n' ..
-         'Expect: vessels keep their spot shadows in daylight; the terrain keeps them in\n' ..
-         'Cascaded mode and yields them in Stencil/Projected while the sun is up.',
-  needs = mapsStr(4) .. ', Terrain shadows ' .. need(TERRSHD[S.terrain] or S.terrain, S.terrain == 3),
+         'Expect: vessels AND the terrain keep their spot shadows in daylight, in every Terrain\n' ..
+         'shadows mode (the maps have their own terrain sampler since 2026-09-19; Projected used to yield by day).',
+  needs = mapsStr(4),
   dbg = cellsStr(4) .. ', 4 candidates, ' .. atlasName,
   setup = function()
     spotFan(4, 38, -90, 90, { COL.warm, COL.cool, COL.pink, COL.mint })
@@ -604,6 +621,31 @@ cases[#cases + 1] = { title = 'DAY AND NIGHT', dur = 30,
     oapi.set_simmjd(mjd0 + 0.5)
   end,
   teardown = function() oapi.set_simmjd(mjd0) end }
+
+-- 2026-09-19 (step 5d, Marg's item 41): THE CROWDED PAD. Three hemisphere floods on the port
+-- side, all aimed at the DG - three leaders plus a cube's four extra cells is seven, more than
+-- any budget, so no flood can have its cube and every one is the launch pad's case: ONE map
+-- each, now CAPPED at the cube's 93-degree face angle round its own axis, with a soft edge
+-- over the map's outer tenth so a shadow reaching the cap dissolves instead of cutting. Before
+-- the cap each was one 166-degree map (fov 166 in the log wherever a base structure sits in
+-- the reach): a half-metre texel at 30 m, the belly lit. The caster fit still narrows inside
+-- the cap, so a park with no structure in reach reads a smaller fov than 93 - the tell is the
+-- word spot-CAP, not the number.
+cases[#cases + 1] = { title = 'THREE FLOODS - THE CROWDED PAD', dur = 30,
+  text = 'Three 180 deg hemisphere floods on the port side at 30 m, all aimed at the DG:\n' ..
+         'more floods than a cube can be spared for, so each gets ONE map, CAPPED at 93 deg\n' ..
+         'round its own axis (spot-CAP in the log). Expect: three crisp DG shadows to\n' ..
+         'starboard, each the colour its flood is not, and the ground under the belly dark.\n' ..
+         'Past ~46 deg off a flood\'s axis its light casts no shadow, and a shadow reaching\n' ..
+         'the cap\'s edge fades over the last tenth. Before the cap: three coarse 166 deg maps.',
+  needs = mapsStr(3),
+  dbg = cellsStr(3) .. ', 3 candidates, ' .. atlasName .. ' [0: spot-CAP light .. fov <=93 rng 120 ..][1: spot-CAP ..][2: spot-CAP ..]',
+  setup = function()
+    postLamp(1, -30, 0, COL.white, nil, { r = 0, f = 0, h = 1.5 })
+    postLamp(2, -23, 19, COL.warm, nil, { r = 0, f = 0, h = 1.5 })
+    postLamp(3, -23, -19, COL.cool, nil, { r = 0, f = 0, h = 1.5 })
+    camTarget(hDG, 7.5, 0.30, 0.9, 0.075)
+  end }
 
 for i, c in ipairs(cases) do c.n = i; c.total = #cases end
 
@@ -614,10 +656,11 @@ local function titleCard()
   local w = {}
   if not cfgFound then w[#w + 1] = 'D3D9Client.cfg not found in the Orbiter root - settings unknown' end
   if S.shadows == 0 then w[#w + 1] = 'Spot light shadows are OFF - every shadow case will show none' end
-  if S.maps < 6 and S.shadows ~= 0 then w[#w + 1] = 'cases 5, 7, 10, 11 want 6 spot maps (have ' .. S.maps .. ')' end
+  if S.maps < 6 and S.shadows ~= 0 then w[#w + 1] = 'cases 5, 7, 8, 10, 11 want 6 spot maps (have ' .. S.maps .. ')' end
   if S.point == 0 then w[#w + 1] = 'Point light shadows OFF - case 9 will show none' end
+  if S.point ~= 2 and S.shadows ~= 0 then w[#w + 1] = 'Point light shadows not Cube - case 8\'s flood stays one coarse 166 deg map' end
   if maxLights < 12 then w[#w + 1] = 'case 11 wants 12x or 16x local lights (have ' .. (LIGHTCFG[S.lights] or S.lights) .. ')' end
-  if S.terrain ~= 3 then w[#w + 1] = 'Terrain shadows not Cascaded - spot maps use the local atlas, terrain yields by day' end
+  if S.terrain ~= 3 then w[#w + 1] = 'Terrain shadows not Cascaded - spot maps use the local atlas (the terrain reads it day and night since 2026-09-19)' end
   if S.debug == 0 then w[#w + 1] = 'ShadowDebug = 0 - set 1 in D3D9Client.cfg for the ORO lcl dbg log line' end
   if nightForced then w[#w + 1] = 'the scenario was in daylight - the clock was advanced to two hours after sunset' end
   local s = 'ORO LIGHTS TEST RIG\n' ..

@@ -226,10 +226,16 @@ namespace {
 		VECTOR3   pC;          // its centre, PRE-STEP - the fallback without (k2)
 		VECTOR3   axis;        // its spin axis, global: the stable horizontal basis
 		double    groundR;     // planet centre -> ground, under the vessel
-		float     intensity;   // 0..1, the event envelope
+		float     intensity;   // 0..1, the RAIN's event envelope
+		float     snowI;       // 0..1, the SNOW's (2026-09-13) - at most one is live: the
+		                       //   two storms are mutually exclusive by his rule, and the
+		                       //   build runs the sheet in the mode of whichever is
 		float     wet;         // 0..1, the lagging ground wetness (build B will use it)
 		OBJHANDLE hV;          // the focus vessel - the SECOND splash field centres on it
 		VECTOR3   vPos;        // its position, PRE-STEP (k2 overrides in the build)
+		float     sinE;        // the sun's sine elevation at the camera (2026-09-14): the
+		                       //   snow's overcast and flakes take the sun's colour - warm
+		                       //   with it low, cold with it gone - The Long Dark's rule
 		float     dayF;        // 0..1 daylight at the camera - the deck is lit by the sky
 		float     lightF;      // 0..1 LIGHT ON THE RAIN near the camera (2026-09-05, his
 		                       //   note: "falling raindrops are not visible at night unless
@@ -241,6 +247,8 @@ namespace {
 		VECTOR3   pax1;        // the planet's OWN x axis, global - with `axis` it gives a
 		                       //   PLANET-FIXED lon/lat frame for the deck texture's UVs,
 		                       //   so the cloud cover rotates with the ground it rains on
+		MATRIX3   prot;        // the planet's rotation, PRE-STEP (step E: the shed flakes' planet-local frame -
+		                       //   a frame's error over one frame is 1e-6 rad, microns at their distance)
 		MATRIX3   vRot;        // the focus vessel's rotation - the rain shield's roof
 		                       //   triangles live in the VESSEL frame (attitude is slow,
 		                       //   so a pre-step rotation is epoch-safe; POSITION is not,
@@ -435,9 +443,13 @@ void OroModule::SenseRain()
 	s_gateF   = 0.0f;
 	g_fx.rainWhy[0] = 0;
 	rainIntensityLive = 0.0f;
+	snowIntensityLive = 0.0f;
+	rainLightLive     = 0.0f;
 	rainGateLive = 0.0f;
 	rainGlassOK = false;
-	if (g_fx.rainI <= 0.002f) return;
+	// EITHER storm keeps the sensing alive (2026-09-13): the snow shares the gates, the
+	// snapshot, the light on the air and the altitude band - one sensing, two storms.
+	if (g_fx.rainI <= 0.002f && g_fx.snowI <= 0.002f) return;
 
 	// EXTERNAL, or the VIRTUAL COCKPIT (2026-08-23 - rainVC embeds the depth-clip
 	// requirement; see its comment in clbkPreStep). When the VC is the view and the
@@ -523,7 +535,7 @@ void OroModule::SenseRain()
 
 	// Daylight at the camera, for the deck's own brightness: a storm ceiling is lit by
 	// the sky above it, so at night it must go near-black rather than glow grey.
-	float dayF = 1.0f;
+	float dayF = 1.0f, sunSinE = 1.0f;
 	{
 		OBJHANDLE hS = OroFindStar();
 		if (hS) {
@@ -531,6 +543,7 @@ void OroModule::SenseRain()
 			const VECTOR3 upC = unit(cam - pC);
 			const float elev = (float)dotp(unit(sp - cam), upC);
 			dayF = clampf((elev + 0.04f) / 0.22f, 0.0f, 1.0f);
+			sunSinE = elev;
 		}
 	}
 
@@ -613,13 +626,16 @@ void OroModule::SenseRain()
 		s_rn.cloudAGL = (cAGL < 2500.0f) ? 2500.0f : cAGL;
 	}
 	s_rn.dayF      = dayF;
+	s_rn.sinE      = sunSinE;
 	s_rn.lightF    = lightF;
 	s_rn.hRef      = hRef;
 	s_rn.pC        = pC;
 	s_rn.axis      = _V(prot.m12, prot.m22, prot.m32);   // planet +Y in global = spin axis
 	s_rn.pax1      = _V(prot.m11, prot.m21, prot.m31);   // planet +X - the lon=0 reference
+	s_rn.prot      = prot;                               // step E: the shed flakes' frame
 	s_rn.groundR   = groundR;
 	s_rn.intensity = g_fx.rainI * altF;
+	s_rn.snowI     = g_fx.snowI * altF;    // the snow through the SAME gate (his call)
 	s_rn.wet       = g_fx.rainWet;
 	s_rn.vSize     = v->GetSize();
 	s_gateF        = altF;
@@ -667,12 +683,68 @@ void OroModule::SenseRain()
 
 		VECTOR3 aero = _V(0, 0, 0);                              // unit, eye -> stagnation
 		if (ws > 1e-3) {
-			const VECTOR3 S    = (wind / ws) * s_rn.vSize;       // the hull's forward point
-			const VECTOR3 stag = S - CleanCameraOffset(v);       // ... seen from the eye
+			const VECTOR3 w    = wind / ws;                      // the airflow at infinity
+			const VECTOR3 eye  = CleanCameraOffset(v);
+			const VECTOR3 S    = w * s_rn.vSize;                 // the hull's forward point
+			const VECTOR3 stag = S - eye;                        // ... seen from the eye
 			const double  sl   = length(stag);
 			// The degenerate case is an eye AT the stagnation point, which cannot
 			// happen in a cockpit; falling back to the old direction keeps it defined.
-			aero = (sl > 1e-3) ? (stag / sl) : (wind / ws);
+			aero = (sl > 1e-3) ? (stag / sl) : w;
+
+			// ⚠️ THE RADIANT'S DIRECTION IS THE WIND'S AT INFINITY; THE STAGNATION
+			// CONSTRUCTION CONTRIBUTES ONE NUMBER, ITS DEPRESSION (the azimuth since
+			// 2026-09-17, Stebb's second report: "the centre of radiance moves in an
+			// exaggerated way left and right when the rudder is moved... can even become
+			// visible in the side window"; the elevation since 2026-09-19, his third: the
+			// same "wild movement... also applies equally to shifts in angle of attack...
+			// very noticeable if the stick is pushed forward in flight producing negative
+			// G"). He was right both times, and by a lot, for one reason: the stagnation
+			// point sits ~3.2 m ahead of a DG pilot's eye (size 10 along the wind, eye
+			// 6.78 m forward), so a 10 deg change in the wind's direction swings a point
+			// that close by 20-30 deg of parallax - 29.5 deg of azimuth for 10 deg of yaw;
+			// 21.7 deg DOWN for +10 deg of AoA and 29.5 deg UP for -10 deg, from 24.5 deg
+			// below the forward axis to 5 deg above it, into the windscreen. The flow over
+			// the GLASS is deflected by about the wind's angle, not by the parallax of a
+			// point a few metres away. So the radiant takes the wind's heading AND the
+			// wind's elevation, less the one thing the point construction was ever for:
+			// the DEPRESSION D that puts it under the glass, measured with a LEVEL wind on
+			// the same heading (24.5 deg on the DG). A level wind therefore gives the point
+			// construction back exactly - the two agree wherever w is horizontal - and
+			// 10 deg of AoA moves the radiant 10 deg: +10 -> -34.5 deg, -10 -> -14.5 deg on
+			// the DG, still under the glass. Blended in over the wind's horizontal share so
+			// a near-vertical wind (a tail-sitter on hover engines, a steep descent) keeps
+			// the point construction, which is the only one with a heading to speak of
+			// there; no threshold to jump at.
+			const double wh = sqrt(w.x * w.x + w.z * w.z);       // horizontal share, 0..1
+			const double ah = sqrt(aero.x * aero.x + aero.z * aero.z);
+			if (wh > 1e-6 && ah > 1e-9) {
+				double t = (wh - 0.02) / 0.18;                   // 0 below 2%, 1 above 20%
+				t = (t < 0.0) ? 0.0 : (t > 1.0 ? 1.0 : t);
+				t = t * t * (3.0 - 2.0 * t);
+				// the wind's heading, and the depression a level wind on it would give
+				const double  hwx   = w.x / wh, hwz = w.z / wh;
+				const VECTOR3 stagL = _V(hwx * s_rn.vSize - eye.x, -eye.y, hwz * s_rn.vSize - eye.z);
+				const double  slL   = length(stagL);
+				double sy = (slL > 1e-3) ? stagL.y / slL : 0.0;
+				sy = (sy < -1.0) ? -1.0 : (sy > 1.0 ? 1.0 : sy);
+				const double D = -asin(sy);
+				// the target elevation: the wind's, less D - held off the nadir, past which
+				// the heading would flip (only a near-vertical dive gets there, where t ~ 0)
+				double wy = (w.y < -1.0) ? -1.0 : (w.y > 1.0 ? 1.0 : w.y);
+				double eT = asin(wy) - D;
+				if (eT < -1.48) eT = -1.48;
+				double py = (aero.y < -1.0) ? -1.0 : (aero.y > 1.0 ? 1.0 : aero.y);
+				const double eP = asin(py);                      // the point's own elevation
+				const double e  = eP + (eT - eP) * t;
+				double hx = aero.x / ah, hz = aero.z / ah;       // the point's heading
+				hx += (hwx - hx) * t; hz += (hwz - hz) * t;
+				const double hl = sqrt(hx * hx + hz * hz);
+				if (hl > 1e-9) {
+					const double ce = cos(e);
+					aero = _V(hx / hl * ce, sin(e), hz / hl * ce);
+				}
+			}
 		}
 		const VECTOR3 run   = downV * 9.81 - aero * (ws * 0.5);
 		const double  rl    = length(run);
@@ -710,6 +782,8 @@ void OroModule::SenseRain()
 	// g_fx live in the render path and therefore already responded while paused; gloom was
 	// the one value I precomputed, and it was the one control he reported as inert.
 	rainIntensityLive = s_rn.intensity;
+	snowIntensityLive = s_rn.snowI;         // ... and the snow's, for the mist and the readouts
+	rainLightLive     = s_rn.lightF;        // ... and the light on the storm, for the ice on the glass (step C)
 }
 
 // ============================================================================
@@ -882,6 +956,13 @@ void OroModule::PushSurfaceWet()
 	if (pCore->CanSetStormLight()) {
 		float gs = clampf(g_fx.rainGloom, 0.0f, 2.0f);
 		float st = on ? clampf(g_fx.rainI * gs * 0.5f, 0.0f, 1.0f) * s_gateF : 0.0f;
+		// THE SNOW'S OVERCAST (2026-09-13), the same lever at the snow's own Gloom, and
+		// only for what is FALLING (a standing cover on a clear day keeps the sun). The
+		// two storms are mutually exclusive, so the max is whichever is on.
+		const bool  onS = g_fx.masterArmed && (g_fx.snowEnabled || g_fx.snowTest);
+		const float stS = onS ? clampf(g_fx.snowI * clampf(g_fx.snowFall, 0.0f, 1.0f)
+		                               * clampf(g_fx.snowGloom, 0.0f, 2.0f) * 0.5f, 0.0f, 1.0f) * s_gateF : 0.0f;
+		if (stS > st) st = stS;
 		if (fabsf(st - stormPushed) >= 0.002f) { stormPushed = st; pCore->SetStormLight(st); }
 	}
 
@@ -1028,6 +1109,28 @@ void OroModule::PushSurfaceWet()
 // 10 s build-up, ZERO calls in steady state, and a mid-noise splice at the
 // preserved position is masked by the rain itself.
 // ============================================================================
+// THE SELECTABLE LOOPS (2026-09-18, his design). The XRSound id for a cabin or drum
+// variant, LOADED ON FIRST USE: two of the twenty files in memory, not twenty, and a
+// user who swaps a file on disk needs only a fresh session (XRSound reads at load).
+// Tri-state per file - a missing one is logged ONCE and answers -1 for the session, so
+// the mixer treats that channel as silent (the cabin then falls back to the exterior
+// tiers ducked, the drum simply stays quiet) instead of retrying every frame.
+int OroModule::RainVariantId(bool drum, int sel)
+{
+	if (!pXRSound) return -1;
+	if (sel < 0) sel = 0; else if (sel >= SND_VARIANTS) sel = SND_VARIANTS - 1;
+	signed char& st = drum ? drumSndSt[sel] : cabinSndSt[sel];
+	const int id = (drum ? SND_DRUM_BASE : SND_CABIN_BASE) + sel;
+	if (st == 0) {
+		char path[MAX_PATH];
+		sprintf_s(path, "XRSound\\ORO\\%s_%d.wav", drum ? "Hull_drum" : "Rain_in_cabin", sel);
+		st = pXRSound->LoadWav(id, path, XRSound::PlaybackType::Global) ? 1 : -1;
+		OroLog(1, "ORO: %s %s.", path, st > 0 ? "loaded"
+		       : "not found - that selection stays silent (the names are in XRSound\\ORO\\README.txt)");
+	}
+	return (st > 0) ? id : -1;
+}
+
 void OroModule::UpdateRainSound()
 {
 	if (!pXRSound || !rainSndLoaded) return;
@@ -1049,35 +1152,44 @@ void OroModule::UpdateRainSound()
 		float t = clampf((x - a) / (b - a), 0.0f, 1.0f);
 		return t * t * (3.0f - 2.0f * t);
 	};
-	// THROUGH THE HULL, PROPERLY MUFFLED SINCE 2026-08-27 (his call: a volume cut "is
-	// just as if the volume was slightly turned down. It doesn't have that 'muffle'
-	// effect... the interior of a spacecraft is supposed to be a pressurized cabin").
-	// XRSound has no runtime filter, so the muffle is PRE-BAKED: channels 4-6 are the
-	// same three tiers low-passed by tools/rainmuffle.py, and going inside crossfades
-	// the families through the existing slew. Without the _in files (rainSndInLoaded
-	// false) the old 45% duck of the exterior tiers stands in. The HULL TAPS (ch 3)
-	// stay unfiltered and interior-only: the drops are ON the hull, structure-borne -
-	// inside is exactly where they are bright, and with the storm now genuinely dark
-	// behind them they read more distinct at the same volume, for free.
+	// THROUGH THE HULL. XRSound has no runtime filter (his 2026-08-27 call: a volume cut
+	// "doesn't have that 'muffle' effect... the interior of a spacecraft is supposed to
+	// be a pressurized cabin"), so what the cabin hears is a FILE. Since 2026-09-18 (his
+	// design, after testers asked for the older muffled cabin back) the seat plays ONE
+	// cabin loop, chosen from ten - XRSound\ORO\Rain_in_cabin_0..9.wav - by the VIRTUAL
+	// COCKPIT page's Cabin loop button, its level riding the storm envelope; the ten
+	// shipped ones are generated (tools/raingen.py --variants: the sealed capsule, thinner
+	// skins, an open cockpit) and any of them can be replaced by the user's own seamless
+	// loop of any length. The three exterior tiers are silent inside while a cabin loop
+	// plays; with the selected file MISSING the pre-08-27 45% duck of the exterior tiers
+	// stands in, so a cabin is never silent by accident. The HULL DRUM (ch 3) has the
+	// same shape - Hull_drum_0..9.wav, the Drum loop button - unfiltered and interior
+	// only, because the drops are ON the hull, structure-borne: inside is exactly where
+	// they are bright. (From 08-27 to 09-18 the cabin was the three tiers low-passed at
+	// 450 Hz by tools/rainmuffle.py on channels 4-6; the ten variants replace that one
+	// fixed choice. The thunder keeps its _in twins.)
 	const bool  interior = !extGate;   // e > 0 while internal = the rainVC case
-	const bool  useIn    = interior && rainSndInLoaded;
+	const int   cabinId  = interior ? RainVariantId(false, g_fx.vcRainSndSel) : -1;
+	const int   drumId   = interior ? RainVariantId(true,  g_fx.hullDrumSel)  : -1;
+	const bool  useIn    = interior && cabinId >= 0;
 	const float exGain   = useIn ? 0.0f : (interior ? 0.45f * iv : uv);
-	// The _in files are levelled at 62% of the exterior RMS by the tool, so the
-	// runtime factor is nearly neutral - the FILES carry the muffle, this only trims.
-	const float inGain   = useIn ? 0.85f * iv : 0.0f;
+	// The shipped cabin loops are mastered 3-6 dB under the exterior tiers - the FILE
+	// carries the muffle and its quiet; the slider is the only runtime factor.
+	const float inGain   = useIn ? iv : 0.0f;
 	float tier[3];
 	tier[0] = 1.0f - sstep(0.30f, 0.65f, e);                          // light
 	tier[1] = sstep(0.12f, 0.45f, e) * (1.0f - sstep(0.60f, 0.92f, e)); // medium
 	tier[2] = sstep(0.50f, 0.88f, e);                                   // heavy
 	float w[SND_RAIN_CH];
-	for (int i = 0; i < 3; i++) { w[i] = tier[i] * exGain; w[4 + i] = tier[i] * inGain; }
+	for (int i = 0; i < 3; i++) w[i] = tier[i] * exGain;
+	w[4] = inGain;                     // ONE cabin loop; the storm envelope scales it below
 	// ⚠️ THE HULL LOOP CARRIES ITS OWN VOLUME (2026-08-25, a tester's ask). It is the
 	// one layer that is about the SHIP rather than the weather - some people want the
 	// storm without the drumming - and folding it into Rain sound meant the whole
 	// outside mix had to move to quiet it. Its own volume outright since the 2026-09-06
 	// split (0..3 - his range; it lives on the VIRTUAL COCKPIT page now).
 	const float hv = clampf(g_fx.rainHullVol, 0.0f, 3.0f);
-	w[3] = interior ? (0.55f + 0.45f * sstep(0.10f, 0.60f, e)) * hv : 0.0f;   // hull taps
+	w[3] = (interior && drumId >= 0) ? (0.55f + 0.45f * sstep(0.10f, 0.60f, e)) * hv : 0.0f;   // hull drum
 
 	// ^0.7 so the patter is audibly present early in the build-up (a linear map
 	// leaves the first seconds inaudible); 0.65 is the designed full-storm
@@ -1086,20 +1198,27 @@ void OroModule::UpdateRainSound()
 	const float overall = powf(e, 0.7f) * 0.65f;
 
 	for (int i = 0; i < SND_RAIN_CH; i++) {
-		// channel -> XRSound id: 0-3 are the original set, 4-6 the interior twins
-		const int sid = (i < SND_RAIN_N) ? (SND_RAIN_BASE + i) : (SND_RAIN_IN_BASE + (i - 4));
-		const float tgt = clampf(w[i] * overall, 0.0f, 1.0f);
+		// channel -> XRSound id: 0-2 the exterior tiers, 3 the selected drum loop, 4 the
+		// selected cabin loop (-1 = nothing selected or the file is missing: silent)
+		const int sid = (i < 3) ? (SND_RAIN_BASE + i) : (i == 3 ? drumId : cabinId);
+		// A SELECTION CHANGE mid-storm: the old loop stops outright and the new one
+		// starts at the slewed level on the next pass - no seek, it is a different file.
+		if (rainSndOn[i] && rainSndId[i] != sid) {
+			pXRSound->StopWav(rainSndId[i]);
+			rainSndOn[i] = false; rainSndPushed[i] = 0.0f;
+		}
+		const float tgt = (sid < 0) ? 0.0f : clampf(w[i] * overall, 0.0f, 1.0f);
 		rainSndLvl[i] += (tgt - rainSndLvl[i]) * clampf(dt / 0.35f, 0.0f, 1.0f);
 		if (tgt <= 0.002f && rainSndLvl[i] <= 0.002f) rainSndLvl[i] = 0.0f;
 		const float vol = clampf(rainSndLvl[i], 0.0f, 1.0f);
-		const bool  on  = vol > 0.002f;
+		const bool  on  = vol > 0.002f && sid >= 0;
 
 		// push only when the state actually moved (on/off flip, or >= one quantum)
 		if (on == rainSndOn[i] && (!on || fabsf(vol - rainSndPushed[i]) < 0.045f))
 			continue;
 
 		if (!on) {
-			pXRSound->StopWav(sid);
+			if (rainSndOn[i]) pXRSound->StopWav(rainSndId[i]);
 			rainSndOn[i] = false;
 			rainSndPushed[i] = 0.0f;
 			continue;
@@ -1109,6 +1228,7 @@ void OroModule::UpdateRainSound()
 		const int pos = rainSndOn[i] ? pXRSound->GetPlayPosition(sid) : -1;
 		if (rainSndOn[i]) pXRSound->StopWav(sid);
 		rainSndOn[i] = pXRSound->PlayWav(sid, true, vol);
+		rainSndId[i] = sid;
 		if (rainSndOn[i] && pos > 0)
 			pXRSound->SetPlayPosition(sid, (unsigned int)pos);
 		rainSndPushed[i] = vol;
@@ -1259,11 +1379,27 @@ void OroModule::BuildRainGeometry()
 	ringVN = 0;
 	deckN = 0;
 	boltN = 0;
+	shedVtxN = 0;
 	rainActive = false;
 	if (!s_rnValid || viewW == 0 || viewH == 0) return;
 
-	const float I = s_rn.intensity;
+	// TWO STORMS, ONE SHEET (2026-09-13). The rain's envelope and the snow's both arrive
+	// in the snapshot; they are mutually exclusive (his rule), so at most one is live and
+	// the build runs in the mode of whichever is. The sheet and the deck serve both (I);
+	// the rings, the flashes and the bolts are the rain's alone (Ir).
+	const float Ir = s_rn.intensity;
+	const float Is = s_rn.snowI;
+	const bool  snowMode = (Is > Ir);
+	const float I = snowMode ? Is : Ir;
 	if (I <= 0.002f) return;
+
+	// THE OVERCAST TAKES THE SUN'S COLOUR (2026-09-14, The Long Dark reference - the dam
+	// at sunset is sepia, the blizzard with the sun gone is cold teal-grey). One warmth
+	// number, from the sun's elevation at the camera: 0 below the horizon, full between
+	// ~+1 and ~+5 deg, gone by ~+9. The snow's deck tint and its flakes both take it; the
+	// rain's approved slate is untouched.
+	const float warm = clampf((s_rn.sinE + 0.02f) / 0.06f, 0.0f, 1.0f)
+	                 * clampf((0.16f - s_rn.sinE) / 0.08f, 0.0f, 1.0f);
 
 	// LIGHT ON THE RAIN (2026-09-05, his note: "the rain streak glow should also be
 	// dependent on the slider + the light"). The sky and the ship's own lamps were
@@ -1275,7 +1411,7 @@ void OroModule::BuildRainGeometry()
 	float lightNow = s_rn.lightF;
 	{
 		const float lrate = clampf(g_fx.rainLtg, 0.0f, 2.0f)
-		                  * clampf((I - 0.2f) / 0.6f, 0.0f, 1.0f);
+		                  * clampf((Ir - 0.2f) / 0.6f, 0.0f, 1.0f);   // the RAIN's - no lightning in snow
 		float fI = 0.0f;
 		for (int s2 = 0; s2 < 6 && lrate > 0.01f; s2++) {
 			RainLtgEv ev;
@@ -1366,6 +1502,26 @@ void OroModule::BuildRainGeometry()
 		rainDepth[rainVtxN] = bz; rainVtxN++;
 		rainVtx[rainVtxN].x = cx; rainVtx[rainVtxN].y = cy; rainVtx[rainVtxN].c = FogColNear(ccol, cz);
 		rainDepth[rainVtxN] = cz; rainVtxN++;
+	};
+	// ... and the same WITHOUT the fog: every vertex of a streak or a flake shares its Z, so
+	// the sheet's emission below fogs an element's two colours ONCE and emits them raw -
+	// bit-identical, and a 28k-flake blizzard (round 3) cannot afford six exp() a flake.
+	auto emitF = [&](float ax, float ay, float az, DWORD ac,
+	                 float bx, float by, float bz, DWORD bc,
+	                 float cx, float cy, float cz, DWORD ccol) {
+		if (rainVtxN + 3 > RAIN_MAX_TRI * 3) return;
+		rainVtx[rainVtxN].x = ax; rainVtx[rainVtxN].y = ay; rainVtx[rainVtxN].c = ac;   rainDepth[rainVtxN] = az; rainVtxN++;
+		rainVtx[rainVtxN].x = bx; rainVtx[rainVtxN].y = by; rainVtx[rainVtxN].c = bc;   rainDepth[rainVtxN] = bz; rainVtxN++;
+		rainVtx[rainVtxN].x = cx; rainVtx[rainVtxN].y = cy; rainVtx[rainVtxN].c = ccol; rainDepth[rainVtxN] = cz; rainVtxN++;
+	};
+	// the SHED poly's emitter (step E) - its own buffer, its own ceiling, fogged per element
+	auto emitS = [&](float ax, float ay, float az, DWORD ac,
+	                 float bx, float by, float bz, DWORD bc,
+	                 float cx, float cy, float cz, DWORD ccol) {
+		if (shedVtxN + 3 > SHED_MAX_TRI * 3) return;
+		shedVtx[shedVtxN].x = ax; shedVtx[shedVtxN].y = ay; shedVtx[shedVtxN].c = ac;   shedDepth[shedVtxN] = az; shedVtxN++;
+		shedVtx[shedVtxN].x = bx; shedVtx[shedVtxN].y = by; shedVtx[shedVtxN].c = bc;   shedDepth[shedVtxN] = bz; shedVtxN++;
+		shedVtx[shedVtxN].x = cx; shedVtx[shedVtxN].y = cy; shedVtx[shedVtxN].c = ccol; shedDepth[shedVtxN] = cz; shedVtxN++;
 	};
 	// the GROUND poly's emitter - the storm deck. Separate buffer, separate 65535
 	// ceiling (see RAIN_GND_TRI in OroModule.h), drawn BEFORE everything else here.
@@ -1460,7 +1616,19 @@ void OroModule::BuildRainGeometry()
 	const float below    = deckH0 - camAGL;
 	float punch = clampf((below - 80.0f) / 400.0f, 0.0f, 1.0f);
 	punch = punch * punch * (3.0f - 2.0f * punch);
-	const float dStorm = I * clampf(g_fx.rainGloom * 0.5f, 0.0f, 1.0f) * punch;
+	// SNOW (2026-09-13, his call: one deck, two tints): the deck follows what is FALLING -
+	// a standing cover on a clear day has no overcast - at the snow's own Gloom, and its
+	// colour is a bright, near-neutral stratus lit from above rather than the storm's
+	// dark blue-grey base.
+	const float Ideck  = snowMode ? I * clampf(g_fx.snowFall, 0.0f, 1.0f) : I;
+	const float gloomK = snowMode ? g_fx.snowGloom : g_fx.rainGloom;
+	const float dStorm = Ideck * clampf(gloomK * 0.5f, 0.0f, 1.0f) * punch;
+	// The snow deck's tint FOLLOWS THE SUN (2026-09-14): cold teal-grey with the sun gone,
+	// warm sepia with it low - not a fixed constant and not a picker (15b: the colour
+	// comes from the sun, one number, no second writer).
+	const float dkR = snowMode ? (74.0f  + 36.0f * warm) : 52.0f;
+	const float dkG = snowMode ? (88.0f  +  6.0f * warm) : 57.0f;
+	const float dkB = snowMode ? (92.0f  - 14.0f * warm) : 66.0f;
 	if (dStorm > 0.01f && below > 80.0f) {
 		const int   DK_AZ = 48;
 		const float ELEV[13] = { 89.0f, 75.0f, 62.0f, 50.0f, 39.0f, 29.0f,
@@ -1470,17 +1638,22 @@ void OroModule::BuildRainGeometry()
 		const VECTOR3 pe2 = crossp(s_rn.axis, pe1);
 		const float texBoost = useTex ? 1.55f : 1.0f;
 
+		// The rain's deck takes the GROUND fog only (its own mist must not wash the approved
+		// look); the SNOW's deck takes BOTH layers (2026-09-14): a blizzard's mist is a
+		// hundred metres of visibility, and the ceiling is the first thing it swallows -
+		// The Long Dark's whiteout has no visible sky at all.
+		auto deckFog = [&](DWORD c, float d) { return snowMode ? FogColNear(c, d) : FogColNearGround(c, d); };
 		auto emitDeck = [&](float x1, float y1, float d1, DWORD c1, float u1, float v1,
 		                    float x2, float y2, float d2, DWORD c2, float u2, float v2,
 		                    float x3, float y3, float d3, DWORD c3, float u3, float v3) {
 			if (useTex) {
 				if (deckN + 3 > RAIN_GND_TRI * 3) return;
 				deckVtx[deckN].x = x1; deckVtx[deckN].y = y1; deckVtx[deckN].u = u1;
-				deckVtx[deckN].v = v1; deckVtx[deckN].c = FogColNearGround(c1, d1); deckDepth[deckN] = d1; deckN++;
+				deckVtx[deckN].v = v1; deckVtx[deckN].c = deckFog(c1, d1); deckDepth[deckN] = d1; deckN++;
 				deckVtx[deckN].x = x2; deckVtx[deckN].y = y2; deckVtx[deckN].u = u2;
-				deckVtx[deckN].v = v2; deckVtx[deckN].c = FogColNearGround(c2, d2); deckDepth[deckN] = d2; deckN++;
+				deckVtx[deckN].v = v2; deckVtx[deckN].c = deckFog(c2, d2); deckDepth[deckN] = d2; deckN++;
 				deckVtx[deckN].x = x3; deckVtx[deckN].y = y3; deckVtx[deckN].u = u3;
-				deckVtx[deckN].v = v3; deckVtx[deckN].c = FogColNearGround(c3, d3); deckDepth[deckN] = d3; deckN++;
+				deckVtx[deckN].v = v3; deckVtx[deckN].c = deckFog(c3, d3); deckDepth[deckN] = d3; deckN++;
 			} else {
 				emitG(x1, y1, d1, c1, x2, y2, d2, c2, x3, y3, d3, c3);
 			}
@@ -1493,7 +1666,7 @@ void OroModule::BuildRainGeometry()
 		FlashXY fl[6]; int nFl = 0;
 		{
 			const float lrate = clampf(g_fx.rainLtg, 0.0f, 2.0f)
-			                  * clampf((I - 0.2f) / 0.6f, 0.0f, 1.0f);
+			                  * clampf((Ir - 0.2f) / 0.6f, 0.0f, 1.0f);   // the RAIN's - no lightning in snow
 			for (int s2 = 0; s2 < 6 && lrate > 0.01f; s2++) {
 				RainLtgEv ev;
 				if (RainLtgFlash(t, s2, lrate, &ev) > 0.02f) {
@@ -1506,7 +1679,7 @@ void OroModule::BuildRainGeometry()
 			// THE STRIKE TEST (his rig): the last-pressed bolt, planted ~60 m beside
 			// the FOCUS vessel so the texture can be judged up close. Bypasses the
 			// rate gate - a test is a test - but not the storm itself.
-			if (g_fx.boltTestSlot >= 0 && nFl < 6) {
+			if (!snowMode && g_fx.boltTestSlot >= 0 && nFl < 6) {   // no bolts in snow, test rig included
 				const float ei = RainLtgTestEnv((float)(t - boltTestT0));
 				if (ei > 0.02f) {
 					VECTOR3 vP2 = s_rn.vPos;
@@ -1616,9 +1789,9 @@ void OroModule::BuildRainGeometry()
 					// day; the scud darker (LAY_LUM), and a sagging mass shades ITSELF
 					const float lum = (0.16f + 0.84f * s_rn.dayF) * billow * texBoost
 					                * LAY_LUM[Ld] * (1.0f - 0.18f * clampf(b1, 0.0f, 1.0f));
-					const int cr = (int)(52.0f * lum + fw * 430.0f);
-					const int cg = (int)(57.0f * lum + fw * 450.0f);
-					const int cb = (int)(66.0f * lum + fw * 490.0f);
+					const int cr = (int)(dkR * lum + fw * 430.0f);
+					const int cg = (int)(dkG * lum + fw * 450.0f);
+					const int cb = (int)(dkB * lum + fw * 490.0f);
 					float aa = 235.0f * dStorm * aEl * nearF * (0.90f + 0.10f * b1) * LAY_A[Ld] * layF
 					         + fw * 70.0f;      // lit cloud reads denser
 					if (aa > 255.0f) aa = 255.0f;
@@ -1633,8 +1806,8 @@ void OroModule::BuildRainGeometry()
 					const float lumZ = (0.16f + 0.84f * s_rn.dayF) * 0.80f * texBoost * LAY_LUM[Ld];
 					float aaZ = 235.0f * dStorm * nearF * LAY_A[Ld] * layF;
 					if (aaZ > 255.0f) aaZ = 255.0f;
-					const DWORD czC = RCol((int)(52.0f * lumZ), (int)(57.0f * lumZ),
-					                       (int)(66.0f * lumZ), (int)aaZ);
+					const DWORD czC = RCol((int)(dkR * lumZ), (int)(dkG * lumZ),
+					                       (int)(dkB * lumZ), (int)aaZ);
 					float ucap = 0.0f, vcap = 0.0f;
 					if (useTex) {
 						VECTOR3 dpd = Pz - pC;
@@ -1763,10 +1936,23 @@ void OroModule::BuildRainGeometry()
 	// speeds, lengths and brightnesses are exactly what parallax does to a real curtain,
 	// and giving the eye that gradient is what buys back the depth the fake gave away.
 	// Near: few, long, fast, bright. Far: many, short, slow, dim.
-	const float dens  = clampf(g_fx.rainDensity, 0.0f, 2.0f);
-	const float lenK  = clampf(g_fx.rainStreak,  0.0f, 2.0f);
-	const float spdK  = clampf(g_fx.rainSpeed,   0.0f, 2.0f);
-	const float glowK = clampf(g_fx.rainStreakA, 0.0f, 2.0f);
+	// SNOW MODE (2026-09-13): the same sheet, re-particled. The flakes take their own
+	// sliders, fall at ~1.6 m/s instead of ~9, wander sideways as they fall, and draw as
+	// soft dots that elongate along the flow only as the RELATIVE speed climbs - a still
+	// camera sees drifting specks, a moving one sees streaks, by construction (the rain's
+	// fall-vector law, 25e, doing the work). Rain and snow are mutually exclusive (his
+	// rule), so one buffer, one poly and one phase serve both.
+	const float dens  = clampf(snowMode ? g_fx.snowFall  : g_fx.rainDensity, 0.0f, 2.0f);
+	const float lenK  = clampf(snowMode ? g_fx.snowFlake : g_fx.rainStreak,  0.0f, 2.0f);
+	const float spdK  = clampf(snowMode ? g_fx.snowSpeed : g_fx.rainSpeed,   0.0f, 2.0f);
+	const float glowK = snowMode ? 1.0f : clampf(g_fx.rainStreakA, 0.0f, 2.0f);
+	const float wandK = snowMode ? clampf(g_fx.snowWander, 0.0f, 2.0f) : 0.0f;
+	const float ctrK  = snowMode ? clampf(g_fx.snowContrast, 0.0f, 2.0f) : 1.0f;   // round 3: 1 = the 09-14 flake
+	// SNOW SHOWS AT NIGHT (2026-09-20, his rule for now - "visible at night, just at 1/2 of the
+	// contrast setting"; the rain's no-light-no-drops law stays the rain's and is revisited later):
+	// the light on the flakes is floored at half the Contrast slider, so an unlit blizzard still
+	// reads, at half strength at Contrast 1 and at full at 2.
+	const float lightSnow = snowMode ? fmaxf(lightNow, fminf(1.0f, 0.5f * ctrK)) : lightNow;
 
 	// ⚠️ THE SHEET IS DIRECTION-AWARE (round 3, his report). Screen-space top-to-bottom
 	// was right only for a LEVEL camera: point the camera at the sky and real rain comes
@@ -1781,7 +1967,8 @@ void OroModule::BuildRainGeometry()
 	// gets the correct radial pattern from the same three lines.
 	// The projected magnitude also scales streak LENGTH: rain seen along its own motion
 	// is specks, not lines - which is what looking up into rain actually shows.
-	const float angR = clampf(g_fx.rainAngle, -15.0f, 15.0f) * 0.0174532925f;
+	// (round 3: the snow has no slant of its own any more - its wind, speed and direction, IS the tilt)
+	const float angR = clampf(snowMode ? 0.0f : g_fx.rainAngle, -15.0f, 15.0f) * 0.0174532925f;
 	// The slant is a WORLD tilt now (about the east axis - the wind blows somewhere),
 	// not a screen skew, so it survives the camera turning.
 	// ⚠️ AND SINCE 2026-08-27 THE FALL VECTOR IS RELATIVE TO THE VESSEL - invariant
@@ -1794,11 +1981,28 @@ void OroModule::BuildRainGeometry()
 	// you near-horizontal and RUSH, which is what the VC runners already do, so the
 	// two sides of the glass finally tell one story. Apparent speed and streak length
 	// ride the magnitude (capped - at Mach the honest 30x would be a strobe).
-	const VECTOR3 vFall = (up * (-cosf(angR)) + east * sinf(angR)) * 9.0;
+	// A flake's terminal velocity is ~1.6 m/s against a drop's ~9; relK stays in the RAIN's
+	// units for both, so at speed the two storms converge on the same streaks (the same
+	// relative wind, and the drop's own 9 m/s is a small addition to it).
+	const double  fallSpd = snowMode ? 1.6 : 9.0;
+	// THE WIND (2026-09-14, The Long Dark reference: a blizzard IS wind - their five wind
+	// states, and "the falling snow so hard it moves horizontally"). A horizontal
+	// component along east, GUSTING on real time (two slow sines, 0.64..1.0 of the
+	// slider), added to the fall before the vessel's own motion is subtracted - so a
+	// parked ship in a 20 m/s wind sees the flakes stream past near-horizontal and the
+	// rain's relative-wind law turns them into streaks with nothing else changed.
+	const float   gust    = 0.82f + 0.18f * sinf(t * 0.37f) * sinf(t * 0.11f + 1.3f);
+	const double  windNow = snowMode ? (double)(clampf(g_fx.snowWind, 0.0f, 30.0f) * gust) : 0.0;
+	// THE WIND HAS A DIRECTION (round 3, 2026-09-19, his ask): Wind from, degrees clockwise
+	// from north, the meteorological convention - 270 = from the west = the 09-14 build's
+	// east-blowing wind, bit for bit. The slant leans the same way, downwind. Rain keeps east.
+	const float   wdR   = clampf(g_fx.snowWindDir, 0.0f, 360.0f) * 0.0174532925f;
+	const VECTOR3 dirW  = snowMode ? (north * (-cosf(wdR)) + east * (-sinf(wdR))) : east;
+	const VECTOR3 vFall = (up * (-cosf(angR)) + dirW * sinf(angR)) * fallSpd + dirW * windNow;
 	const VECTOR3 relV  = vFall - s_rn.vAirG;
 	const double  relM  = length(relV);
 	const VECTOR3 fallW = (relM > 1e-3) ? relV / relM : up * (-1.0);
-	const float   relK  = (float)(relM / 9.0);           // 1.0 parked
+	const float   relK  = (float)(relM / 9.0);           // 1.0 parked (rain); 0.18 parked (snow)
 	// ⚠️ COMPRESSED, NOT LINEAR (his report: "100 knots in the rain is like the
 	// lightspeed effect in Star Wars"). Linear pinned the 6x cap by ~55 m/s, because
 	// relative speed is already 5.7x terminal there - the DIRECTION carries the truth
@@ -1811,7 +2015,14 @@ void OroModule::BuildRainGeometry()
 	{
 		const float dtp = (rainSheetPhT >= 0.0f && t > rainSheetPhT) ? (t - rainSheetPhT) : 0.0f;
 		rainSheetPhT = t;
-		rainSheetPh += dtp * spdMul;
+		// SNOW: the root law compresses the slow end too hard - parked, relK 0.18 gives a
+		// rate of 0.50 where the physics says 0.18 (flakes drift, they do not fall like
+		// rain) - so the snow's rate is bent back toward linear at the bottom and meets
+		// the rain's law at the top, where the relative wind owns both.
+		const float rateK = snowMode
+		                  ? spdMul * (0.36f + 0.64f * clampf((spdMul - 0.5f) / 2.5f, 0.0f, 1.0f))
+		                  : spdMul;
+		rainSheetPh += dtp * rateK;
 		if (rainSheetPh > 1.0e4f) rainSheetPh -= 1.0e4f;   // bounded; u wraps anyway
 	}
 	const VECTOR3 dC = tmul(cc.rot, fallW);          // fall direction, camera axes
@@ -1835,8 +2046,15 @@ void OroModule::BuildRainGeometry()
 		{   0.14f,   0.105f,   2.40f,  1.00f,  1.90f },   // near: the ones you notice
 	};
 
-	const int NTOT = (int)(RAIN_MAX_STREAK * clampf(dens * 0.5f, 0.0f, 1.0f)
-	                       * (0.35f + 0.65f * I));
+	// THE COUNT (snow round 3, 2026-09-19, his brief: "at full slider strength the 3 rows of
+	// snowflakes should really hide the scenery"). The sheet spans RAIN_POLYS groups now
+	// (OroModule.h), so the snow has SNOW_MAX_STREAK flakes at Snowfall 2 - the near layer
+	// draws four-triangle fans, the rest quads, 2.28 triangles a flake on the layer split -
+	// and the slider reaches them on a SQUARE law: the bottom of the range stays a light
+	// fall, the top a whiteout. The rain keeps its own 1800, untouched.
+	const float dK   = clampf(dens * 0.5f, 0.0f, 1.0f);
+	const int   NTOT = (int)((snowMode ? (float)SNOW_MAX_STREAK * dK * dK : (float)RAIN_MAX_STREAK * dK)
+	                         * (0.35f + 0.65f * I));
 
 	// THE RAIN SHIELD precompute (render path: snapshot data only, invariant 1).
 	// The camera is the RENDER camera, so the vessel position must be the render
@@ -1852,8 +2070,24 @@ void OroModule::BuildRainGeometry()
 	int base = 0;
 	for (int L = 0; L < 3; L++) {
 		const int NL = (int)(NTOT * LAY[L].frac);
-		const float slen = H * LAY[L].len * (0.25f + 0.95f * lenK) * lenMul;
-		const float wpx  = LAY[L].wid;
+		// SNOW (2026-09-14, The Long Dark reference): depth is sold by SIZE AND SOFTNESS,
+		// not by count. The far layer is specks (~3 px), the mid layer small dots, the NEAR
+		// layer large soft discs (a four-triangle fan, alpha 0 at the rim, ~16 px radius at
+		// Flake size 1 on a 1080 screen - their out-of-focus blobs); each flake also takes a
+		// hashed size of its own (below). Every layer elongates along the flow only as the
+		// relative wind climbs - nothing parked, a rain-length streak by ~25 m/s (spdMul 1.5).
+		const float sizeK  = 0.6f + 0.8f * lenK;
+		const float elongL = snowMode ? H * LAY[L].len * 0.60f * clampf(spdMul - 0.5f, 0.0f, 1.0f) : 0.0f;
+		const float wpxL   = snowMode ? H * (L == 0 ? 0.0022f : 0.0042f) * sizeK : LAY[L].wid;
+		const float rL     = H * 0.011f * sizeK;                 // the near fan's radius
+		const float slenL  = H * LAY[L].len * (0.25f + 0.95f * lenK) * lenMul;   // rain
+		// the blizzard law: as the count rises the per-flake alpha FALLS, so a dense fall
+		// stays a moving haze rather than a bright wall (their streaks are faint; the mass
+		// reads) - and the snow's own per-layer alphas, translucent on every layer
+		// (round 3: the floor rose 0.5 -> 0.7 - the COUNT carries the density now, and a
+		//  whiteout wants the mass to close, not to thin)
+		const float aDens   = snowMode ? clampf(1.15f / (0.6f + dens), 0.7f, 1.0f) : 1.0f;
+		const float alphaS  = (L == 0) ? 0.35f : (L == 1 ? 0.55f : 0.62f);
 		const float spd  = LAY[L].spd * (0.35f + 0.85f * spdK);   // per-layer rate; the
 		                                                          // physics factor lives
 		                                                          // in rainSheetPh now
@@ -1867,6 +2101,13 @@ void OroModule::BuildRainGeometry()
 			const float ph = hashf(i * 5 + 13);
 			float u = ph + rainSheetPh * spd;   // integrated phase - never runs backward
 			u -= floorf(u);
+
+			// per-flake SIZE (snow): the reference's varied flakes - a hashed 0.7..1.3 on the
+			// layer's size; a streak's length is its width plus the flow elongation
+			const float szJ  = snowMode ? (0.7f + 0.6f * hashf(i * 13 + 5)) : 1.0f;
+			const float wpx  = wpxL * szJ;
+			const float slen = snowMode ? (wpx * 1.1f + elongL) : slenL;
+			const float rF   = rL * szJ;                        // the near fan's radius (snow, L == 2)
 
 			// A fixed screen ANCHOR; the streak slides through it along its local flow
 			// direction and respawns there, the pop hidden by the end fades below.
@@ -1894,8 +2135,19 @@ void OroModule::BuildRainGeometry()
 			const float pdy = -sfy / sm;
 
 			const float disp = (u - 0.5f) * travel;
-			const float x0 = axp + pdx * disp;
-			const float y0 = ayp + pdy * disp;
+			// SNOW: the flake's sideways WANDER - a sinusoid in its OWN phase (u), so it is a
+			// pure function of the clock and the slot (no state, pause-correct, the soot
+			// idiom), larger on the near layer (parallax), and it dies as the airflow takes
+			// over: a streaking flake goes where the air goes.
+			float wob = 0.0f;
+			if (snowMode) {
+				const float wf = 1.4f + 1.6f * hashf(i * 11 + 83);      // zig-zags per travel
+				const float wp = hashf(i * 11 + 97) * 6.2831853f;
+				wob = sinf(u * 6.2831853f * wf + wp) * H * 0.014f * wandK
+				    * (0.5f + 0.5f * (float)L) * clampf(1.5f - spdMul, 0.15f, 1.0f);
+			}
+			const float x0 = axp + pdx * disp - pdy * wob;
+			const float y0 = ayp + pdy * disp + pdx * wob;
 			if (x0 < -margin || x0 > W + margin || y0 < -margin || y0 > H + margin) continue;
 
 			// ⚠️ FORESHORTENING AND THE CENTRE MASK ARE SAMPLED WHERE THE STREAK IS
@@ -1955,13 +2207,46 @@ void OroModule::BuildRainGeometry()
 			const float uf = (u < 0.10f) ? u * 10.0f
 			               : ((u > 0.90f) ? (1.0f - u) * 10.0f : 1.0f);
 
-			const float A = 190.0f * I * LAY[L].alpha * glowK * lightNow * uf * vpMask;   // lightNow: the light on the rain
+			// The alpha: the rain's law, or the snow's - its own per-layer alphas, the
+			// blizzard density law, and a STREAK FADE (a flake smeared along the flow
+			// spreads its light over more pixels and goes fainter - their blizzard
+			// streaks are faint, the mass is what reads). lightNow: the light on the rain,
+			// so an unlit night keeps only the hint and a landing light shows the flakes.
+			const float fadeS = snowMode
+			                  ? clampf(sqrtf(wpx / ((L == 2) ? (rF + elongL) : (slen > wpx ? slen : wpx))), 0.35f, 1.0f)
+			                  : 1.0f;
+			// CONTRAST (round 3, his 'the flakes blend too much with the background'): one
+			// slider, two consequences - the flake's alpha and its brightness over the air's
+			// both scale, so a flake stands further off the mist it falls through. 1 = the
+			// 09-14 air-coloured flake bit for bit.
+			const float A = (snowMode ? 255.0f * alphaS * aDens * fadeS * (0.6f + 0.4f * ctrK) : 190.0f * LAY[L].alpha * glowK)
+			              * I * lightSnow * uf * vpMask;
 			if (A < 1.5f) continue;
 
 			// Rain reads LIGHT against a dark sky and merely grey against a bright one,
 			// which is what a low-alpha near-white gives for free. Cool, not neutral.
-			const DWORD cHi = RCol(200, 212, 230, (int)(A > 255.0f ? 255.0f : A));
-			const DWORD cLo = RCol(200, 212, 230, 0);   // the tail fades to nothing
+			// SNOW IS THE COLOUR OF THE AIR (2026-09-14, The Long Dark reference): a flake
+			// is lit by the same flat sky it falls from and is translucent, so against a
+			// bright overcast it reads GREY - darker than the sky - and against a dark hull,
+			// white. Its brightness follows the light on the air and the overcast's depth
+			// (Gloom), takes the sun's warmth with the deck, and varies a little per flake.
+			// Never a flat near-white: that is a spark, not snow.
+			const int aA = (int)(A > 255.0f ? 255.0f : A);
+			DWORD cHi, cLo;
+			if (snowMode) {
+				const float cB = 240.0f * clampf(0.55f + 0.45f * lightSnow, 0.0f, 1.0f)
+				               * (1.0f - 0.18f * clampf(gloomK, 0.0f, 2.0f))
+				               * (0.85f + 0.15f * hashf(i * 17 + 7))
+				               * (0.5f + 0.5f * ctrK);                      // round 3: Contrast lifts it over the air
+				const int cr = (int)fminf(255.0f, cB * (0.96f + 0.06f * warm));
+				const int cg = (int)fminf(255.0f, cB * (0.98f - 0.04f * warm));
+				const int cb = (int)fminf(255.0f, cB * (1.00f - 0.20f * warm));
+				cHi = RCol(cr, cg, cb, aA);
+				cLo = RCol(cr, cg, cb, 0);
+			} else {
+				cHi = RCol(200, 212, 230, aA);
+				cLo = RCol(200, 212, 230, 0);   // the tail fades to nothing
+			}
 
 			// Perpendicular in screen space.
 			const float perpx = -pdy * (wpx * 0.5f);
@@ -1980,12 +2265,116 @@ void OroModule::BuildRainGeometry()
 			// the RAIN SHIELD's job (the authored roof, above) - one scalar was
 			// never going to describe a real interior.
 			const float Z = rainVC ? RAIN_VC_Z : 0.5f;
-			emit(x0 + perpx, y0 + perpy, Z, cHi,  x0 - perpx, y0 - perpy, Z, cHi,
-			     x1 + perpx, y1 + perpy, Z, cLo);
-			emit(x0 - perpx, y0 - perpy, Z, cHi,  x1 - perpx, y1 - perpy, Z, cLo,
-			     x1 + perpx, y1 + perpy, Z, cLo);
+			cHi = FogColNear(cHi, Z);   // once per element - see emitF
+			cLo = FogColNear(cLo, Z);
+			if (snowMode && L == 2) {
+				// THE NEAR FLAKE IS A SOFT DISC: a four-triangle fan, bright at its centre,
+				// alpha 0 at four rim points - ahead, behind (pushed out by the flow
+				// elongation, so at speed the disc smears into a soft streak), and the two
+				// sides. Gouraud does the softness; the reference's blurred blobs.
+				const float eF = elongL * fLen;
+				const float hx = x0 + pdx * rF,        hy = y0 + pdy * rF;          // ahead
+				const float tx = x0 - pdx * (rF + eF), ty = y0 - pdy * (rF + eF);   // behind
+				const float lx = x0 - pdy * rF,        ly = y0 + pdx * rF;          // the sides
+				const float rx = x0 + pdy * rF,        ry = y0 - pdx * rF;
+				emitF(x0, y0, Z, cHi,  hx, hy, Z, cLo,  lx, ly, Z, cLo);
+				emitF(x0, y0, Z, cHi,  lx, ly, Z, cLo,  tx, ty, Z, cLo);
+				emitF(x0, y0, Z, cHi,  tx, ty, Z, cLo,  rx, ry, Z, cLo);
+				emitF(x0, y0, Z, cHi,  rx, ry, Z, cLo,  hx, hy, Z, cLo);
+			} else {
+				emitF(x0 + perpx, y0 + perpy, Z, cHi,  x0 - perpx, y0 - perpy, Z, cHi,
+				     x1 + perpx, y1 + perpy, Z, cLo);
+				emitF(x0 - perpx, y0 - perpy, Z, cHi,  x1 - perpx, y1 - perpy, Z, cLo,
+				     x1 + perpx, y1 + perpy, Z, cLo);
+			}
 		}
 		base += NL;
+	}
+
+	// ---- 1b. THE SHED FLAKES (step E, 2026-09-20) ---------------------------------
+	// Snow blowing off the hull on the take-off roll. The pool is advected on the main
+	// thread (UpdateShed, planet-local, sim time); here it is only PROJECTED - the trail's
+	// split, because a world particle lives in the render path's camera.
+	// THE FRAME (his first flight: "several of them staying put around the vessel"): the
+	// snapshot's planet rotation is one sim step STALE against the render-epoch centre pC,
+	// and one frame of Earth's spin moves a surface point ~8 m in the global frame (a warp
+	// step, hundreds) - so a flake rotated on its own and added to pC sat that far off.
+	// The camera is put into the SAME stale frame (camL) and the flake's offset from it
+	// formed THERE, where the lag cancels: the residual is the lag times the flake's
+	// distance from the eye, microns. The (ab) lesson in its render-path form.
+	// THE LOOK (the same flight: "specks... not an animated effect"): a flake recedes from
+	// a chase camera at the hull's speed - nearly a metre a FRAME - and a disc redrawn a
+	// metre away each frame reads as a static speck, never as motion. So each flake is
+	// drawn as its motion blur: a streak from where it is to where it was a shutter ago
+	// (T_BLUR), relative to the HULL the camera rides (the sheet's elongation law, the
+	// flow's own coherence), and the near layer's soft disc only once it has slowed to a
+	// drift. A smeared flake spreads its light and fades with its length (the sheet's
+	// fadeS). Coloured like the sheet's flakes (the air's colour, the contrast), faded
+	// over its last third and its last metre before the eye.
+	if (snowMode && shedLive > 0 && shedRef == s_rn.hRef) {
+		const float   pxPerRad = 0.5f * H / tAp;                       // pixels per metre at 1 m
+		const VECTOR3 camL     = tmul(s_rn.prot, cc.pos - pC);         // the camera in the flakes' (stale) frame
+		const double  T_BLUR   = 0.045;                                // s - a 1/22 s shutter
+		for (int k = 0; k < SHED_MAX; k++) {
+			const ShedPt& sp = shed[k];
+			if (!sp.live) continue;
+			const VECTOR3 vRel = sp.v - shedVesL;                      // against the hull the camera rides
+			const VECTOR3 P0 = cc.pos + mul(s_rn.prot, sp.p - camL);
+			const VECTOR3 P1 = cc.pos + mul(s_rn.prot, (sp.p - vRel * T_BLUR) - camL);
+			float x0, y0, x1, y1; double z0, z1;
+			if (!ProjPx(cc, P0, viewW, viewH, x0, y0, z0)) continue;
+			const bool tailOK = ProjPx(cc, P1, viewW, viewH, x1, y1, z1);
+			// a chunk TUMBLES: its projected size swings about a hashed phase (a flat slab seen
+			// edge-on, then face-on), a clump keeps its size
+			const float tumble = sp.chunk ? (0.30f + 0.70f * fabsf(sinf(sp.age * 5.0f + sp.hue * 6.2831853f))) : 1.0f;
+			const float rpx = clampf((float)(sp.rad / z0) * pxPerRad * tumble, 1.5f, 96.0f);
+			const float mrg = rpx + (tailOK ? sqrtf((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)) : 0.0f);
+			if (x0 < -mrg || x0 > W + mrg || y0 < -mrg || y0 > H + mrg) continue;
+			const float lifeF = clampf((sp.life - sp.age) / (0.35f * sp.life), 0.0f, 1.0f);
+			const float nearF = clampf(((float)z0 - 1.0f) / 1.0f, 0.0f, 1.0f);
+			const float slen  = tailOK ? sqrtf((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)) : 0.0f;
+			const bool  streak = tailOK && slen > rpx;
+			const float fadeS = streak ? clampf(sqrtf(rpx / slen), 0.35f, 1.0f) : 1.0f;
+			const float A = 255.0f * (sp.chunk ? 1.00f : 0.85f) * (0.6f + 0.4f * ctrK) * lightSnow * lifeF * nearF * fadeS * I;   // a fan is bright at its centre alone
+			if (A < 1.5f) continue;
+			const float cB = 240.0f * clampf(0.55f + 0.45f * lightSnow, 0.0f, 1.0f)
+			               * (1.0f - 0.18f * clampf(gloomK, 0.0f, 2.0f))
+			               * (0.85f + 0.15f * sp.hue)
+			               * (0.5f + 0.5f * ctrK);
+			const int cr = (int)fminf(255.0f, cB * (0.96f + 0.06f * warm));
+			const int cg = (int)fminf(255.0f, cB * (0.98f - 0.04f * warm));
+			const int cb = (int)fminf(255.0f, cB * (1.00f - 0.20f * warm));
+			const float Zf = (float)z0;
+			const DWORD cHi = FogColNear(RCol(cr, cg, cb, (int)(A > 255.0f ? 255.0f : A)), Zf);
+			const DWORD cLo = FogColNear(RCol(cr, cg, cb, 0), Zf);
+			// THE FLAKE IS A SOFT FAN, ELONGATED INTO ITS BLUR (his fourth flight: a streak drawn
+			// as a quad has a fully opaque head edge, and a large flake at a short smear was a
+			// hard white RECTANGLE at every birth). The sheet's near-layer law instead: the
+			// centre bright, every rim point transparent - ahead by the radius, behind by the
+			// radius plus the smear, the sides by the radius - and Gouraud does the softness,
+			// so a chunk is a soft blob and a fast clump a soft streak, never an edge.
+			// EIGHT RIM POINTS, NOT FOUR (his fifth flight, the lozenges at every birth): Gouraud
+			// interpolates alpha linearly to each rim point, so a four-point fan is a DIAMOND -
+			// its isolines are squares - and at a chunk's size, stretched by the blur, that is a
+			// square lozenge sitting on the wing. An octagon reads round. The rim points behind
+			// the centre are carried out along the tail by the smear, weighted by how far behind
+			// they sit, so the fast clump is a soft teardrop and the slow chunk a soft disc.
+			static const float OCT_C[8] = { 1.0f, 0.70710678f, 0.0f, -0.70710678f, -1.0f, -0.70710678f, 0.0f, 0.70710678f };
+			static const float OCT_S[8] = { 0.0f, 0.70710678f, 1.0f, 0.70710678f, 0.0f, -0.70710678f, -1.0f, -0.70710678f };
+			float dx = 0.0f, dy = -1.0f;
+			if (streak) { dx = (x1 - x0) / slen; dy = (y1 - y0) / slen; }   // head -> tail
+			const float ext = streak ? slen : 0.0f;
+			float rxk[8], ryk[8];
+			for (int q = 0; q < 8; q++) {
+				const float along = OCT_C[q] * rpx + ((OCT_C[q] > 0.0f) ? OCT_C[q] * ext : 0.0f);   // +along = behind
+				rxk[q] = x0 + dx * along - dy * (OCT_S[q] * rpx);
+				ryk[q] = y0 + dy * along + dx * (OCT_S[q] * rpx);
+			}
+			for (int q = 0; q < 8; q++) {
+				const int q2 = (q + 1) & 7;
+				emitS(x0, y0, Zf, cHi,  rxk[q], ryk[q], Zf, cLo,  rxk[q2], ryk[q2], Zf, cLo);
+			}
+		}
 	}
 
 	// ---- 2. DROPS LANDING IN WATER -------------------------------------------
@@ -2002,7 +2391,7 @@ void OroModule::BuildRainGeometry()
 	// a patch of ground at 200 m packs its splashes into a small fraction of the pixels it
 	// would occupy at 20 m, so a lower world density there lands at a similar density in
 	// the frame. Same shape of reasoning as the streak sheet's three layers.
-	if (camAGL < 150.0f && camAGL > -5.0f && g_fx.rainPuddle > 0.001f
+	if (!snowMode && camAGL < 150.0f && camAGL > -5.0f && g_fx.rainPuddle > 0.001f   // flakes land silently
 	    && g_fx.rainSplashSize > 0.001f) {
 		const float RING_LIFE = 0.55f;               // s, birth -> gone
 		// Splash size (2026-09-10, his Bell 206 screenshot: rings that suit a DG dwarf a
@@ -2095,7 +2484,7 @@ void OroModule::BuildRainGeometry()
 		const float camFE = camAE;      // the lattice anchor - see the note above
 		const float camFN = camAN;
 		const int   NRING = (int)(STRAT_N[st]
-		                          * clampf(g_fx.rainPuddle * 0.5f, 0.0f, 1.0f) * I);
+		                          * clampf(g_fx.rainPuddle * 0.5f, 0.0f, 1.0f) * Ir);
 		const int   jofs  = st * 7919 + fld * 33331; // separate hash streams per stratum+field
 
 		for (int j0 = 0; j0 < NRING; j0++) {
@@ -2156,7 +2545,7 @@ void OroModule::BuildRainGeometry()
 			else if (rpx > 3.5f) { NSEG = 4; NB = 3; }
 			else                 { NSEG = 3; NB = 2; }
 
-			const float a = powf(1.0f - tt, 1.6f) * 150.0f * I * sizeF
+			const float a = powf(1.0f - tt, 1.6f) * 150.0f * Ir * sizeF
 			              * clampf(g_fx.rainPuddle, 0.0f, 2.0f) * lightNow;   // unlit ground shows no rings
 			if (a < 2.0f) continue;
 
@@ -2213,13 +2602,15 @@ void OroModule::BuildRainGeometry()
 	  }  // fld
 	}
 
-	rainActive = (rainVtxN > 0 || gndVtxN > 0 || ringCN > 0 || ringVN > 0 || deckN > 0 || boltN > 0);
+	rainActive = (rainVtxN > 0 || gndVtxN > 0 || ringCN > 0 || ringVN > 0 || deckN > 0 || boltN > 0 || shedVtxN > 0);
 
 	// Zero-pad the tails (invariant 3): the client locks with D3DLOCK_DISCARD and always
 	// draws the CREATION count, so an unwritten tail is random VRAM on screen.
 	if (rainVtxN > 0 && rainVtxN < RAIN_MAX_TRI * 3) {
-		memset(&rainVtx[rainVtxN],   0, sizeof(PlasVtx) * (RAIN_MAX_TRI * 3 - rainVtxN));
-		memset(&rainDepth[rainVtxN], 0, sizeof(float)   * (RAIN_MAX_TRI * 3 - rainVtxN));
+		// ... to the end of the last GROUP that will be drawn (the draw skips the rest - round 3)
+		const int padEnd = ((rainVtxN + RAIN_POLY_TRI * 3 - 1) / (RAIN_POLY_TRI * 3)) * (RAIN_POLY_TRI * 3);
+		memset(&rainVtx[rainVtxN],   0, sizeof(PlasVtx) * (padEnd - rainVtxN));
+		memset(&rainDepth[rainVtxN], 0, sizeof(float)   * (padEnd - rainVtxN));
 	}
 	if (gndVtxN > 0 && gndVtxN < RAIN_GND_TRI * 3) {
 		memset(&gndVtx[gndVtxN],   0, sizeof(PlasVtx) * (RAIN_GND_TRI * 3 - gndVtxN));

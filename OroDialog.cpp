@@ -123,6 +123,7 @@ enum {
 	               // windscreen group, not from any menu. APPENDED, never inserted.
 	PG_RINGS,      // PLANETARY RINGS (2026-09-12, WORLD) - appended for the same reason;
 	               // it sits THIRD in MENU_WORLD, which is a fact about the menu table.
+	PG_SNOW,       // SNOW (2026-09-13, WORLD > WEATHER) - appended; fourth door in MENU_WEATHER
 	PG_COUNT
 };
 static const char* PageName(int pg)
@@ -133,7 +134,8 @@ static const char* PageName(int pg)
 		"EXHAUST", "PARTICLES", "PLASMA", "VAPOUR CONES", "FLIGHT AID",
 		"RAIN", "LIGHTNING", "AURORA", "ECLIPSE", "GOD RAYS", "FOG",
 		"RAINSURFACES",
-		"RINGS"
+		"RINGS",
+		"SNOW"
 	};
 	return (pg >= 0 && pg < PG_COUNT) ? n[pg] : n[0];
 }
@@ -179,7 +181,7 @@ static const MenuItem MENU_MAIN[] = {
 // feature must not be the one nobody can see (the H5 lesson). AURORA and RINGS are the
 // two per-body STRUCTURES at a world; ECLIPSE and GOD RAYS the two things the sun does.
 static const MenuItem MENU_WORLD[] = {
-	{ "WEATHER",  "rain, fog + lightning; snow and the model later",    PG_WEATHER },
+	{ "WEATHER",  "rain, snow, fog + lightning; the model later",       PG_WEATHER },
 	{ "AURORA",   "curtains at the magnetic poles",                     PG_AURORA  },
 	{ "RINGS",    "the sheet, its shadow on the planet, ships inside it", PG_RINGS },
 	{ "ECLIPSE",  "the eye inside another body's shadow",               PG_ECLIPSE },
@@ -189,7 +191,7 @@ static const MenuItem MENU_WEATHER[] = {
 	{ "RAIN",          "the storm - outside, windscreen, sounds",       PG_RAIN      },
 	{ "LIGHTNING",     "from orbit + inside the storm, with thunder",   PG_LIGHTNING },
 	{ "FOG",           "ground fog; the storm's mist rides the rain",   PG_FOG       },
-	{ "SNOW",          "coming soon",                                   -1           },
+	{ "SNOW",          "snowfall, and the cover it lays down",          PG_SNOW      },
 	{ "WEATHER MODEL", "coming soon",                                   -1           },
 };
 static const MenuItem MENU_VESSEL[] = {
@@ -236,6 +238,7 @@ static int      g_dragPlmBand = -1;       // EXPANSION BAND dual-slider handle: 
 static int      g_dragBgl = -1;           // BELL GLOW trim slider being dragged (0 = active), -1 = none
 static int      g_dragPrt = -1;           // EXHAUST PARTICLES slider: 0 Amount, 1 Size, 2 Life, -1 = none
 static int      g_dragPlas = -1;          // index of the PLASMA TUNING slider being dragged, -1 = none
+static int      g_dragHeat = -1;          // heat-curve anchor being dragged (0 onset, 1 full), -1 = none
 static int      g_dragEcl  = -1;          // index of the ECLIPSE slider being dragged, -1 = none
 static int      g_dragAur  = -1;          // index of the AURORA slider being dragged, -1 = none
 static int      g_dragAurRib = -1;        // AURORA Ribbons slider being dragged (0 = active), -1 = none
@@ -247,6 +250,11 @@ static int      g_dragLfMode = -1;        // LENS FLARE optic picker (0 = active
 static int      g_dragRng  = -1;          // RINGS slider being dragged, -1 = none (three sites: here, ClearDrags, the LBUTTONUP guard)
 static int      g_dragRain = -1;          // RAIN slider being dragged, -1 = none
 static int      g_dragFog  = -1;          // FOG slider being dragged, -1 = none (2026-09-05)
+static int      g_dragSnow = -1;          // SNOW slider being dragged (both groups, one index),
+                                          //   -1 = none (2026-09-13). ⚠️ THREE SITES per flag:
+                                          //   ClearDrags, the WM_MOUSEMOVE chain, the
+                                          //   WM_LBUTTONUP guard - miss one and the flag
+                                          //   sticks and steals every later drag (09-04)
 static int      g_dragBlg  = -1;          // BASE LIGHTS glow slider (RAIN and FOG pages), -1 = none
 static int      g_dragRlt  = -1;          // STORM-LIGHTNING slider (LIGHTNING page's
                                           // in-the-storm group) being dragged, -1 = none
@@ -320,8 +328,8 @@ static void OroHelp_Follow();             // fwd: page-push sites live above the
 static void ClearDrags()
 {
 	g_dragRow = g_dragMot = g_dragShake = g_dragEnv = g_dragEnvK = g_dragShim = g_dragPlume = g_dragPlmBand
-	          = g_dragBgl = g_dragPrt = g_dragPlas = g_dragEcl = g_dragAur = g_dragAurRib = g_dragAurK
-	          = g_dragLtg = g_dragGry = g_dragLfs = g_dragLfMode = g_dragRng = g_dragRain = g_dragFog = g_dragBlg = g_dragRlt = g_dragVcs = g_dragVap = g_dragVap2
+	          = g_dragBgl = g_dragPrt = g_dragPlas = g_dragHeat = g_dragEcl = g_dragAur = g_dragAurRib = g_dragAurK
+	          = g_dragLtg = g_dragGry = g_dragLfs = g_dragLfMode = g_dragRng = g_dragRain = g_dragFog = g_dragSnow = g_dragBlg = g_dragRlt = g_dragVcs = g_dragVap = g_dragVap2
 	          = g_dragVapP = g_dragVapR = g_dragVapBand = g_dragVapBand2 = g_dragVapAir = g_dragTol = g_dragCop = g_dragBar = -1;
 }
 
@@ -473,6 +481,11 @@ static PlasRow g_plasRows[] = {
 	                                                        // follows the plasma off screen,
 	                                                        // 1 = a flat glow that survives
 	                                                        // looking at the instruments
+	{ "VC churn",       &g_fx.plasVcChurn,     3.0f, 2 },   // 2026-09-17: how FAST the
+	                                                        // cockpit sheath lives - it rode
+	                                                        // Wake churn until two testers
+	                                                        // asked for a steady one. 0
+	                                                        // freezes it, 1 = the flown look.
 	{ "Streak length",  &g_fx.plasStreakLen,  20.0f, 2 },   // x3'd, then raised to 20 when
 	                                                        // the trail was abandoned
 	{ "Streak width",   &g_fx.plasStreakWid,   6.0f, 2 },   // range x2'd on request
@@ -514,6 +527,18 @@ static PlasRow g_plasRows[] = {
 	                                                        //   into the fireball (A.5)
 };
 static const int NPLAS = (int)(sizeof(g_plasRows) / sizeof(g_plasRows[0]));
+
+// THE HEAT CURVE's two anchors (2026-09-15), live only in PHYSICAL. They are in KELVIN
+// on purpose: "2e9" is a number nobody can argue with, "the nose starts glowing at 800 K"
+// is a physical claim a user can check against the Draper point and against his own
+// vessel's materials. Per class like every other plasma row. Their own table rather than
+// rows in g_plasRows because they sit ABOVE the tuning caption, beside the readout they
+// explain, and because they need a min-gap clamp no unit slider has.
+static PlasRow g_heatRows[] = {
+	{ "Glow onset (K)",  &g_fx.plasGlowOnset,  1600.0f, 0,  400.0f },   // first visible red
+	{ "Full plasma (K)", &g_fx.plasGlowFull,   3500.0f, 0, 1200.0f },   // white hot
+};
+static const int NHEAT = (int)(sizeof(g_heatRows) / sizeof(g_heatRows[0]));
 
 // PLUME EXPANSION (2026-08-09) - the THRUSTER tab's shape knobs. The REGIME is
 // automatic (static pressure decides diamonds vs bloom - see OroPlume.cpp); these
@@ -809,7 +834,7 @@ static PlasRow g_rainRows[] = {
 	                                               // they can sit. A trim only: WHEN it
 	                                               // arrives is the sensed dynamic
 	                                               // pressure, not a knob (25i)
-	{ "Mask Debug", &g_fx.rainGlassDbg, 2.0f, 0 }, // 0 normal, 1 = ignore the depth mask,
+	{ "Mask Debug", &g_fx.rainGlassDbg, 3.0f, 0 }, // 0 normal, 1 = ignore the depth mask, 3 = the frost's mechanism (step C),
 	                                               // 2 = show the mask (green=window,
 	                                               //     blue=interior, plain=nothing).
 	                                               // KEPT AND RENAMED 2026-09-12 (his
@@ -870,6 +895,62 @@ static PlasRow g_fogRows[] = {
 	{ "Sun glow",       &g_fx.fogGlow,      2.0f, 2 },         // x the forward-scatter lobe
 };
 static const int NFOG = (int)(sizeof(g_fogRows) / sizeof(g_fogRows[0]));
+
+// SNOW (2026-09-13) - the SNOW leaf under WEATHER, two captioned groups (the RAIN page's
+// pattern): what is in the AIR, and what lies on the GROUND. The flakes are the rain
+// sheet in snow mode (OroRain.cpp); the cover is the client's (OroSnow.cpp, patch aa's
+// setter). Rain and snow are MUTUALLY EXCLUSIVE - his rule - so the pill and the Test
+// switch the other storm off. The Slant row went with round 3 (2026-09-19, his call: the
+// wind's speed and direction carry the tilt, so it was redundant); the three
+// metre rows and the minutes row are integer-valued (dec 0 snaps the STORE, the rain
+// table's convention).
+static PlasRow g_snowFallRows[] = {
+	{ "Snowfall",      &g_fx.snowFall,    2.0f, 2 },           // x what is falling; 0 = cover only
+	{ "Flake size",    &g_fx.snowFlake,   2.0f, 2 },
+	{ "Contrast",      &g_fx.snowContrast,2.0f, 2 },           // how far a flake stands off the air (round 3)
+	{ "Fall speed",    &g_fx.snowSpeed,   2.0f, 2 },
+	{ "Wander",        &g_fx.snowWander,  2.0f, 2 },           // sideways drift; 0 = straight down
+	{ "Wind (m/s)",    &g_fx.snowWind,   30.0f, 0 },           // the wind itself - a blizzard is wind
+	{ "Wind from (deg)",&g_fx.snowWindDir,360.0f, 0 },         // where it blows FROM, clockwise from north (round 3)
+	{ "Gloom",         &g_fx.snowGloom,   2.0f, 2 },           // the overcast (a snow sky is bright)
+	{ "Mist",          &g_fx.snowMist,    2.0f, 2 },           // the falling snow's own visibility loss
+};
+static const int NSNOWF = (int)(sizeof(g_snowFallRows) / sizeof(g_snowFallRows[0]));
+static PlasRow g_snowCoverRows[] = {
+	{ "Cover",         &g_fx.snowCover,      1.0f, 2 },        // the STANDING cover, at once
+	{ "Snow line (m)", &g_fx.snowLine,    6000.0f, 0, -500.0f },// snow lies ABOVE this altitude
+	{ "Line width (m)",&g_fx.snowLineW,   2000.0f, 0,   10.0f },
+	{ "Build-up (min)",&g_fx.snowBuild,    120.0f, 0,    1.0f },// SIM-minutes to a full cover
+	{ "Brightness",    &g_fx.snowBright,     3.0f, 2 },        // x the albedo (round 3); past 1 it blooms
+	{ "Relief",        &g_fx.snowRelief,     2.0f, 2 },        // the drifts' lit and shade sides (step B)
+	{ "Sparkle",       &g_fx.snowSparkle,    2.0f, 2 },        // the crystals' sun glints (step B)
+	{ "Blow-off",      &g_fx.snowShed,       2.0f, 2 },        // snow blowing off the hull as the airflow strips it (step E); 0 = none
+};
+static const int NSNOWC = (int)(sizeof(g_snowCoverRows) / sizeof(g_snowCoverRows[0]));
+// THE WINDSCREEN (step C, 2026-09-20): ice on the VC glass, from the frame in - its own pill
+static PlasRow g_snowWinRows[] = {
+	{ "Frost reach (m)",&g_fx.snowFrostReach,  1.0f, 2 },          // METRES of glass a full frost ices in from the rim (patch (h) part 5)
+	{ "Frost time (min)",&g_fx.snowFrostMin, 120.0f, 0,  1.0f },   // SIM-minutes to a full frost
+	{ "Frost blur",    &g_fx.snowFrostBlur,    2.0f, 2 },          // the world scattered through it
+	{ "Mask Debug",    &g_fx.rainGlassDbg,     3.0f, 0 },          // the RAIN page's row, the SAME setting (his rule:
+	                                                                //   what governs the glass shows on every page it matters to)
+};
+static const int NSNOWW = (int)(sizeof(g_snowWinRows) / sizeof(g_snowWinRows[0]));
+// TIRE MARKS (step D, 2026-09-20): the client's track map - the gear of every moving vessel
+// marks the ground snow and the marks fade; its own pill (between the cover and the glass)
+static PlasRow g_snowTrkRows[] = {
+	{ "Track fade (min)",&g_fx.snowTrackFade, 120.0f, 0,  1.0f },   // SIM-minutes to a vanished track with nothing falling
+};
+static const int NSNOWT = (int)(sizeof(g_snowTrkRows) / sizeof(g_snowTrkRows[0]));
+
+// the four tables behind one index: fall, cover, tracks, windscreen
+static PlasRow* SnowRowAt(int k)
+{
+	if (k < NSNOWF) return &g_snowFallRows[k];
+	k -= NSNOWF; if (k < NSNOWC) return &g_snowCoverRows[k];
+	k -= NSNOWC; if (k < NSNOWT) return &g_snowTrkRows[k];
+	return &g_snowWinRows[k - NSNOWT];
+}
 
 // THE VAPOUR CONE - transonic condensation. TWO unit sliders and one bipolar knob, and
 // the short list is the design rather than an omission: the shroud's LENGTH is not here
@@ -1319,7 +1400,9 @@ static int ReeHdrY()      { return LeafTopY(); }                           // ca
 static int ReeRowY()      { return ReeHdrY() + 34; }                       // reentry row centreline
 static int ReeCapY()      { return ReeRowY() + 11; }                       // caption text top
 static int ReeHeatY()     { return ReeCapY() + 24; }                       // plasma heat readout
-static int PlasHdrY()     { return ReeHeatY() + 24; }                      // tuning caption top
+static int ReeModelY()    { return ReeHeatY() + ROW_DY; }                  // CLASSIC | PHYSICAL
+static int ReeKelvinY(int i){ return ReeModelY() + (i + 1) * ROW_DY; }     // the two K anchors
+static int PlasHdrY()     { return ReeKelvinY(NHEAT - 1) + 24; }           // tuning caption top
 static int PlasRowY(int i){ return PlasHdrY() + 22 + i * ROW_DY; }         // tuning row centreline
 static int PlasTintY()    { return PlasRowY(NPLAS - 1) + ROW_DY; }         // plasma tint swatch row
 static int PlasTrailTintY(){ return PlasTintY() + ROW_DY; }                // trail head/tail swatch row
@@ -1475,6 +1558,33 @@ static int FogBlY()       { return FogWhyY() + ROW_DY + 10; }              // Ba
 static int FogGlowY()     { return FogBlY() + ROW_DY; }                    // Lights glow slider
 static int FogHaloY()     { return FogGlowY() + ROW_DY; }                  // Lights halo slider
 static int FogBottom()    { return FogHaloY() + 24; }
+// SNOW (2026-09-13): header, the SNOWFALL group (pill + Test + rows), the SNOW COVER
+// group (caption + rows), three readouts.
+static int SnowHdrY()         { return LeafTopY(); }
+static int SnowPillY()        { return SnowHdrY() + 32; }
+static int SnowRowY(int i)    { return SnowPillY() + 24 + i * ROW_DY; }
+static int SnowCovRowY(int i) { return SnowRowY(NSNOWF - 1) + ROW_DY + 30 + i * ROW_DY; }
+static int SnowTrkPillY()     { return SnowCovRowY(NSNOWC - 1) + ROW_DY + 30; }  // TIRE MARKS' caption + pill (step D)
+static int SnowTrkRowY(int i) { return SnowTrkPillY() + 24 + i * ROW_DY; }
+static int SnowWinPillY()     { return SnowTrkRowY(NSNOWT - 1) + ROW_DY + 30; }  // THE WINDSCREEN's caption + pill (step C)
+static int SnowWinRowY(int i) { return SnowWinPillY() + 24 + i * ROW_DY; }
+static int SnowRowYAt(int k)
+{
+	if (k < NSNOWF) return SnowRowY(k);
+	k -= NSNOWF; if (k < NSNOWC) return SnowCovRowY(k);
+	k -= NSNOWC; if (k < NSNOWT) return SnowTrkRowY(k);
+	return SnowWinRowY(k - NSNOWT);
+}
+static int SnowViewY()        { return SnowWinRowY(NSNOWW - 1) + ROW_DY; }       // the view cycler (the RAIN page's, mirrored)
+static int SnowSurfY()        { return SnowViewY() + ROW_DY; }                    // the RAINSURFACES button (mirrored)
+static int SnowWhyY()         { return SnowSurfY() + ROW_DY + 2; }               // the storm's state
+static int SnowCovNowY()      { return SnowWhyY() + ROW_DY; }                     // the cover, live
+static int SnowAirY()         { return SnowCovNowY() + ROW_DY; }                  // the sim's air
+static int SnowFrostY()       { return SnowAirY() + ROW_DY; }                     // the ice, live (step C)
+static int SnowBlY()          { return SnowFrostY() + ROW_DY + 10; }              // Base lights (patch (ac), mirrored from RAIN/FOG)
+static int SnowGlowY()        { return SnowBlY() + ROW_DY; }
+static int SnowHaloY()        { return SnowGlowY() + ROW_DY; }
+static int SnowBottom()       { return SnowHaloY() + 24; }
 
 // ===== LEAF: RAINSURFACES (2026-09-01, his spec) - the popup inside the panel =
 // Declares which VC mesh groups accept the windscreen drops WITHOUT editing the
@@ -1589,7 +1699,9 @@ static int VcnCapY()      { return VcnWxY() + 12; }                        // ca
 static int VcSndHdrY()    { return VcnCapY() + 30; }                       // section header
 static int VcSndRainY()   { return VcSndHdrY() + 30; }                     // Rain in cabin slider centreline
 static int VcSndHullY()   { return VcSndRainY() + ROW_DY; }                // Hull drum slider centreline
-static int VcSndCapY()    { return VcSndHullY() + 12; }                    // caption text top
+static int VcSndSelY()    { return VcSndHullY() + ROW_DY; }                // Cabin loop button (2026-09-18)
+static int VcSndDrumY()   { return VcSndSelY() + ROW_DY; }                 // Drum loop button
+static int VcSndCapY()    { return VcSndDrumY() + 12; }                    // caption text top
 static int CamShakeTop()  { return VcSndCapY() + 30; }                     // subsection header centreline
 static int ShakeRowY(int i){ return CamShakeTop() + 16 + i * ROW_DY; }
 static int MotCapY()      { return ShakeRowY(NSHAKE - 1) + 14; }           // caption text top
@@ -1608,6 +1720,7 @@ static int ContentBottom(){
 	case PG_FLIGHTAID: return AidBottom();
 	case PG_RAIN:      return RainBottom();
 	case PG_FOG:       return FogBottom();
+	case PG_SNOW:      return SnowBottom();
 	case PG_RAINSURF:  return RsurfBottom();
 	case PG_LIGHTNING: return LightningBottom();
 	case PG_AURORA:    return AuroraBottom();
@@ -1936,6 +2049,21 @@ static float TrackValueFromX(const RECT& rc, int x)
 	if (t.right <= t.left) return 0.0f;
 	float v = float(x - t.left) / float(t.right - t.left);
 	return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
+// The heat curve's anchors are the ends of a BAND, so they may not cross or meet: a
+// zero-width band would divide by nothing (ReentryHeat guards it by going dark, which
+// would read as a broken slider). 100 K apart, and the pushed handle stops rather than
+// shoving the other - the same behaviour as the two existing dual sliders. ONE helper
+// because the press and the drag must clamp identically or a click can set what a drag
+// cannot.
+static void HeatAnchorTo(const RECT& rc, int x, int i)
+{
+	const PlasRow& hr = g_heatRows[i];
+	float v = hr.vmin + TrackValueFromX(rc, x) * (hr.vmax - hr.vmin);
+	if (i == 0) { if (v > g_fx.plasGlowFull  - 100.0f) v = g_fx.plasGlowFull  - 100.0f; }
+	else        { if (v < g_fx.plasGlowOnset + 100.0f) v = g_fx.plasGlowOnset + 100.0f; }
+	*hr.value = v;
 }
 
 // Bipolar variant: track centre = 0, ends = -vmax / +vmax. Snaps to exact zero near the
@@ -2527,7 +2655,7 @@ static int LeafSaveMask(int pg)
 	case PG_AURORA: case PG_LIGHTNING: case PG_RINGS:
 		return ORO_SCOPE_GLOBAL | ORO_SCOPE_BODY;
 	// The eye, the pilot's taste, the (v1, one-world) storm, the scenario sound toggle.
-	case PG_ECLIPSE: case PG_GODRAYS: case PG_RAIN: case PG_FOG: case PG_SCENARIOS:
+	case PG_ECLIPSE: case PG_GODRAYS: case PG_RAIN: case PG_FOG: case PG_SNOW: case PG_SCENARIOS:
 		return ORO_SCOPE_GLOBAL;
 	// RAINSURFACES saves to its OWN file (VesselsRainSurfaces.cfg) through its own
 	// SAVE button - none of the three scopes, so nothing here for the amber to claim.
@@ -2620,6 +2748,9 @@ static void LeafSaveCaption(int pg, char* out, int cap)
 		strcpy_s(out, cap, "saves globally - per-world files arrive with the weather model");
 		break;
 	case PG_FOG:
+		strcpy_s(out, cap, "saves globally - per-world files arrive with the weather model");
+		break;
+	case PG_SNOW:
 		strcpy_s(out, cap, "saves globally - per-world files arrive with the weather model");
 		break;
 	case PG_SCENARIOS:
@@ -3282,11 +3413,44 @@ static void PaintReentry(HDC dc, const RECT& rc)
 	// so show the number - otherwise a bad threshold is indistinguishable from a bug.
 	const bool ren = g_fx.reentryEnabled;
 	DrawRowLabel(dc, ReeHeatY(), "Plasma heat", ren);
-	sprintf_s(val, "%d%%", (int)(g_fx.reentryHeat * 100.0f + 0.5f));
+	// ... and the TEMPERATURE beside it, in BOTH models. In PHYSICAL it is the coordinate
+	// the two anchors are set in, so tuning them is reading one number against another; in
+	// CLASSIC it is free evidence - it says what the physical curve would be seeing, which
+	// is how you decide whether a hull wants switching over.
+	if (g_fx.reentryTempK > 1.0f)
+		sprintf_s(val, "%d%% %.0fK", (int)(g_fx.reentryHeat * 100.0f + 0.5f), g_fx.reentryTempK);
+	else
+		sprintf_s(val, "%d%%", (int)(g_fx.reentryHeat * 100.0f + 0.5f));
 	SelectObject(dc, g_fontMono);
 	SetTextColor(dc, !ren ? CLR_TEXT_DIM : (g_fx.reentryHeat > 0.001f ? CLR_ACCENT : CLR_TEXT_HI));
 	RECT rv = ValueRectAt(rc, ReeHeatY());
 	DrawTextA(dc, ren ? val : "-", -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+
+	// THE HEAT CURVE (2026-09-15). CLASSIC is what every tuned hull flies; PHYSICAL reads
+	// the same Sutton-Graves flux as a stagnation TEMPERATURE between the two anchors
+	// below, which is the only shape that can render both a faint nose glow at entry
+	// interface and a built sheath at peak heating. Per class, and CLASSIC unless this
+	// hull's own cfg says otherwise - see the park in OroSettings_LoadClass.
+	DrawRowLabel(dc, ReeModelY(), "Heat model", ren);
+	DrawButton(dc, RowBtnRect(rc, ReeModelY()),
+	           g_fx.plasHeatModel ? "PHYSICAL" : "CLASSIC",
+	           g_fx.plasHeatModel != 0, CLR_PILL_ON);
+	// The anchors grey out in CLASSIC rather than vanish: a control that cannot do
+	// anything is worse than no control (18b), and one that disappears takes the
+	// explanation of the mode with it.
+	{
+		const bool phys = ren && g_fx.plasHeatModel != 0;
+		for (int i = 0; i < NHEAT; i++) {
+			const PlasRow& hr = g_heatRows[i];
+			const int   cy   = ReeKelvinY(i);
+			const float span = hr.vmax - hr.vmin;
+			const float frac = (span > 0.0f) ? ((*hr.value - hr.vmin) / span) : 0.0f;
+			DrawRowLabel(dc, cy, hr.label, phys);
+			DrawSlider(dc, TrackRectAt(rc, cy), frac, phys);
+			sprintf_s(val, "%.0f", *hr.value);
+			DrawValue(dc, rc, cy, val, phys);
+		}
+	}
 
 	// PLASMA TUNING - the lab scaffolding rows (see g_plasRows). They follow the
 	// reentry pill's enabled state; 1.00 = the baked-in look.
@@ -3536,7 +3700,11 @@ static void PaintLightning(HDC dc, const RECT& rc)
 // one of those reads as "it is broken".
 static void PaintGodRays(HDC dc, const RECT& rc)
 {
-	DrawSectionHdr(dc, rc, GryHdrY(), "G O D   R A Y S");
+	// The 20g rule (2026-09-17 sweep): degradation that is silent must SAY so. Without
+	// Sun glare the client draws no glare sprite, so the frame holds only the bare sun
+	// disc for the shafts to march from, and the flare loses its depth backstop.
+	if (!OroDepthClipOK()) DrawSectionHdrNote(dc, rc, GryHdrY(), "G O D   R A Y S", "Sun glare is OFF in the D3D9 video tab - no glare to cast from");
+	else                   DrawSectionHdr(dc, rc, GryHdrY(), "G O D   R A Y S");
 	const bool en = g_fx.grayEnabled;
 	char val[48];
 
@@ -3570,7 +3738,9 @@ static void PaintGodRays(HDC dc, const RECT& rc)
 	// ---- THE LENS FLARE, the same page's second group ----------------------
 	// Same subject from the other side of the glass: above, what the AIR does to the
 	// sun's light on its way in; here, what the LENS does to it once it is in.
-	DrawSectionHdrNote(dc, rc, LfsHdrY(), "L E N S   F L A R E", "the camera's own - global");
+	DrawSectionHdrNote(dc, rc, LfsHdrY(), "L E N S   F L A R E",
+	                   !OroDepthClipOK() ? "Sun glare is OFF - no depth backstop, a bright hull can flare"
+	                                     : "the camera's own - global");
 	const bool fen = g_fx.flareEnabled;
 	DrawPill(dc, PillRectAt(LfsPillY()), fen);
 	DrawCaption(dc, LABEL_X, LfsPillY() - 7, "G H O S T S ,   R A Y S   A N D   V E I L");
@@ -3686,19 +3856,28 @@ static void PaintRings(HDC dc, const RECT& rc)
 	DrawTextA(dc, val, -1, &r3, DT_RIGHT | DT_TOP | DT_SINGLELINE);
 }
 
-// BASE LIGHTS (2026-09-05, client patch ac) - shared by the RAIN and FOG pages. The
-// pill forces every base's night state (night textures, runway + taxiway lights) on;
-// off is stock (on at night, off by day). Lights glow scales the lit result - past 1
-// the excess reaches the client's bloom, which is how the lights get their halo.
-// Greys out wholesale without the patch (18b). Always clickable: it is configuration
-// of the world, not part of the storm or the fog.
+// BASE LIGHTS (2026-09-05, client patch ac) - shared by the RAIN and FOG pages. A
+// THREE-STATE BUTTON since 2026-09-19 (triage 37 - the pill's force had a tester's
+// runway lights on at noon): STOCK is Orbiter's own flip (on at night, off by day);
+// IN WEATHER switches every base's night state on when the gloom justifies it - the
+// storm light or the fog's visibility, a flip with hysteresis, back to stock when it
+// clears; ALWAYS is the old pill, the night state forced now. The value column is the
+// LIVE result (waiting / lit / forced), the instrument that shows the rule working.
+// Lights glow scales the lit result while the lights are ours - past 1 the excess
+// reaches the client's bloom, which is how the lights get their halo. Greys out
+// wholesale without the patch (18b). Always clickable: it is configuration of the
+// world, not part of the storm or the fog.
 static void PaintBaseLights(HDC dc, const RECT& rc, int yPill, int yGlow, int yHalo)
 {
 	const bool sup = OroBaseLightsSupported();
 	char val[32];
-	DrawPill(dc, PillRectAt(yPill), sup && g_fx.baseLightsOn);
+	static const char* BLMODE[3] = { "STOCK", "IN WEATHER", "ALWAYS" };
+	static const char* BLLIVE[4] = { "stock", "waiting", "lit", "forced" };
+	const int blm = (g_fx.baseLightsMode < 0 || g_fx.baseLightsMode > 2) ? 0 : g_fx.baseLightsMode;
+	const int bll = (g_fx.baseLightsLive < 0 || g_fx.baseLightsLive > 3) ? 0 : g_fx.baseLightsLive;
 	DrawRowLabel(dc, yPill, "Base lights", sup);
-	DrawValue(dc, rc, yPill, !sup ? "no patch" : (g_fx.baseLightsOn ? "forced on" : "auto"), sup);
+	DrawButton(dc, RowBtnRect(rc, yPill), BLMODE[blm], sup && blm != 0, CLR_PILL_ON);
+	DrawValue(dc, rc, yPill, !sup ? "no patch" : BLLIVE[bll], sup);
 	DrawRowLabel(dc, yGlow, "Lights glow", sup);
 	DrawSlider(dc, TrackRectAt(rc, yGlow), (g_fx.baseLightsGlow - 0.25f) / 2.75f, sup);
 	sprintf_s(val, "%.2f", g_fx.baseLightsGlow);
@@ -3713,8 +3892,9 @@ static void PaintBaseLights(HDC dc, const RECT& rc, int yPill, int yGlow, int yH
 static BOOL ClickBaseLights(HWND hDlg, const RECT& rc, int x, int y, int yPill, int yGlow, int yHalo)
 {
 	if (!OroBaseLightsSupported()) return FALSE;
-	if (PtIn(PillRectAt(yPill), x, y, 4)) {
-		g_fx.baseLightsOn = !g_fx.baseLightsOn;
+	if (PtIn(RowBtnRect(rc, yPill), x, y)) {
+		const int blm = (g_fx.baseLightsMode < 0 || g_fx.baseLightsMode > 2) ? 0 : g_fx.baseLightsMode;
+		g_fx.baseLightsMode = (blm + 1) % 3;     // STOCK -> IN WEATHER -> ALWAYS -> STOCK
 		return TRUE;
 	}
 	if (PtIn(TrackRectAt(rc, yGlow), x, y, 8)) {
@@ -3832,11 +4012,18 @@ static BOOL ClickRain(HWND hDlg, const RECT& rc, int x, int y)
 		// Preview still works: pill off + Test on runs. What cannot happen any more is a
 		// deliberate OFF being quietly outvoted.
 		if (!g_fx.rainEnabled) g_fx.rainTest = false;
+		// MUTUALLY EXCLUSIVE WITH SNOW (his rule, 2026-09-13): rain on = snow off, pill
+		// and Test both. Enforced HERE and at load, never per pre-step.
+		if (g_fx.rainEnabled) { g_fx.snowEnabled = false; g_fx.snowTest = false; }
 		return TRUE;
 	}
 	if (PtIn(RainTestBtnRect(rc), x, y)) {
 		g_fx.rainTest = !g_fx.rainTest;
-		g_clickWasEdit = false;             // a preview, not a setting
+		// a preview, not a setting - unless it had to switch the SNOW PILL off, which
+		// IS a saved value changing and must amber
+		const bool edit = g_fx.rainTest && g_fx.snowEnabled;
+		if (g_fx.rainTest) { g_fx.snowEnabled = false; g_fx.snowTest = false; }
+		g_clickWasEdit = edit;
 		return TRUE;
 	}
 	// RAINSURFACES opens its popup regardless of the pill (configuration, not effect).
@@ -3946,6 +4133,172 @@ static BOOL ClickFog(HWND hDlg, const RECT& rc, int x, int y)
 		}
 	}
 	if (ClickBaseLights(hDlg, rc, x, y, FogBlY(), FogGlowY(), FogHaloY())) return TRUE;     // patch (ac)
+	return FALSE;
+}
+
+// ===== LEAF: SNOW (WORLD > WEATHER, 2026-09-13) ============================
+// The Test toggle - a preview snowfall where you are, the fog's idiom (ramps up and
+// holds; the pill going off is instant).
+static RECT SnowTestBtnRect(const RECT& rc)
+{
+	const int cy = SnowPillY();
+	RECT r = { rc.right - TRACK_RPAD - 78, cy - 11, rc.right - TRACK_RPAD - 6, cy + 11 };
+	return r;
+}
+
+// SNOW. Two groups: the SNOWFALL (the rain sheet re-particled, the storm light and the
+// mist following what falls) and the SNOW COVER (the client whitens the world - patch
+// aa's setter, the look tuned in this round). The readouts: the storm's state through
+// the rain's gate (the two share their sensing), the cover as the client is shown it,
+// and the sim's own air - which is a standard atmosphere and knows nothing of winter,
+// so the snow line is the user's bound.
+static void PaintSnow(HDC dc, const RECT& rc)
+{
+	DrawSectionHdrNote(dc, rc, SnowHdrY(), "S N O W", "rain OR snow - one storm at a time");
+	const bool en = g_fx.snowEnabled;
+	const bool active = en || g_fx.snowTest;
+	char val[64];
+
+	DrawPill(dc, PillRectAt(SnowPillY()), en);
+	DrawCaption(dc, LABEL_X, SnowPillY() - 7, "S N O W F A L L");
+	DrawButton(dc, SnowTestBtnRect(rc), "Test", g_fx.snowTest, CLR_ACCENT);
+
+	DrawCaption(dc, 16, SnowCovRowY(0) - 26, "S N O W   C O V E R");
+	// TIRE MARKS (step D): its own pill on the caption line - the client's track map
+	DrawPill(dc, PillRectAt(SnowTrkPillY()), en && g_fx.snowTracksOn);
+	DrawCaption(dc, LABEL_X, SnowTrkPillY() - 7, "T I R E   M A R K S");
+	// THE WINDSCREEN (step C): its own pill on the caption line - the ice is a choice
+	DrawPill(dc, PillRectAt(SnowWinPillY()), en && g_fx.snowFrostOn);
+	DrawCaption(dc, LABEL_X, SnowWinPillY() - 7, "T H E   W I N D S C R E E N   ( V C )");
+
+	for (int k = 0; k < NSNOWF + NSNOWC + NSNOWT + NSNOWW; k++) {
+		const PlasRow& rr = *SnowRowAt(k);
+		const int   cy   = SnowRowYAt(k);
+		const float span = rr.vmax - rr.vmin;
+		const float frac = (span > 0.0f) ? ((*rr.value - rr.vmin) / span) : 0.0f;
+		// the track and frost rows follow their own pills
+		const bool  rowEn = en && (k < NSNOWF + NSNOWC || (k < NSNOWF + NSNOWC + NSNOWT ? g_fx.snowTracksOn : g_fx.snowFrostOn));
+		DrawRowLabel(dc, cy, rr.label, rowEn);
+		DrawSlider(dc, TrackRectAt(rc, cy), frac, rowEn);
+		sprintf_s(val, rr.dec == 0 ? "%.0f" : "%.2f", *rr.value);   // dec 0 = integer-valued
+		DrawValue(dc, rc, cy, val, rowEn);
+	}
+
+	// THE SAME GLASS CONTROLS THE RAIN PAGE HAS (2026-09-20, his rule): the view cycler and
+	// the RAINSURFACES button edit the very fields the RAIN page edits - one setting, two
+	// doors, so nobody changes pages to declare a pane or pick a view while it snows.
+	{
+		static const char* RVIEW[3] = { "VC ONLY", "VC + PANEL", "ALL VIEWS" };
+		const int rvm = (g_fx.rainViewMode < 0 || g_fx.rainViewMode > 2) ? 0 : g_fx.rainViewMode;
+		DrawRowLabel(dc, SnowViewY(), "Snow view", en);
+		DrawButton(dc, RowBtnRect(rc, SnowViewY()), RVIEW[rvm], false, CLR_ACCENT);
+		DrawRowLabel(dc, SnowSurfY(), "Rain surfaces", true);   // configuration, live with the pill off (the RAIN page's rule)
+		DrawButton(dc, RowBtnRect(rc, SnowSurfY()), "RAINSURFACES", false, CLR_ACCENT);
+	}
+
+	// the storm's state - the rain's why line, because the sensing is shared
+	DrawRowLabel(dc, SnowWhyY(), "Snow", active);
+	if      (!active)               strcpy_s(val, "-");
+	else if (g_fx.rainWhy[0])       sprintf_s(val, "%s", g_fx.rainWhy);
+	else if (g_fx.snowI > 0.004f)   sprintf_s(val, "%s%s %.0f%%", g_fx.snowTest ? "TEST " : "",
+	                                          g_fx.snowFall > 0.001f ? "falling" : "no fall, cover only", g_fx.snowI * 100.0f);
+	else                            strcpy_s(val, "clear");
+	SelectObject(dc, g_fontMono);
+	SetTextColor(dc, !active ? CLR_TEXT_DIM : (g_fx.snowI > 0.004f ? CLR_ACCENT : CLR_TEXT_HI));
+	RECT rv = ReadRectAt(rc, SnowWhyY());
+	DrawTextA(dc, val, -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+
+	// the cover as the client is shown it: standing + what the snowfall has laid down
+	DrawRowLabel(dc, SnowCovNowY(), "Cover now", active);
+	// ... and whether the FOCUS hull can take any of it (round 3, 2026-09-19): his first flight
+	// stood the line at 155 m over a 3 m apron, and nothing at KSC could whiten by the law
+	// both sides obey - the panel says so now instead of showing a cover the hull never gets.
+	if (!active)                          strcpy_s(val, "-");
+	else if (g_fx.snowHullLineF < 0.02f)  sprintf_s(val, "%.0f%%, hull BELOW the snow line", g_fx.snowCoverNow * 100.0f);
+	else if (g_fx.snowHullLineF < 0.98f)  sprintf_s(val, "%.0f%%, hull at the line (%.0f%%)", g_fx.snowCoverNow * 100.0f, g_fx.snowHullLineF * 100.0f);
+	else if (g_fx.snowHullCov < 0.0f)     sprintf_s(val, "%.0f%% (%.0f%% laid down)", g_fx.snowCoverNow * 100.0f, g_fx.snowFallCov * 100.0f);
+	else                                  sprintf_s(val, "%.0f%%, hull %.0f%%%s", g_fx.snowCoverNow * 100.0f,   // step E: the mirrored hull cover
+	                                                g_fx.snowHullCov * g_fx.snowCoverNow * 100.0f,
+	                                                g_fx.snowShedRate > 0.003f ? " blowing off" : "");
+	SetTextColor(dc, !active ? CLR_TEXT_DIM : (g_fx.snowCoverNow > 0.004f ? CLR_ACCENT : CLR_TEXT_HI));
+	rv = ReadRectAt(rc, SnowCovNowY());
+	DrawTextA(dc, val, -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+
+	// the sim's air: honest, and on Earth's standard atmosphere constant everywhere
+	DrawRowLabel(dc, SnowAirY(), "Air", active);
+	if      (!active)                  strcpy_s(val, "-");
+	else if (g_fx.snowFrzLive < 0.0f)  strcpy_s(val, "no atmosphere here");
+	else                               sprintf_s(val, "%+.0f C, freezes above %.0f m (sim)", g_fx.snowAirC, g_fx.snowFrzLive);
+	SetTextColor(dc, !active ? CLR_TEXT_DIM : CLR_TEXT_HI);
+	rv = ReadRectAt(rc, SnowAirY());
+	DrawTextA(dc, val, -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+
+	// the ice on the glass, live (step C)
+	DrawRowLabel(dc, SnowFrostY(), "Frost", active && g_fx.snowFrostOn);
+	if      (!active)              strcpy_s(val, "-");
+	else if (!g_fx.snowFrostOn)    strcpy_s(val, "off");
+	else if (g_fx.snowFrost > 0.004f) sprintf_s(val, "%.0f%% of the frame-in reach", g_fx.snowFrost * 100.0f);
+	else                           strcpy_s(val, "clear glass");
+	SetTextColor(dc, !(active && g_fx.snowFrostOn) ? CLR_TEXT_DIM : (g_fx.snowFrost > 0.004f ? CLR_ACCENT : CLR_TEXT_HI));
+	rv = ReadRectAt(rc, SnowFrostY());
+	DrawTextA(dc, val, -1, &rv, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+
+	PaintBaseLights(dc, rc, SnowBlY(), SnowGlowY(), SnowHaloY());   // patch (ac) - the same block as RAIN and FOG (his rule, 2026-09-20)
+}
+
+static BOOL ClickSnow(HWND hDlg, const RECT& rc, int x, int y)
+{
+	if (PtIn(PillRectAt(SnowPillY()), x, y, 4)) {
+		g_fx.snowEnabled = !g_fx.snowEnabled;
+		if (!g_fx.snowEnabled) g_fx.snowTest = false;   // the rain's rule: OFF means off
+		// MUTUALLY EXCLUSIVE (his rule): snow on = rain off, pill and Test both
+		if (g_fx.snowEnabled) { g_fx.rainEnabled = false; g_fx.rainTest = false; }
+		return TRUE;
+	}
+	if (PtIn(SnowTestBtnRect(rc), x, y)) {
+		g_fx.snowTest = !g_fx.snowTest;
+		// a preview, not a setting - unless it had to switch the RAIN PILL off, which IS
+		// a saved value changing and must amber
+		const bool edit = g_fx.snowTest && g_fx.rainEnabled;
+		if (g_fx.snowTest) { g_fx.rainEnabled = false; g_fx.rainTest = false; }
+		g_clickWasEdit = edit;
+		return TRUE;
+	}
+	if (PtIn(PillRectAt(SnowTrkPillY()), x, y, 4)) {   // TIRE MARKS' pill (step D)
+		g_fx.snowTracksOn = !g_fx.snowTracksOn;
+		return TRUE;
+	}
+	if (PtIn(PillRectAt(SnowWinPillY()), x, y, 4)) {   // THE WINDSCREEN's pill (step C)
+		g_fx.snowFrostOn = !g_fx.snowFrostOn;
+		return TRUE;
+	}
+	if (PtIn(RowBtnRect(rc, SnowSurfY()), x, y, 2)) {   // RAINSURFACES, the RAIN page's own route (mirrored)
+		g_clickWasEdit = false;             // navigation, not an edit
+		RsLoad();
+		NavPush(PG_RAINSURF);
+		ClearDrags();
+		OroHelp_Follow();
+		InvalidateRect(hDlg, NULL, FALSE);
+		return TRUE;
+	}
+	if (g_fx.snowEnabled || g_fx.snowTest) {
+		if (PtIn(RowBtnRect(rc, SnowViewY()), x, y, 2)) {   // the view cycler, the same field as the RAIN page's
+			g_fx.rainViewMode = (g_fx.rainViewMode + 1) % 3;
+			InvalidateRect(hDlg, NULL, FALSE);
+			return TRUE;
+		}
+		for (int k = 0; k < NSNOWF + NSNOWC + NSNOWT + NSNOWW; k++) {
+			if (PtIn(TrackRectAt(rc, SnowRowYAt(k)), x, y, 8)) {
+				PlasRow& rr = *SnowRowAt(k);
+				g_dragSnow = k;
+				SetCapture(hDlg);
+				*rr.value = rr.vmin + TrackValueFromX(rc, x) * (rr.vmax - rr.vmin);
+				if (rr.dec == 0) *rr.value = floorf(*rr.value + 0.5f);   // the STORE snaps
+				return TRUE;
+			}
+		}
+	}
+	if (ClickBaseLights(hDlg, rc, x, y, SnowBlY(), SnowGlowY(), SnowHaloY())) return TRUE;   // patch (ac), mirrored
 	return FALSE;
 }
 
@@ -4206,6 +4559,17 @@ static void PaintVCSounds(HDC dc, const RECT& rc)
 	DrawSlider(dc, TrackRectAt(rc, VcSndHullY()), g_fx.rainHullVol / 3.0f, true);
 	sprintf_s(val, "%.2f", g_fx.rainHullVol);
 	DrawValue(dc, rc, VcSndHullY(), val, true);
+
+	// THE LOOPS (2026-09-18, his design): WHICH cabin loop and which drum loop the seat
+	// plays - ten of each ship, and any file can be swapped for the user's own. The
+	// button names the FILE, because the file is what a user replaces.
+	char btn[48];
+	sprintf_s(btn, "Rain_in_cabin_%d.wav   (%d of 10)", g_fx.vcRainSndSel, g_fx.vcRainSndSel + 1);
+	DrawRowLabel(dc, VcSndSelY(), "Cabin loop", true);
+	DrawButton(dc, RowBtnRect(rc, VcSndSelY()), btn, false, CLR_ACCENT);
+	sprintf_s(btn, "Hull_drum_%d.wav   (%d of 10)", g_fx.hullDrumSel, g_fx.hullDrumSel + 1);
+	DrawRowLabel(dc, VcSndDrumY(), "Drum loop", true);
+	DrawButton(dc, RowBtnRect(rc, VcSndDrumY()), btn, false, CLR_ACCENT);
 
 	SelectObject(dc, g_fontSmall);
 	SetTextColor(dc, CLR_TEXT_DIM);
@@ -4622,6 +4986,7 @@ static void PaintDialog(HWND hDlg, HDC dcOut)
 		case PG_FLIGHTAID: PaintFlightAid(dc, rc); break;
 		case PG_RAIN:      PaintRain(dc, rc); break;
 		case PG_FOG:       PaintFog(dc, rc); break;
+		case PG_SNOW:      PaintSnow(dc, rc); break;
 		case PG_RAINSURF:  PaintRsurf(dc, rc); break;
 		case PG_LIGHTNING: PaintLightning(dc, rc); break;
 		case PG_AURORA:    PaintAurora(dc, rc); break;
@@ -5144,6 +5509,23 @@ static BOOL ClickReentry(HWND hDlg, const RECT& rc, int x, int y)
 		g_fx.reentryVC = !g_fx.reentryVC;
 		return TRUE;
 	}
+	// Heat model + its two anchors. Like the VC toggle these answer regardless of the
+	// pill, so a hull can be set up before the fire starts; the anchors take clicks only
+	// in PHYSICAL, where they mean something.
+	if (PtIn(RowBtnRect(rc, ReeModelY()), x, y)) {
+		g_fx.plasHeatModel = g_fx.plasHeatModel ? 0 : 1;
+		return TRUE;
+	}
+	if (g_fx.plasHeatModel) {
+		for (int i = 0; i < NHEAT; i++) {
+			if (PtIn(TrackRectAt(rc, ReeKelvinY(i)), x, y, 8)) {
+				g_dragHeat = i;
+				SetCapture(hDlg);
+				HeatAnchorTo(rc, x, i);
+				return TRUE;
+			}
+		}
+	}
 	// PLASMA TUNING sliders (track 0..1 -> 0..vmax, same mapping as CAM-SHAKE).
 	if (g_fx.reentryEnabled) {
 		for (int i = 0; i < NPLAS; i++) {
@@ -5435,6 +5817,17 @@ static BOOL ClickVCSounds(HWND hDlg, const RECT& rc, int x, int y)
 		g_dragVcs = 5;
 		SetCapture(hDlg);
 		g_fx.rainHullVol = TrackValueFromX(rc, x) * 3.0f;
+		return TRUE;
+	}
+	// THE LOOP BUTTONS (2026-09-18): cycle 0..9 and wrap. Saved keys (VCRainLoop /
+	// HullDrumLoop, the VC block), so the default edit mark stands; the mixer picks
+	// the new file up on its next pass (RainVariantId loads it on first use).
+	if (PtIn(RowBtnRect(rc, VcSndSelY()), x, y, 2)) {
+		g_fx.vcRainSndSel = (g_fx.vcRainSndSel + 1) % 10;
+		return TRUE;
+	}
+	if (PtIn(RowBtnRect(rc, VcSndDrumY()), x, y, 2)) {
+		g_fx.hullDrumSel = (g_fx.hullDrumSel + 1) % 10;
 		return TRUE;
 	}
 	return FALSE;
@@ -5845,7 +6238,10 @@ static const HelpItem HELP_M_WEATHER[] = {
 { HK_ROW, "FOG",       "A ground fog where you are, rendered by the client inside every "
           "surface so ground, hulls and sky fade into one grey. The storm's own mist "
           "rides the RAIN page's Gloom and clears as you climb through the deck." },
-{ HK_ROW, "SNOW",          "Coming soon." },
+{ HK_ROW, "SNOW",          "Snowfall - the rain sheet re-particled into drifting flakes under "
+          "a bright overcast and its own mist - and the cover it lays down: terrain above "
+          "a snow line, pavement and hulls whiten, rendered by the client. Rain and snow "
+          "are one storm at a time: switching one on switches the other off." },
 { HK_ROW, "WEATHER MODEL", "Coming soon: weather found from the planet's own cloud map, so "
           "a storm is something you arrive in rather than summon." },
 };
@@ -6395,9 +6791,35 @@ static const HelpItem HELP_PLAS[] = {
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "THE TWO READOUTS - read these before you touch a slider", NULL },
-{ HK_ROW, "Plasma heat", "What the model computed for the camera-target vessel. No vessel "
-          "publishes a nose radius, so the heat thresholds cannot be derived and the number "
-          "has to be visible - otherwise 'too cold' and 'not working' look identical." },
+{ HK_ROW, "Plasma heat", "What the model computed for the camera-target vessel, and beside "
+          "it the temperature that heating rate holds the nose at. Both are shown because "
+          "neither can be derived from the vessel - nothing publishes a nose radius - and "
+          "without a number 'too cold' and 'not working' look identical. The kelvin "
+          "reading is live in BOTH heat models, so on a vessel still set to CLASSIC it tells "
+          "you what PHYSICAL would be seeing: that is how you decide whether a particular "
+          "hull wants switching over, from ordinary flying rather than a test flight." },
+{ HK_ROW, "Heat model", "WHEN the fire starts, and how fast it builds. CLASSIC is the "
+          "original curve and is what every vessel tuned before this build flies. It is the "
+          "default, and a hull asks for anything else only in its own settings file, so "
+          "switching one vessel over cannot change the look of another - that is deliberate. "
+          "PHYSICAL reads the same heating rate as a TEMPERATURE, between the two anchors "
+          "below. Reach for it on a vehicle that flies a long, energy-managed entry: a "
+          "Shuttle-class orbiter holds its heat rate down on purpose, while CLASSIC's fixed "
+          "thresholds were set for a steep dive, so such a ship could stay dark for an entire "
+          "descent. Saved per vessel class." },
+{ HK_ROW, "Glow onset (K)", "PHYSICAL only: the temperature at which the fire first appears. "
+          "The default 800 K is the Draper point, where solids begin to glow visibly red, and "
+          "on a Shuttle entry the model crosses it about 25 seconds after entry interface - "
+          "which is when crews report the first faint glow at the nose. Lower it to start "
+          "earlier, raise it to start later. This is the row for an addon that wants its "
+          "entry to match its own reference material." },
+{ HK_ROW, "Full plasma (K)", "PHYSICAL only: the temperature at which the effect reaches full "
+          "strength. 2500 K is white hot, and a real orbiter's nose cap peaks near 1900, so "
+          "the default leaves headroom instead of pinning at the top for half the entry. "
+          "Bring it down to make the same flight look more violent. The two anchors cannot "
+          "cross - they are the ends of one band. And below about Mach 4 the glow is switched "
+          "off whatever they say: the physics behind the curve only describes hypersonic "
+          "flight, and without that the fire would linger into the approach." },
 { HK_ROW, "The caption under the pill", "Normally it describes the effect. It becomes a "
           "WARNING when something in your video settings is quietly degrading it: with Sun "
           "glare off the client never builds the depth buffer and the plasma paints straight "
@@ -6425,6 +6847,12 @@ static const HelpItem HELP_PLAS[] = {
           "which is how a reentry is actually flown: eyes down, the fire caught in the corner "
           "of your vision. The flares are timed to the ones outside the window - one event, "
           "lighting the sheath and the cabin in the same frame." },
+{ HK_ROW, "VC churn", "How FAST the cockpit sheath lives - the filaments streaming past and "
+          "the gate that makes them appear and die. 1 is the standard rate, 0 freezes them "
+          "into a steady glow (the flares keep coming: they are the event outside the "
+          "window, not this clock). Real entry footage from the seat is a steady sheath "
+          "more often than a dancing one; this is the knob for that. The wake outside has "
+          "its own clock, Wake churn, and the two no longer share one." },
 { HK_ROW, "Streak length / width / wander", "The flame streamers trailing back." },
 { HK_ROW, "Wake churn", "How FAST the wake lives - fin shimmer, spark march, the drift of the "
           "striations, all on one clock so the wake stays coherent. 1 is standard, 0 freezes "
@@ -6895,14 +7323,22 @@ static const HelpItem HELP_FOGP[] = {
 { HK_ROW, "Fog",            "Readout: the fog's build-up, or the honest reason there is none "
           "(no air on this world, the camera at another world, too high)." },
 { HK_GAP, NULL, NULL },
-{ HK_ROW, "Base lights",    "Switches every base's NIGHT state on now - the night textures on "
-          "hangars and tiles, the runway and taxiway lights - the way a real airfield "
-          "lights up when the visibility drops. Off is Orbiter's own behaviour: on at "
-          "night, off by day. The same switch sits at the bottom of the RAIN page - one "
-          "setting, two doors." },
-{ HK_ROW, "Lights glow",    "A gain on everything those lights emit, 1 = stock. Past 1 the "
-          "excess reaches the client's Light glow post-process and the lights bloom - "
-          "needs Light glow enabled in the D3D9 video settings." },
+{ HK_ROW, "Base lights",    "Three states. STOCK is Orbiter's own behaviour: every base's night "
+          "state - the night textures on hangars and tiles, the runway and taxiway lights - "
+          "on at night, off by day, at stock brightness whatever the two sliders below "
+          "read. IN WEATHER switches that night state on when the gloom justifies it, the "
+          "way a real airfield lights up when the visibility drops: once the storm light "
+          "has taken more than a quarter of the sun (rain or falling snow at about half "
+          "strength with Gloom 1) or the fog's visibility is under 5 km, and back to stock "
+          "when it clears - a flip, not a fade. ALWAYS forces the night state on now. The "
+          "value beside the button is the live result: stock, waiting, lit or forced. The "
+          "same button sits at the bottom of the RAIN page - one setting, two doors." },
+{ HK_ROW, "Lights glow",    "A gain on everything those lights emit while they are ORO's - lit "
+          "by the weather or forced - 1 = stock. Past 1 the excess reaches the client's "
+          "Light glow post-process and the lights bloom - needs Light glow enabled in the "
+          "D3D9 video settings. On STOCK, and while IN WEATHER is still waiting, this does "
+          "nothing: the world's runway lights are never dimmed by a slider tuned for the "
+          "fog look." },
 { HK_ROW, "Lights halo",    "The aureole round each runway light in fog: the air near the lamp "
           "scatters its light toward you, so a lamp in fog is a soft disc that GROWS with "
           "the fog between you and it. 1 is the designed halo, 0 a plain lamp that merely "
@@ -6910,6 +7346,177 @@ static const HelpItem HELP_FOGP[] = {
 { HK_P,   "The RAIN page's Gloom drives a second layer, the storm's mist, up to the "
           "storm deck - climb through the deck and it clears. Saves GLOBALLY; per-world "
           "files arrive with the weather model.", NULL },
+};
+
+// --- LEAF: SNOW (2026-09-13) - first-flight text, to be revised after his look
+//     round (workflow 3b) --------------------------------------------------------
+static const HelpItem HELP_SNOWP[] = {
+{ HK_H,   "SNOW - what falls, and what it lays down", NULL },
+{ HK_P,   "Two things on one page. SNOWFALL is the rain sheet re-particled: slow "
+          "flakes that drift sideways as they fall, drawn as soft dots that stretch into "
+          "streaks only as your own speed through the air climbs - a parked ship sees "
+          "specks, a flying one sees the same streaks rain gives - under a bright flat "
+          "overcast and the snow's own mist. SNOW COVER is what lies on the ground: the "
+          "patched client whitens up-facing terrain above a snow line, base tiles, "
+          "runways, pads and hulls, in every surface it draws. Nothing on open water, "
+          "nothing inside the cockpit. A hull sheds its snow as the airflow over it grows - "
+          "a parked ship whitens, a taxiing one sheds, a flying one is clean - and it "
+          "REMEMBERS: what the take-off roll blew off comes back only while snow falls, at "
+          "the ground's own build-up pace, in patches from the sheltered hollows out; a "
+          "standing cover with nothing falling never returns to a hull that shed it. A "
+          "light fall lies on the flats alone; a full cover climbs the steep sides too, as "
+          "wind-driven snow does.", NULL },
+{ HK_P,   "RAIN AND SNOW ARE ONE STORM AT A TIME: switching the snow pill (or its TEST) "
+          "on switches the rain off, and the other way round - they share one sheet and "
+          "one budget. The pill summons the snow; TEST previews the same event with the "
+          "pill off. Turning the pill off clears everything at once, cover included, so "
+          "you can A/B the white world against the bare one. Earth only for now, below "
+          "the weather (gone by about nine kilometres up), external view and the virtual "
+          "cockpit - where the flakes fall past the glass and, with THE WINDSCREEN pill "
+          "on, ice grows in from each pane's own frame.", NULL },
+{ HK_ROW, "Snowfall",       "How much is falling. 0 = nothing in the air: a standing cover "
+          "on a clear day, with no overcast and no mist. The count climbs on a square law "
+          "to a whiteout at 2 - some thirty thousand flakes across three layers, enough to "
+          "hide the scenery; 1 is a proper fall, 0.5 a light one." },
+{ HK_ROW, "Flake size",     "The flakes' size on screen." },
+{ HK_ROW, "Contrast",       "How far a flake stands off the air it falls through. A flake is "
+          "lit by the same flat sky it falls from, so at 1 it is the colour of the air and "
+          "reads grey against the overcast; raise it and the flakes come forward, brighter "
+          "and more opaque." },
+{ HK_ROW, "Fall speed",     "How fast they fall; 1 is a real flake's 1.6 m/s. Your own speed "
+          "through the air adds to it - at speed they streak like rain." },
+{ HK_ROW, "Wander",         "The sideways drift as they fall. 0 = straight down. It dies away "
+          "as the airflow takes over." },
+{ HK_ROW, "Wind (m/s)",     "The wind itself, added to the fall. A blizzard IS wind: at 15 to "
+          "25 m/s every flake streaks near-horizontal while you stand still, the wander "
+          "dies, and the near flakes smear along the flow. It gusts on its own. 0 is "
+          "still air; the streaks at speed then come only from your own motion." },
+{ HK_ROW, "Wind from (deg)", "The direction the wind blows FROM, clockwise from north - 0 north, "
+          "90 east, 180 south, 270 west, the weather report's convention. The flakes stream "
+          "downwind and lean with it; there is no separate slant." },
+{ HK_ROW, "Gloom",          "The overcast - the storm light collapsing the sun - at the snow's "
+          "own level. A snow sky is a bright flat grey, so the default sits below the "
+          "rain's. Follows what is falling: nothing falls, nothing dims." },
+{ HK_ROW, "Mist",           "The falling snow's own loss of visibility, riding the fog's storm "
+          "layer, on a LOG scale because a blizzard and a light snow are twenty times "
+          "apart: 0 = none, 0.5 = about 1.3 km, 1 = about 550 m, 1.5 = about 230 m, "
+          "2 = 100 m - a whiteout, the overcast lost in it. Follows what is falling." },
+{ HK_GAP, NULL, NULL },
+{ HK_ROW, "Cover",          "The STANDING cover, 0 to 1, applied at once - an alpine snow line "
+          "with nothing falling, or an instant A/B. What the snowfall lays down adds "
+          "to it." },
+{ HK_ROW, "Snow line (m)",  "Snow lies ABOVE this altitude over the planet's mean radius; 0 "
+          "reaches the runway you stand on. The sim cannot supply a real line: its "
+          "atmosphere is a standard one, +15 C at sea level everywhere, all year - see "
+          "the Air readout. The weather model brings the seasons later." },
+{ HK_ROW, "Line width (m)", "How many metres the line fades in over. 100 is a sharp edge on "
+          "a range; 800 is a soft one." },
+{ HK_ROW, "Build-up (min)", "SIM-minutes for a full snowfall to lay a full cover - so at 10x "
+          "warp you watch it pile up. It melts at three times that once the fall stops. "
+          "Nothing accumulates while the sim is paused." },
+{ HK_ROW, "Brightness",     "The snow's brightness - ONE slider for the ground, the pavement and "
+          "the hulls. The two shader families render the same albedo differently, so the "
+          "ground takes 2.2 times the slider and the hulls the slider itself: 1 is the "
+          "calibrated look, alike on both; past about 1.5 the sun-lit snow reaches the "
+          "bloom." },
+{ HK_ROW, "Relief",         "The drifts' lit and shade sides. The lattice that lays the patches is "
+          "read as a height field and shaded by the sun, so every drift has a bright slope "
+          "and a dark one and every patch a lip at its rim - centimetres on a hull, metres "
+          "on the terrain's six-metre cells. It needs a SUN: under the storm's overcast "
+          "there is no shadow side, and the relief fades with the light. 0 = flat." },
+{ HK_ROW, "Sparkle",        "Ice crystals flashing the sun at the eye. The slider is a COUNT - a "
+          "quarter of the lattice's cells hold a crystal at 1, half at 2 - each a point that "
+          "flashes only when the camera's motion brings its facet round, the way snow "
+          "sparkles as you walk. Needs the sun; fades out beyond about 300 m." },
+{ HK_ROW, "Blow-off",       "Snow blowing off the hull as the airflow strips its cover, from about "
+          "taxi speed up: clumps and a few tumbling chunks lifted off the up-facing skin, "
+          "carried with the hull for a moment and left behind as the air takes them, "
+          "settling within a few seconds. The amount a full cover sheds; 0 = none. ORO "
+          "mirrors the client's hull-cover law to know what leaves the hull, and the Cover "
+          "now readout names the hull's cover beside the frame's. STILL BEING TUNED: a "
+          "hard-edged residue near the hull at speed is under investigation." },
+{ HK_GAP, NULL, NULL },
+{ HK_H,   "TIRE MARKS", NULL },
+{ HK_P,   "The gear of every MOVING vessel in ground contact marks the snow it rolls over - "
+          "the bare ground showing through, with the drifts' relief giving the edge a lip - "
+          "and the marks fade. A parked vessel sits in the snow and marks nothing. The patched "
+          "client keeps the map: one kilometre of ground round the camera at half a metre a "
+          "texel (8 MB, allocated the first time it is needed; SnowTrackMap in D3D9Client.cfg "
+          "picks 1024, 2048 or 4096). Marks that fall more than half a kilometre behind the "
+          "camera are gone for good. Runways and pads take marks on their plain-textured "
+          "path; a runway authored with normal maps shows none. The pill off keeps the map, "
+          "so switching it back is instant.", NULL },
+{ HK_ROW, "Track fade (min)", "SIM-minutes a fresh mark takes to vanish with nothing falling. "
+          "Falling snow fills it in faster on top, at the cover's own Build-up rate. Nothing "
+          "changes while the sim is paused." },
+{ HK_GAP, NULL, NULL },
+{ HK_H,   "THE WINDSCREEN (VC)", NULL },
+{ HK_P,   "Ice on the virtual cockpit's glass, with its own pill. It grows while snow "
+          "falls - from each pane's own FRAME inward, where a real windscreen ices first - "
+          "and melts when the fall stops; the pill off clears it at once. It draws on the "
+          "panes declared as RAIN SURFACES (the same declaration the raindrops use; the "
+          "DeltaGlider's are shipped) and needs Sun glare on in the D3D9 video settings for "
+          "the depth buffer, exactly as the drops do. The patched client hands the shader "
+          "every pane's distance to its frame per pixel, so the ice fits any pane on any "
+          "vessel with nothing to tune. The frost is the same colour day or night for now; "
+          "only the world seen through it changes with the light.", NULL },
+{ HK_ROW, "Frost reach (m)", "How far in from the pane's frame a full frost reaches, in METRES "
+          "of glass: 0.35 leaves the middle of a DeltaGlider's windscreen clear, 1 ices a "
+          "small pane solid. The edge is ragged and the ice crystalline, and the reach "
+          "grows with the frost's build-up." },
+{ HK_ROW, "Frost time (min)", "SIM-minutes of full snowfall to a full frost; a lighter fall "
+          "takes proportionally longer. It melts at a third of that speed once the fall "
+          "stops. Nothing changes while the sim is paused." },
+{ HK_ROW, "Frost blur",     "How much the world blurs through the ice. 0 = a tint alone." },
+{ HK_ROW, "Mask Debug",     "The RAIN page's row - the SAME setting. 1 draws drops everywhere, "
+          "ignoring the window mask; 2 paints the mask itself (GREEN glass with sky beyond, "
+          "TEAL glass with something beyond it, BLUE interior or hull); 3 paints the FROST's "
+          "mechanism - RED how far a glass pixel stands from its pane's frame (full red at a "
+          "metre), GREEN the ice - and writes one glass line to the log a second. Leave it "
+          "at 0 for normal flight." },
+{ HK_ROW, "Snow view",      "The RAIN page's Rain view - the SAME setting: which INTERNAL views "
+          "the falling snow is drawn in. VC ONLY cuts every flake at the window frame per "
+          "pixel (needs Sun glare); VC + PANEL and ALL VIEWS add the 2D panel and the glass "
+          "cockpit, which Orbiter paints over the snow itself. Outside views always see it." },
+{ HK_ROW, "Rain surfaces",  "Opens the RAINSURFACES popup - the one the RAIN page opens: declare "
+          "which mesh groups are glass by CLICKING them in the sim, no mesh editing. The "
+          "frost and the raindrops both use the declaration. Works with the snow pill off." },
+{ HK_GAP, NULL, NULL },
+{ HK_ROW, "Snow",           "Readout: the storm's build-up, or the honest reason there is none "
+          "(external only, Earth only, above the weather) - the same gate the rain uses." },
+{ HK_ROW, "Cover now",      "Readout: the cover the client is being shown, how much of it the "
+          "snowfall laid down - and whether YOUR hull can take any: 'hull BELOW the snow "
+          "line' means the line stands above where you are, and nothing here whitens, "
+          "hull or apron; 'at the line' shows the hull's own share inside the fade band." },
+{ HK_ROW, "Air",            "Readout: the air temperature at your vessel and the altitude the "
+          "sim's atmosphere freezes at. On Earth it is 2308 m everywhere, forever - "
+          "which is why the snow line is yours to set." },
+{ HK_ROW, "Frost",          "Readout: the ice's build-up as a share of the frame-in reach; "
+          "'clear glass' with none, 'off' with the windscreen pill off." },
+{ HK_GAP, NULL, NULL },
+{ HK_ROW, "Base lights",    "Three states. STOCK is Orbiter's own behaviour: every base's night "
+          "state - the night textures on hangars and tiles, the runway and taxiway lights - "
+          "on at night, off by day, at stock brightness whatever the two sliders below "
+          "read. IN WEATHER switches that night state on when the gloom justifies it, the "
+          "way a real airfield lights up when the visibility drops: once the storm light "
+          "has taken more than a quarter of the sun (rain or falling snow at about half "
+          "strength with Gloom 1) or the fog's visibility is under 5 km, and back to stock "
+          "when it clears - a flip, not a fade. ALWAYS forces the night state on now. The "
+          "value beside the button is the live result: stock, waiting, lit or forced. The "
+          "same button sits at the bottom of the RAIN and FOG pages - one setting, three "
+          "doors." },
+{ HK_ROW, "Lights glow",    "A gain on everything those lights emit while they are ORO's - lit "
+          "by the weather or forced - 1 = stock. Past 1 the excess reaches the client's "
+          "Light glow post-process and the lights bloom - needs Light glow enabled in the "
+          "D3D9 video settings. On STOCK, and while IN WEATHER is still waiting, this does "
+          "nothing." },
+{ HK_ROW, "Lights halo",    "The aureole round each runway light in fog or falling snow: the "
+          "air near the lamp scatters its light toward you, so a lamp in a blizzard is a "
+          "soft disc that GROWS with the mist between you and it. 1 is the designed halo, "
+          "0 a plain lamp that merely dims with distance." },
+{ HK_GAP, NULL, NULL },
+{ HK_P,   "Saves globally - the same storm at any world, for now. The glass rows and the "
+          "Base lights block are the RAIN and FOG pages' own settings behind a second door.", NULL },
 };
 
 static const HelpItem HELP_RAINP[] = {
@@ -7031,7 +7638,14 @@ static const HelpItem HELP_RAINP[] = {
           "the real airflow. Parked, they run straight down. As you accelerate the airflow "
           "takes over and they radiate from the STAGNATION POINT - the spot on the nose where "
           "the oncoming air first meets the airframe, which is below the glass - so at speed "
-          "they sweep UP the windscreen and outward, the way they do on a real canopy." },
+          "they sweep UP the windscreen and outward, the way they do on a real canopy. Yaw "
+          "or pitch and the radiant moves by about that angle, no more: its direction is "
+          "the airflow's, only its depression below the nose is the airframe's - so pushing "
+          "the stick forward tilts the runners, it does not put the radiant in the window. "
+          "Runners are spread evenly over the glass: a runner is born where a drop lands, "
+          "so the corners get their share and the middle does not crowd. This slider is "
+          "the MAXIMUM: the live count follows Rain density, so a drizzle carries fewer "
+          "runners than a downpour, and speed multiplies them through the shear." },
 { HK_ROW, "Runner size", "Runner thickness relative to the sitting drops - a ratio, so Drop "
           "size still scales both families together." },
 { HK_ROW, "Water film", "Past about 45 m/s of dynamic pressure the air strips drops off the "
@@ -7044,10 +7658,16 @@ static const HelpItem HELP_RAINP[] = {
           "drop." },
 { HK_ROW, "Mask Debug", "What the client thinks your glass is. 1 draws drops everywhere, "
           "ignoring the window mask; 2 paints the mask itself - GREEN where the client sees "
-          "authored window glass, BLUE where it sees interior, untouched where it sees "
-          "nothing. Leave it at 0 for normal flight. It is here because it answers the one "
-          "question a screenshot cannot: if drops are missing or are appearing somewhere "
-          "they should not, position 2 says whether the glass was declared." },
+          "authored window glass with only sky beyond it, TEAL where it sees glass with "
+          "something beyond it (a building, the ground - what hides the rain, the lightning "
+          "and the aurora behind them), BLUE where it sees interior or hull with no glass, "
+          "untouched where it sees nothing; 3 paints the snow FROST's mechanism - RED how "
+          "far a glass pixel stands from its pane's frame, GREEN the ice (see the SNOW "
+          "page) - and writes one glass line to the log a second. Leave it at 0 for normal "
+          "flight. It is here "
+          "because it answers the one question a screenshot cannot: if drops are missing or "
+          "are appearing somewhere they should not, position 2 says whether the glass was "
+          "declared." },
 { HK_ROW, "Rain view", "Which INTERNAL views the rain is drawn in. VC ONLY is the default and the strictest: in a virtual cockpit every streak is cut at the window frame per pixel, so the cabin stays dry - that needs Sun glare enabled for the depth buffer, and without it the VC stays dry rather than showing drops indoors. VC + PANEL and ALL VIEWS add the 2D panel and the glass cockpit, where no depth is needed: those panels are painted over the rain by Orbiter itself, so they hide it for free. Outside views are always wet and are not affected by this." },
 { HK_ROW, "Rain surfaces", "Opens the RAINSURFACES popup: declare which mesh groups take "
           "drops on the glass by CLICKING them in the sim - no mesh editing. Works with "
@@ -7070,14 +7690,22 @@ static const HelpItem HELP_RAINP[] = {
           "weather. Vessels with large interiors can seal them with an authored roof "
           "mesh, Meshes\\ORO\\<class>_rainshield.msh - see the docs." },
 { HK_GAP, NULL, NULL },
-{ HK_ROW, "Base lights",    "Switches every base's NIGHT state on now - the night textures on "
-          "hangars and tiles, the runway and taxiway lights - the way a real airfield "
-          "lights up when the visibility drops. Off is Orbiter's own behaviour: on at "
-          "night, off by day. The same switch sits at the bottom of the FOG page - one "
-          "setting, two doors." },
-{ HK_ROW, "Lights glow",    "A gain on everything those lights emit, 1 = stock. Past 1 the "
-          "excess reaches the client's Light glow post-process and the lights bloom - "
-          "needs Light glow enabled in the D3D9 video settings." },
+{ HK_ROW, "Base lights",    "Three states. STOCK is Orbiter's own behaviour: every base's night "
+          "state - the night textures on hangars and tiles, the runway and taxiway lights - "
+          "on at night, off by day, at stock brightness whatever the two sliders below "
+          "read. IN WEATHER switches that night state on when the gloom justifies it, the "
+          "way a real airfield lights up when the visibility drops: once the storm light "
+          "has taken more than a quarter of the sun (rain or falling snow at about half "
+          "strength with Gloom 1) or the fog's visibility is under 5 km, and back to stock "
+          "when it clears - a flip, not a fade. ALWAYS forces the night state on now. The "
+          "value beside the button is the live result: stock, waiting, lit or forced. The "
+          "same button sits at the bottom of the FOG page - one setting, two doors." },
+{ HK_ROW, "Lights glow",    "A gain on everything those lights emit while they are ORO's - lit "
+          "by the weather or forced - 1 = stock. Past 1 the excess reaches the client's "
+          "Light glow post-process and the lights bloom - needs Light glow enabled in the "
+          "D3D9 video settings. On STOCK, and while IN WEATHER is still waiting, this does "
+          "nothing: the world's runway lights are never dimmed by a slider tuned for the "
+          "fog look." },
 { HK_ROW, "Lights halo",    "The aureole round each runway light in fog: the air near the lamp "
           "scatters its light toward you, so a lamp in fog is a soft disc that GROWS with "
           "the fog between you and it. 1 is the designed halo, 0 a plain lamp that merely "
@@ -7163,7 +7791,9 @@ static const HelpItem HELP_VC[] = {
           "and Gloom 1 about a third; at 2 a storm is near black; 0 is the pill off." },
 { HK_P,   "One compromise to know: a lit button or label an author painted with the same "
           "flat emissive as the walls dims with the walls. A real self-lit display (black "
-          "diffuse, the MFDs) does not.", NULL },
+          "diffuse, the MFDs) does not - and neither does any material the vessel's own "
+          "code switches while you fly: the DeltaGlider's instrument lights write the MFD "
+          "button labels that way, so with them on the buttons stay readable at night.", NULL },
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "CABIN SOUNDS", NULL },
@@ -7178,6 +7808,21 @@ static const HelpItem HELP_VC[] = {
           "under rain - dull thumps over a low panel rumble, no hiss - structure-borne, so "
           "it is never muffled. Its own volume, up to 3: turn it down for the storm without "
           "the drumming and nothing else moves. 0 is silent." },
+{ HK_ROW, "Cabin loop", "WHICH rain loop the seat plays - press to cycle through the ten "
+          "files XRSound\\ORO\\Rain_in_cabin_0.wav to _9.wav. The ten that ship range from a "
+          "sealed capsule (only the low rumble comes through) to a thin canopy and an open "
+          "cockpit, in drizzle and in a downpour; the button names the file. Any of them can "
+          "be REPLACED by your own: WAV, 44.1 kHz 16-bit stereo, under that name, then a new "
+          "session. The LENGTH does not matter (10 to 30 s is a good size; ours are 12 and 16) "
+          "- what matters is a CLEAN LOOP, the end leading into the start without a jump, or "
+          "you hear a click at every wrap: cut both ends at a quiet moment or crossfade them. "
+          "Orbiter's addon zoo has cars, planes and trains, and no single cabin sound is right "
+          "for all of them. A missing file leaves the outside rain playing quietly instead." },
+{ HK_ROW, "Drum loop", "WHICH drum loop plays - the ten files Hull_drum_0.wav to _9.wav, "
+          "cycled the same way. 0 is the original 2026-08-23 drum (thumps and ticks over a "
+          "faint bed), 1 the later one (thumps over a panel rumble), and the rest vary the "
+          "drop rate, the rumble and the odd metallic ping. Replace any with your own loop "
+          "under that name. Both choices save with the VC block, so a hull can keep its own." },
 { HK_GAP, NULL, NULL },
 
 { HK_H,   "CAM-SHAKE", NULL },
@@ -7233,6 +7878,7 @@ static const HelpItem* HelpText(int pg, int& n)
 	case PG_FLIGHTAID: HT(HELP_AID);
 	case PG_RAIN:      HT(HELP_RAINP);
 	case PG_FOG:       HT(HELP_FOGP);
+	case PG_SNOW:      HT(HELP_SNOWP);
 	case PG_RAINSURF:  HT(HELP_RSURF);
 	case PG_LIGHTNING: HT(HELP_LTG);
 	case PG_AURORA:    HT(HELP_AUR);
@@ -7913,6 +8559,9 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		case PG_FOG:
 			handled = ClickFog(hDlg, rc, x, dy);
 			break;
+		case PG_SNOW:
+			handled = ClickSnow(hDlg, rc, x, dy);
+			break;
 		case PG_RAINSURF: // configuration, not an effect - never behind the scenario lock
 			handled = ClickRsurf(hDlg, rc, x, dy);
 			break;
@@ -8003,6 +8652,7 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		                                                       + TrackValueFromX(rc, x) * (g_prtRows[g_dragPrt].vmax - g_prtRows[g_dragPrt].vmin);
 		else if (g_dragPlas  >= 0) *g_plasRows[g_dragPlas].value   = g_plasRows[g_dragPlas].vmin
 		                                                           + TrackValueFromX(rc, x) * (g_plasRows[g_dragPlas].vmax - g_plasRows[g_dragPlas].vmin);
+		else if (g_dragHeat  >= 0) HeatAnchorTo(rc, x, g_dragHeat);
 		else if (g_dragEcl   >= 0) *g_eclRows[g_dragEcl].value     = TrackValueFromX(rc, x) * g_eclRows[g_dragEcl].vmax;
 		else if (g_dragAur   >= 0) *g_aurRows[g_dragAur].value     = TrackValueFromX(rc, x) * g_aurRows[g_dragAur].vmax;
 		else if (g_dragAurRib >= 0) { const int n = 1 + (int)(TrackValueFromX(rc, x) * 5.0f + 0.5f); g_fx.auroraRibbons = (n < 1) ? 1 : (n > 6 ? 6 : n); }
@@ -8034,6 +8684,11 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 			         + TrackValueFromX(rc, x) * (g_fogRows[g_dragFog].vmax - g_fogRows[g_dragFog].vmin);
 			if (g_fogRows[g_dragFog].dec == 0)   // the same snap as the press (the rain lesson)
 				*g_fogRows[g_dragFog].value = floorf(*g_fogRows[g_dragFog].value + 0.5f);
+		}
+		else if (g_dragSnow  >= 0) {   // SNOW (2026-09-13): both groups, vmin-aware, the same snap
+			PlasRow& sr = *SnowRowAt(g_dragSnow);
+			*sr.value = sr.vmin + TrackValueFromX(rc, x) * (sr.vmax - sr.vmin);
+			if (sr.dec == 0) *sr.value = floorf(*sr.value + 0.5f);
 		}
 		else if (g_dragVapAir >= 0) {   // THE AIR rows: vmin-aware (Dry ceiling floors at 5 km)
 			const PlasRow& ar = g_vapAirRows[g_dragVapAir];
@@ -8083,11 +8738,11 @@ static INT_PTR CALLBACK OroDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
 		// for one of these names and touch all THREE sites.
 		if (g_dragRow >= 0 || g_dragMot >= 0 || g_dragShake >= 0 || g_dragEnv >= 0
 		    || g_dragEnvK >= 0 || g_dragShim >= 0 || g_dragPlume >= 0 || g_dragPlmBand >= 0
-		    || g_dragBgl >= 0 || g_dragPrt >= 0 || g_dragPlas >= 0
+		    || g_dragBgl >= 0 || g_dragPrt >= 0 || g_dragPlas >= 0 || g_dragHeat >= 0
 		    || g_dragEcl >= 0 || g_dragAur >= 0 || g_dragAurRib >= 0
 		    || g_dragAurK >= 0 || g_dragLtg >= 0 || g_dragRlt >= 0 || g_dragGry >= 0
 		    || g_dragLfs >= 0 || g_dragLfMode >= 0 || g_dragRng >= 0
-		    || g_dragRain >= 0 || g_dragFog >= 0 || g_dragBlg >= 0 || g_dragVcs >= 0 || g_dragTol >= 0
+		    || g_dragRain >= 0 || g_dragFog >= 0 || g_dragSnow >= 0 || g_dragBlg >= 0 || g_dragVcs >= 0 || g_dragTol >= 0
 		    || g_dragVap >= 0 || g_dragVap2 >= 0 || g_dragVapP >= 0 || g_dragVapR >= 0
 		    || g_dragVapBand >= 0 || g_dragVapBand2 >= 0 || g_dragVapAir >= 0
 		    || g_dragCop >= 0 || g_dragBar >= 0) {

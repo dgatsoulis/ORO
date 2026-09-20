@@ -13,6 +13,113 @@ It upgrades in place and keeps your settings and your original-files backup.
 
 ---
 
+## ORO beta 260920
+
+Everything below is new since `ORO-beta-260913`.
+
+### NEW
+
+**An authored heatshield shell for the stock Atlantis** (`Meshes\ORO\Atlantis.msh`)
+- The reentry plasma's shell is built from a purpose-made mesh, as the DeltaGlider's and the DG-S's already were, instead of a walk of the exterior
+- Addon orbiters can use it: copy it under your vessel's class name, reposition it to your mesh, and adjust the shell with the sliders on the VESSEL / REENTRY / PLASMA page
+
+**Snow** (WORLD / WEATHER / SNOW)
+- Falling snow, and the cover it lays down on the ground, the pavement and the hulls - Earth, outside views and the virtual cockpit
+- **Snow and rain are mutually exclusive**: switching one on switches the other off, which is what buys the snow the whole geometry budget instead of half of it
+- The cover builds on SIMULATION time, so it deepens while you fly and thaws when it warms; turning the pill off clears it at once, so you can compare
+- A **snow line** by altitude with its own width - below it, rain country; above it, white - and a readout that names the air temperature and where the freezing level actually is
+- **No snow on water**, none on steep ground, and hulls shed it as the air loads up, so a parked ship whitens and a moving one does not
+- Near flakes are soft out-of-focus discs, far ones specks, each its own size; a gusting **Wind** slider streams them past a parked ship
+- **Mist runs on a log scale** - about 1.3 km of visibility at 0.5, 100 m at 2 - and in snow it takes the cloud deck with it, so a blizzard has no visible sky
+- The deck and the flakes take the sun's own colour: cold grey at night, warm at dusk. No colour picker anywhere in it
+- **A hull remembers its snow**: what the take-off roll blows off comes back only while snow falls, at the ground's own pace, in patches from the sheltered hollows out; a standing cover never returns to a hull that shed it
+- **Brightness, Relief and Sparkle**: one Brightness for the ground, the pavement and the hulls (calibrated so the two read alike); drifts with a lit and a shade side under the sun, a lip at every patch's rim; ice crystals that flash as you move
+- **Contrast** brings the flakes forward from the overcast, and they show at night at half of it; **Wind from** sets the wind's direction in degrees (the Slant slider is gone, the wind carries the lean); a full Snowfall is a whiteout that hides the scenery
+- A light fall lies on the flats alone; a full cover climbs a hull's steep sides too
+- **Frost on the virtual cockpit's windows** (THE WINDSCREEN group on the SNOW page, its own pill): ice grows in from each pane's own frame while snow falls, by a reach set in metres, and melts when it stops; the world blurs through it; the same colour day or night
+  - It draws on the panes declared as rain surfaces (the DeltaGlider's are shipped) and needs Sun glare on, exactly like the raindrops
+- The glass controls (Snow view, Rain surfaces, Mask Debug) and the Base lights block sit on the SNOW page too - the same settings behind a second door
+- **Tire marks in the snow** (TIRE MARKS group, its own pill): every moving vessel's gear marks the ground snow it rolls over - terrain, base tiles and plain-textured pavement - and the marks fade over **Track fade** minutes, faster while snow falls
+  - The patched client keeps a one-kilometre map of ground round the camera; `SnowTrackMap` in D3D9Client.cfg picks 1024, 2048 or 4096 texels at half a metre (2, 8 or 32 MB)
+- **Blow-off**: snow blows off a hull as the airflow strips its cover - clumps and tumbling chunks lifted off the skin, carried a moment and left behind. Work in progress (see KNOWN ISSUES)
+
+**A physical entry-heat curve, choosable per vessel** (VESSEL / REENTRY / PLASMA)
+- A new **Heat model** button: CLASSIC or PHYSICAL, saved per vessel class
+- **CLASSIC is the default and is exactly what shipped before**, so no vessel you have already tuned can change - a hull asks for anything else only in its own settings file
+- PHYSICAL exists because a vehicle flown *well* was the one case that could not light up: a Shuttle-class orbiter caps its own heating rate on purpose, and the old fixed thresholds were set for a steep dive, so such a ship could stay dark for an entire descent
+- It reads the heating rate as a **temperature**, with **Glow onset** and **Full plasma** set in kelvin - numbers you can check against real materials instead of abstract thresholds
+- The default onset, 800 K, is the Draper point where solids first glow red; on a Shuttle entry the model crosses it about 25 seconds after entry interface, which is when crews report the first faint glow at the nose
+- It also **ends** properly: below about Mach 4 the glow switches off rather than lingering into the approach
+
+**The Advanced Setup dialog explains itself** (Launchpad / Video / Advanced)
+- A **?** button in the dialog's title bar: click it, then any setting or its label, and a popup says what it does, what it costs and its default. F1 does the same for the setting that has the focus
+- A **Help** button at the bottom opens a window with every setting explained, stock and ORO alike, in the order they appear in the dialog
+
+**A steadiness knob for the cockpit plasma** (VESSEL / REENTRY / PLASMA)
+- **VC churn**, per vessel class: how fast the sheath outside the windscreen lives. 1 is the flown look, 0 freezes the filaments into a steady glow while the flares keep coming - real entry footage from the seat is a steady sheath more often than a dancing one. The wake outside keeps its own Wake churn
+
+**Selectable cabin and drum loops** (PILOT / VIRTUAL COCKPIT, under Hull drum)
+- Two buttons, **Cabin loop** and **Drum loop**, cycle through ten rain-in-the-cabin loops and ten hull-drum loops; the button names the file
+- The ten cabin loops run from a sealed capsule (only the low rumble comes through) to a thin canopy and an open cockpit, in drizzle and in a downpour; drum 0 is the original 260823 drum, drum 1 the 260906 one, the rest vary the drop rate, the panel rumble and the odd ping
+- Any of the twenty files can be replaced with your own loop under the same name (WAV, 44.1 kHz 16-bit stereo; the length does not matter, a clean seam does - the sound README says how) - Orbiter's addon zoo has planes, cars and trains, and no single cabin sound fits them all
+- The choice saves with the VC block, so a hull can keep its own; the older muffled rain tiers and Rain_hull.wav are retired and cleaned up on upgrade
+
+### IMPROVED
+
+- The **Plasma heat** readout now shows the nose temperature beside the percentage, in both heat models - so on a vessel still set to CLASSIC it tells you what PHYSICAL would be seeing, and you can decide from ordinary flying whether that hull wants switching over
+- **Windscreen runners under yaw**: the radiant now moves sideways by about the yaw angle, not three times it. The stagnation point sits a few metres ahead of the pilot's eye, so its parallax exaggerated every rudder input; the sideways angle is the airflow's now, only the depression below the nose is the airframe's
+- **Runner count follows Rain density**: the Runners slider is the maximum, a drizzle carries fewer than a downpour; speed still multiplies them through the shear
+- **Windscreen runners under pitch**: the radiant now moves with the nose by about the pitch angle too, not two to three times it, so pushing the stick forward tilts the runners instead of putting the radiant in the window. Same cause as the yaw fix, the same parallax, the same answer
+- **Runners are spread evenly over the glass**: they used to crowd the middle of the pane and leave the bottom corners bare, because their columns converge at the radiant below the glass. A runner is born where a drop lands now, so every part of the window gets its share; the Runners slider still sets the overall level
+- **Base lights is a three-state button**: STOCK (Orbiter's own flip), IN WEATHER (the airfield switches its lights on when the storm has taken more than a quarter of the sun or the fog's visibility is under 5 km, and off again when it clears - a flip, not a fade) and ALWAYS (the old pill). The value beside it reports stock / waiting / lit / forced
+  - A settings file from an earlier build with the old pill ON loads as IN WEATHER, which is what its help had promised; SAVE writes the new key, `BaseLightsMode`
+- The GOD RAYS / LENS FLARE page says so in its headers when Sun glare is off in the D3D9 video tab, the way the REENTRY page already did
+- **A hemisphere flood casts as a cube.** A spotlight wider than 120 degrees - the shape of a launch pad's stadium lights - cannot be served by one shadow map: its 166-degree cone put a 24 to 49 cm texel on the ground 30 m out, and the ground under a hull's belly read lit. With Point light shadows set to Cube it now takes the same five 93-degree maps a point light gets, round its own axis, when the extra cells are spare - never at the cost of another light's map, so a pad full of floods keeps every map it had
+- **A crowded pad's floods cast crisply too.** Where there are more floods than a cube can be spared for - a launch pad - each flood used to keep one coarse 166-degree map. That map is now capped at the cube's 93-degree face angle round the flood's own axis, so where the author aimed it - the stack, the ground under it - the shadow texel is eight times finer; past the cap the light still falls but casts no shadow, and a shadow reaching the cap's edge fades out instead of cutting. Every Terrain shadows mode, no setting needed; the lights test's new case 13 shows it
+- **Eight local lights per terrain tile, was four.** A pad with more than four lamps lit its ground by the four strongest while the hulls above it took up to sixteen; the ground now takes its eight strongest, and the lights test's cases 5, 7 and 11 show it
+- **Spotlight shadows on the ground in daylight, in every Terrain shadows mode.** In Stencil and Projected the terrain used to borrow the sun map's sampler for the spotlight maps and gave them up while the sun was up; it has a sampler of its own now, so a beam is carved by a hangar and a vessel casts into it day and night, and a beam-lit tile keeps its sun shadow instead of trading it away
+- **A hull sees its neighbour's shadow** (Cascaded (ORO) mode). A parked vessel's own shadow box now holds every vessel that meets it, not its owner alone, so a ship parked beside another shows its neighbour's shadow on its own skin and the ground between two hulls keeps both; the box reaches ten kilometres toward the sun, so a vessel standing sunward is in it
+
+### FIXED
+
+- **DeltaGlider MFD button labels unreadable at night with the instrument lights on.** The DG's switch writes the button material with a diffuse component, so the cabin-at-night dimming took it for a wall while the gimbal and hover labels (pure emissive) were spared. Any material a vessel's own code switches at runtime is now left alone - the vessel is the light switch
+- **Runway lights, PAPI, VASI and base night textures were dim on every install.** The settings file that shipped carried the base-light Glow at 0.41, and that gain applied even with the Base Lights pill off. The pill off is now stock at any slider value; Glow and Halo apply only while it is on, and the shipped file carries 1.0
+- **Saturn's rings brightened on their own as you flew away from them.** The backlit face gets a little light bounced off the planet, and that term was reading the camera's distance where it should have read the planet's radius - so the further out you went the brighter the rings got, and past about 150,000 km no Backlit glow setting could hold them down. Reported with the distances that found it
+- **An authored heatshield shell now follows a vessel that shifts its centre of gravity.** Addons that move their frame - SSV's orbiter is one - left the shell built around where the hull used to be, so the fire sat in the wrong place. The standoff slider keeps its meaning from the new position, and any vessel that shifts nothing is untouched
+- **Storm clouds and lightning no longer show through buildings from the virtual cockpit.** A declared windscreen used to replace the depth of everything behind it, so through the glass nothing ORO draws - the storm deck, its bolts, the aurora, the plasma - could be hidden by a building or a hill, while the outside view hid them correctly. The glass now leaves the world's depth in place and marks itself separately. Two things gained for free: the sun's glare now hides behind a building seen through the windscreen, and Mask Debug 2 paints teal where the glass has something beyond it
+- **The monorail and hangrail cabins now show through the gaps of their own track.** Buildings behind the lattice showed through its gaps, the cabins did not - they were drawn after the girder, and the see-through lattice still writes depth. The cabins are drawn before it now, so the track reads right from every side, including from underneath
+- **The track's shadow has the lattice pattern, and the storm clouds show through the gaps from below.** The girder and its pylons are marked as a cut-out now, so the shadow pass, the depth pass and the rain's own occlusion all treat the gaps as gaps instead of solid metal
+
+- **A point light's cube shadow lost its corners.** With Point light shadows set to Cube, the five face maps were built on the world's axes while each pixel picked its face on the light's own, so a caster standing near a 45-degree diagonal from the light had part of its shadow fall outside the map and read lit - a straight cut through the shadow. Both sides share one basis now (the lights test's case 9)
+
+### CLIENT (stock D3D9Client bugs fixed in the patched client)
+
+- **Cut-out textures cast solid shadows.** The shadow-map shader answered a see-through texel with the nearest possible depth instead of leaving it empty, so any vessel or base part with a cut-out texture shadowed the whole ground under it. The texel is discarded now; the shadow has the holes the texture has
+- **The ground never disappears.** A terrain tile whose draw call the driver refuses used to vanish without a trace - the stock code never checks that call. It is drawn again with every shadow map unbound, both results are logged (the first at once, then at most a line a minute and twelve a session, so the log cannot flood), and the terrain binds no shadow map for 20 s before trying again. A shadow-map cell that failed to copy is no longer read, and the cells start cleared instead of holding whatever the card had in that memory
+- **The ground observer no longer clips the terrain.** The near clip plane was fitted to the camera's height over the TARGET vessel's ground, so a camera standing on higher ground than its target - the rise behind Brighton Beach - saw stars through the terrain at the bottom of the frame. It takes the nearer of the two grounds now; flat ground is unchanged
+- **Effects no longer cut against hull you cannot see from the cockpit.** The depth buffer that the plasma, the rain, the aurora and the sun glare test against was filled with the exterior at a 0.1 m near plane while the cockpit view draws it at 1 m, so a piece of hull closer than a metre to your eye - the Shuttle's window posts inside the VC's window holes - could cut an effect without ever being drawn. The buffer now holds exactly what the cockpit view draws, and stock's own sun glare benefits the same way
+- **The shadow filter setting is clamped to the rows the Launchpad offers.** Filters 3 and 4 (35 samples) had no sample table - the shader looped over 27 offsets and eight zeros - and a value set by hand was written back as -1 on the next OK
+
+### TECHNICAL
+
+- **The terrain shader's constant budget is open again.** 76 of its 224 registers are free where the last build had 1, with no change to what it computes: its constant structs are packed four scalars to a register and ordered so the members the pixel shader never reads sit past the end of what is allocated (the atmosphere constants 61 registers to 17, the per-tile parameters 25 to 14, the four terrain lights 24 to 16, and a twelve-register float copy of the flow-control switches gone). The room pays for the local-light and terrain-lighting work the register ceiling had been refusing
+- `Scatter.hlsl` is a deployed shader now (the thirteenth), restored by the uninstaller like the others; its atmosphere struct and the client are a matched pair
+- **The terrain's samplers and the vessel shaders' registers have room again.** The three atmosphere land tables are one stacked texture and the eclipse's lookup table is arithmetic (exact where the table interpolated), so the Earth terrain shader reads 14 of its 16 samplers with the mesh debugger on and 12 without, where it sat at 16; one of the freed slots is the spotlight maps' own. The vessel shaders' 27-sample shadow kernel is packed two samples to a register: 13 registers back in every pass, the shadows unchanged to the bit
+
+- **The patched client knows each window's frame.** For every pane declared as a rain surface it now hands ORO the distance from the pane's own frame, per pixel, from a finely subdivided copy of the pane it draws into its depth buffer. That is what lets the frost start at the frame on any vessel with nothing to tune, and it replaces a screen-space estimate that ghosted and staircased
+- **The shader checkers got stricter.** They fail on any compiler warning the client would show in an error box, and the vessel shaders are held under 3950 instruction slots: a GTX 970's driver silently refused a pass at 4080 of the declared 4096 (the hull rendered as a flat cyan silhouette), so the snow's relief and sparkle are left off the Metalness pass and the relief alone is on the PBR pass
+- **The cascade receivers are cheaper.** The terrain picks one hull box by containment instead of tapping three, a reshaped shadow tap gave back 67 instruction slots (and cured a flag the June-2010 shader compiler was mishandling after an early return), and the three vessel shader passes are unchanged to the instruction, verified by disassembly
+- **An experimental near grid, off by default.** `ShadowCascadeGrid` in D3D9Client.cfg (metres per cell, 0 = off) lays boxes of finer shadow around the camera's ground point in the shadow atlas' spare cells; inside them the contact-line staircase is gone. It stays off because their clean cells against the cascades' shading of the same rough ground make a seam that walks with the camera
+
+### KNOWN ISSUES
+
+- **A stepped contact line where a wall meets the ground at a low sun** (Cascaded (ORO) mode) is the shadow map's texel lattice: cascade 2 is 0.32 m a texel at Cascade detail 2048 and 0.16 m at 4096, and at a 10-degree sun one texel is six of those along the ground. A box per building cannot fix it (the client is handed one merged mesh per base) and the finer grid above trades it for a seam, so it stays; Cascade detail 4096 halves the steps
+- Snow **Blow-off** is still being tuned: at taxi speed and above, hard-edged white squares can appear over a hull's top surfaces while its cover blows off; they vanish when the vessel stops. Blow-off 0 removes the effect until it is settled
+- **Not ORO: the stock Atlantis's VC and exterior meshes do not line up at the windows.** The VC mesh's window holes are larger than the exterior mesh's panes, so the exterior's window-frame walls show through the holes as unlit black bars against anything bright behind them - the reentry plasma, a daylit Earth. Stock Orbiter 2024 and 2016 do the same with ORO uninstalled; the bars closer than a metre to the seat, which were ours, are fixed above. Not something the addon can fix without editing the stock mesh, so it stays
+- **Not ORO: the Space Shuttle Vessel's MEDS displays at a quarter size.** With the Launchpad's "MFD texture size: virtual cockpits" (Extra tab) at 1024, the SSV's own display pages draw in the top-left quarter of their screens while a stock Orbit MFD on the same screen fills it. The SSV draws its pages for the 512 default; set 512 for it
+
+---
+
 ## ORO beta 260913
 
 The patched D3D9Client in this build logs `[Build 260913]`. Everything below is new since

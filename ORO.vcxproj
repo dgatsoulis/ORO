@@ -21,6 +21,7 @@
     <ClCompile Include="OroLightning.cpp" />
     <ClCompile Include="OroRain.cpp" />
     <ClCompile Include="OroFog.cpp" />
+    <ClCompile Include="OroSnow.cpp" />
     <ClCompile Include="OroVapour.cpp" />
     <ClCompile Include="OroTree.cpp" />
     <ClCompile Include="OroPlume.cpp" />

@@ -151,18 +151,25 @@ Workspace used: `C:\OrbiterDev\` (deletable; everything here recreates it).
    on dev machines. Cut the edge locally (tweak 4a); D3D9Client is unaffected.
 3. **`gcCoreAPI.h` REGENERATION DROPS THE HAND-ADDED GUARDS.** The build runs the
    codegen over `gcCore.h` on every configure, so any patch touching that header wipes
-   the hand-added guards from the generated output — all TWENTY-ONE of them:
+   the hand-added guards from the generated output — all TWENTY-NINE of them:
    `CanCaptureBackBuffer`, `CanSuppressReentry`, `CanSetVCShadows`, `CanDrawDepth`,
-   `CanGetRenderCam`, `CanGetRenderObjPos`, `CanDrawTexPoly`, `CanSuppressExhaust`,
-   `CanExemptStream`, `CanSetIPISceneDepth`, `CanGetExhaustStreamSpec`,
-   `CanGetDevMeshName`, `CanReloadRainSurfaces`, `CanFlashMeshGroup`, `CanSetFogLayer`,
-   `CanSetFogLook`, `CanSetSnowCover`, `CanSetBaseLights`, `CanSetVCNightLight`,
-   `CanDeferVCHUD` (checks BOTH bound pointers) and `CanSetWaterMirror`.
+   `CanGetRenderCam`, `CanGetRenderObjPos`, `CanDrawTexPoly` (checks BOTH patch-(l)
+   pointers), `CanSuppressExhaust`, `CanExemptStream`, `CanSetIPISceneDepth`,
+   `CanGetExhaustStreamSpec`, `CanGetDevMeshName`, `CanReloadRainSurfaces`,
+   `CanFlashMeshGroup`, `CanSetFogLayer`, `CanSetFogLook`, `CanSetSnowCover`,
+   `CanSetBaseLights`, `CanSetVCNightLight`, `CanDeferVCHUD` (checks BOTH bound pointers),
+   `CanSetWaterMirror`, the SIX patch-(s) wet setters (`CanSetSurfaceWetness`,
+   `CanSetStormLight`, `CanSetWetDarkness`, `CanSetWetGlint`, `CanSetWetReflection`,
+   `CanSetWetGrain`), `CanSetRingLook` (checks BOTH patch-(aj) pointers) and
+   `CanSetSnowLook` (patch (aq)).
    Hit for real on 2026-08-04. Note the codegen writes into the
    CLONE (`out/build/.../Orbitersdk/include/gcCoreAPI.h`); the copy ORO compiles against
    is `<Orbiter>\Orbitersdk\include\gcCoreAPI.h` and is updated BY HAND, so a client
    rebuild alone is harmless - it is copying the regenerated header over that one that
-   loses the guards. Re-add all TWENTY-ONE, then verify (21 of 21) before building ORO.
+   loses the guards. Re-add all TWENTY-NINE, then verify (29 of 29 -
+   `grep -c 'bool Can' gcCoreAPI.h`) before building ORO. (This list said TWENTY-ONE
+   until 2026-09-20 while the header held twenty-eight: count the HEADER, never trust the
+   sentence - CLAUDE.md's copy of the list is the one that was kept current.)
 3b. **⚠️ THE CODEGEN ALSO MIS-WIRES MULTI-POINTER OVERLOADS, AND IT FAILS SILENTLY.**
    This one cost most of a day on 2026-08-06. The generated wrapper for
    `CreateTrianglesDepth` called `pCreateTriangles(hPoly, pt, npt, flags)` - the WRONG
@@ -1291,7 +1298,9 @@ already there. Probe by binding: `CanSetIPISceneDepth` is hand-added guard **#10
 **Part 2 - the authored glass mask.** Mesh groups whose .msh carries a `RAIN 1` line
 before their GEOM are written into the NORMAL_DEPTH pass with their distance NEGATED
 (`NewMesh.hlsl`, deployed shader #8): the SIGN of the per-pixel depth is the window
-mask, and occlusion by seats/frames/helmets is the pass's own z-buffer, free. The core's
+mask, and occlusion by seats/frames/helmets is the pass's own z-buffer, free. (⚠️ THE
+SIGN MOVED TO THE `.b` CHANNEL ON 2026-09-18 - see Part 5 below for why the sign of
+`.a` was deleting the world behind the glass.) The core's
 mesh parser skips unknown tokens (verified in source), so the CLIENT reads them itself:
 `RainGlassStoreScan` (Mesh.cpp) parses the mesh FILE at `clbkStoreMeshPersistent` - the
 one place a mesh's filename is ever spoken - into a `map<MESHHANDLE, groups>` the mesh
@@ -1328,6 +1337,112 @@ physically pressed (`GetAsyncKeyState`, so a release outside the window clears i
 `msec > 0` gives a timed variant). A flashing mesh takes the full render path for that
 second - `RenderFast` has no `eColor` hook, exactly as it has none for the Debug
 highlighting.
+
+**Part 5 - THE MASK MOVES OFF THE DEPTH CHANNEL (2026-09-18; triage 260916 item 25,
+Buck's "lightning clouds in front of buildings", reproduced by D. at KSC).** From the
+VC, ORO's storm deck and its bolts drew straight THROUGH a building the external view
+occluded correctly. The cause was part 2's own encoding: a declared pane wrote `-D`
+into `GBUF_DEPTH.a` with z-write ON in the ordinary depth pass, so at every windscreen
+pixel the buffer held the pane's value and the base structures rendered AFTER the
+cockpit (`RenderBaseDepth`, patch (z2)) failed the z-test and never wrote theirs. Patch
+(g)'s clip then had nothing to cut against - and the same for the aurora, the plasma,
+the vapour cone and the plume seen through any declared window. The comment in
+`RenderShadowMap` had called exactly this "one accepted loss ... e.g. your own nose
+seen through the windscreen": priced on 08-27, when the buffer held vessels and the
+cockpit only, and never re-priced when (z2) added buildings and (ab) added terrain.
+THE RE-ENCODING: a declared pane is see-through BY DECLARATION, so opt 1 now SKIPS it
+outright (whatever its material alpha says), and a MARKER pass makes its mark last.
+`RenderShadowMap` opt 1 records every mesh with a non-empty `rainGrp`
+(`RainGlassMaskRecord`, a 16-entry per-pass list - `RainGlassMaskBegin` at the top of
+the pass, `RainGlassMaskFlush(pVP)` called by `Scene` AFTER the terrain tiles, the (t)/
+(ai) deferral shape); the flush redraws each recorded mesh through **opt 2**: only the
+declared groups (the `UsrFlag 0x1/0x2` and alpha skips do not apply to them, as
+before), z-test ON against everything the pass drew, **z-write OFF, colour mask RGB,
+cull NONE** (the states are set and restored INSIDE opt 2, so no caller can forget
+them), and `NormalDepth_PS` returns `float4(0, 0, -D, D)`. With the mask on RGB the
+`.a` written earlier survives: **`.b < 0` is the window, -.b the pane's distance, `.a`
+the world beyond it** (a building, a hill, 0 for sky). Real geometry's `.b` is
+`sqrt(saturate(1 - x² - y²)) >= 0` in both `NormalDepth_PS` and `TileDepthPS`, which is
+what makes the sign free to take; nothing functional reads the normal channels (the
+Debug dialog's display mode 12 is the only reader). Occlusion of the mask is still the
+z-buffer's: a frame or seat nearer than the pane wrote nearer depth before, so the pane
+fails the test there. Cull NONE because a canopy shell is seen from its back face from
+the seat, and a pane marked twice is marked once - which is also why blending the sign
+in (REVSUBTRACT with ZERO/ONE would negate `.a` in place) was rejected: two overlapping
+panes, or a shell's inner and outer surface, would cancel each other.
+CONSUMERS: ORO's `PSGloom` reads `.b` for the glass (visor rule `< -0.25` unchanged)
+and `.a` for the world; its Mask Debug 2 paints TEAL where glass has something beyond
+it, the instrument that shows the fix directly. `Glare.hlsl`'s kernel and `Mesh.fx`'s
+stencil-shadow test are untouched and GAIN: the sun glare now hides behind a building
+seen through the windscreen, and a ground shadow through the glass is tested against
+the hill between. `gcCore.h`'s `SetIPISceneDepth` notes describe the channels. Files:
+`Mesh.cpp` (record/flush + the loop), `Mesh.h`, `Scene.cpp` (Begin after the clear,
+Flush after the tiles), `gcCore.h`, `shaders/NewMesh.hlsl` (deployed), and ORO's
+`orofx.hlsl` (deployed). ⚠️ `NewMesh.hlsl`, `orofx.hlsl` and the DLL are a MATCHED SET:
+a stale side on either end means no drops (the mask never arrives), never garbage.
+Client `[Build 260918]`, backup `D3D9Client.dll.pre-glassdepth-260918`.
+
+**Part 6 - THE PANE'S OWN RIM DISTANCE (2026-09-20; the code comments and CLAUDE.md call it
+"part 5", numbered before the re-encode above was counted).** His call after the snow's
+windscreen frost spent a day estimating a pane's frame from the glass mask in screen space
+("Why do we have so many overlapping 'copies' of the mask?" - 24 taps at fixed offsets
+summed the pane's silhouette 24 times; a distance band, doubled radii and a thick-frame
+rule each spared the DeltaGlider's lowered HUD support arm and made the pane's own edges
+worse): "Go with the client patch, the pane's own rim distance."
+
+THE MECHANISM. `D3D9Mesh::UpdateRainRim()` (Mesh.cpp) runs for every declared glass group
+(both constructors, the live `ReloadRainSurfaces`, and after `EditGroup` rewrites a declared
+group): positions WELDED on a 0.1 mm grid (UV seams and hard edges duplicate vertices; a seam
+would read as open on both sides), every welded edge counted, an edge one triangle uses is
+the RIM; then a SUBDIVIDED SIDE COPY of the group is built - every triangle cut into n² sub-
+triangles with n = ceil(longest edge / 0.075 m) clamped 1..16 and halved until the whole copy
+fits 60,000 vertices (16-bit indices), each sub-vertex measured to the nearest ORIGINAL open-
+edge segment and the distance written to `NMVERTEX.w` in metres (1000 = no rim: a closed
+glass bubble takes no ice, and the log says so). The copy lives in `rimVtx/rimIdx` with one
+`RimRange {vOff, nV, iOff, nF}` per rain group (indices GROUP-LOCAL), uploaded lazily by
+`RimMap()` into `pRimVB/pRimIB` (default pool - `MeshBuffer::Map`'s shape), released by
+`RimRelease()` in the destructor. `RenderShadowMap` opt 2 - the marker pass of Part 5 - binds
+the copy instead of the mesh (`SetStreamSource(pRimVB)`, `SetIndices(pRimIB)`, the same
+`SHADER_NORMAL_DEPTH` and vertex declaration, the group transform still applied, `DrawIndexed-
+Primitive(vOff, 0, nV, iOff, nF)`); opt 0/1 are untouched. `NewMesh.hlsl` (deployed):
+`NormalTexVS.tex0` is `float3`, `NormalDepth_VS` passes `vrt.tex0.xyz`, and the marker branch
+of `NormalDepth_PS` returns `float4(frg.tex0.z, 0, -D, D)` - RED = metres from the frame,
+`.b` the mask, `.a` the world beyond, exactly as Part 5 left them. Consumer: ORO's `PSGloom`
+(`orofx.hlsl`) reads `sdn.r` for the frost's boundary; its `Frost reach` is metres of glass;
+Mask Debug 3 paints red = saturate(rim), green = the ice. Log line per group:
+`D3D9: rain glass rim - <mesh> group N: V vertices in I island(s), E open edge(s), the rim
+reaches R m in; marker copy V' vertices / T triangles` (or `NO ROOM ... pane skipped` past the
+budget - never seen; the DG's front pane makes ~16k vertices).
+
+!! WHY SUBDIVIDED - THE FIRST FORM COST A FLIGHT. It wrote the distance per ORIGINAL vertex
+into the main mesh's `w` lane (the tangent handedness, unused by a pane without a normal map)
+and let the rasteriser interpolate. The DeltaGlider's front windscreen (`deltaglider_vc`
+group 77) is a strip ONE QUAD TALL: 120 vertices, 108 triangles, 7 islands, 118 open edges at
+every weld tolerance up to 5 cm (`meshrim.py`), i.e. every vertex ON the rim and the
+interpolated distance zero across the whole pane - the side windows were "fantastic", the
+front pane iced solid at any Reach. Interior vertices are the only fix, and the main mesh is
+untouched again (no tangent-lane cost for anyone).
+
+!! AND THE SECOND FORM COST ONE MORE - THE INSTANCE CONSTRUCTOR'S ORDER. A VC mesh is an
+instance copied from a template (`D3D9Mesh(MESHHANDLE, const D3D9Mesh &hTemp)`). The builder
+was called where form 1's call had sat, right after the rain list is taken - BEFORE `pBuf =
+hTemp.pBuf` and the `Grp` clone, when `Null()` had just zeroed both - so every instance built
+an EMPTY copy and the marker returned before drawing: no glass mask, no rim, no frost. (Form
+1 had got away with it: the template had already written the shared buffer, and the
+instance's early call was a harmless no-op.) His three mask shots diagnosed it in one look:
+no teal in Mask Debug 2, green everywhere in 3 (the frost formula at rim 0; the red lines
+were the normal buffer's x lanes on non-glass geometry). The call sits after the group clone
+now; templates skip the build (`bIsTemplate` - never drawn). THE RULE: anything a mesh
+computes from its buffers in the instance constructor goes after `pBuf` and `Grp` exist.
+
+MATCHED SET: `NewMesh.hlsl`, `orofx.hlsl` and the DLL. A stale `NewMesh.hlsl` beside the new
+DLL writes 0 into red, which the frost reads as "on the rim": every declared pane iced solid
+at any Reach - not garbage, but not nothing either, so deploy the pair together. Client
+`[Build 260920]`; backups `D3D9Client.dll.pre-rim-260920` (before form 1),
+`D3D9Client.dll.pre-rim2-260920` (before form 2), `NewMesh.hlsl.pre-rim-260920`, and ORO's
+`orofx.hlsl.pre-snow3c-260920`. Files: `Mesh.h`, `Mesh.cpp`, `shaders/NewMesh.hlsl`
+(deployed); ORO's `orofx.hlsl` (deployed), `OroModule.cpp` (the frost pushes and the
+`EnsureFrameTex` gate), `OroSnow.cpp` (the frost's clock), `OroDialog.cpp`, `OroState.h`.
 
 ## Patch (v): REFLECTIONS - multi-probe env maps, planar vessel mirrors, and the "Full Scene ORO (exp)" mode (2026-08-28)
 
@@ -1694,6 +1809,57 @@ horizon), `Mesh.fx` (base tiles), `PBR.fx` (main + FAST), `Vessel.fx`, `Metalnes
 - Landmines: HLSL reserves `line`; `tex2D` inside `[branch]` is X3528 (use tex2Dlod);
   the compile matrix lives in `tools/fxccheck.sh` (includes `_DEVTOOLS`, ignores X4717).
 
+### The SNOW COVER wakes up (2026-09-13/14)
+
+`SetSnowCover(cover, lineAlt, lineWidth)` shipped with (aa) and did nothing: guard #17 and
+the `gSnow` uniform were in place, no shader read them. The snow round is that plumbing
+driven, and it needed **no new API and no new guard** - the fourth lane of `gSnow`, unused,
+became the PER-OBJECT share.
+
+`OroSnowMask(nrmW, up, alt, uv, per)` is one helper in `D3D9Client.fx` and `NewPlanet.hlsl`:
+a slope gate on the surface normal against local up, a snow-line ramp on altitude, and a
+thresholded two-octave hashed lattice whose edge moves with the cover, so the cover fills in
+from the hollows rather than fading up uniformly. Consumers: TERRAIN (`NewPlanet.hlsl`,
+multiplied by `(1 - fMask)` - the water mask it already samples, so no snow at sea), BASE
+TILES (`Mesh.fx`) and ALL FIVE vessel paths (`PBR.fx` main and FAST, `Vessel.fx`,
+`Metalness.fx`).
+
+THREE LATENT DEFECTS IN THE DORMANT PLUMBING, all found by reading before the first flight:
+
+1. **The cockpit INTERIOR whitened**, because the vessel shaders do not know they are
+   drawing a cabin. `Scene.cpp`'s cockpit bracket - patch (p)'s own, and (aa)'s for the air -
+   zeroes the cover for the interior pass.
+2. **The terrain lattice rode the raw tile UV**, so it RESCALED with LOD and seamed at every
+   tile boundary. It rides `Prm.vMicroOff` now - the pools' own LOD-continuous microtexture
+   UV - at **48 whole cells per UV unit**, which is invariant 28(e)'s integer-cycle seam law
+   in its hashed form. !! The UV unit is a LEVEL-18 tile (~300 m; `imicrolvl = 14` internal =
+   file level 18), not a level-14 one, so 48 cells is a ~6 m patch and the second octave ~2 m.
+3. **A runway took the lattice on its own stretched hull UV** - patch (ai)'s A5 bug in snow
+   clothes. `OroSnowUV(tex0, camW)` lerps to base-local xz by `gBaseLocal` (16 m of apron per
+   repeat). Deliberately NOT triplanar, unlike `WetSparkle`: snow lies on up-facing surfaces,
+   so xz is the only plane that matters.
+
+!! **THE PER-OBJECT SHARE HAS EXACTLY ONE WRITER.** `OroSnowObject(w)` in `Scene.cpp` writes
+the whole vector (cover, or 0 inside the cockpit; line; 1/width; w). `vVessel::Render` calls
+it with the altitude ramp times a shed term on dynamic pressure (150 Pa .. 1.5 kPa,
+smoothstepped - snow is gone by taxi speed and cannot exist in flight); all three `vBase`
+draw brackets call it with the ramp at the base's own elevation and clear it to 0 after;
+`OroFogInterior` sets the interior flag and re-pushes. One writer, so no two sites can
+disagree about what the lane means.
+
+MEASURED: `TerrainPS` c222 / 54 literal registers against c221 / 55 before - one register up
+from packing, one literal fewer, still under 224 on the shader with no headroom. The mesh
+family is unchanged at 155/224 in Marg's configuration. `tools/fxccheck.sh` 25/25.
+
+Files: `Scene.cpp`, `VVessel.cpp`, `VBase.cpp`, `gcCore.h` (doc only - no API change), and
+six DEPLOYED shaders: `D3D9Client.fx`, `NewPlanet.hlsl`, `Mesh.fx`, `PBR.fx`, `Vessel.fx`,
+`Metalness.fx`.
+
+**Round 3 (2026-09-19/20) is Patch (aq)** at the end of this file: the hull's cover became a
+per-vessel STATE the client keeps, the share moves the lattice's threshold, one Brightness
+slider in two calibrated lanes, relief and sparkle, the slope gate opening with the cover, and
+the ps_3_0 slot cliff found on the way. The windscreen frost is Patch (h) Part 6.
+
 ## Patch (ab): TERRAIN INTO GBUF_DEPTH + the soft stencil-shadow depth test (2026-09-05)
 
 The (z3) tile registry serves a second consumer. At the NORMAL_DEPTH pass the tiles
@@ -1746,6 +1912,45 @@ gBaseGlow - 1 on vessels), `Mesh.fx` (the tile night layer), `BeaconArray.fx`.
   halo)`, sprite size x (1 + 5 haloK), haze exponent lerped to 0.30, alpha
   lerp(T, sqrt(T), sat(halo)) - a lamp in fog is an aureole that grows with the
   optical depth, not a brighter lamp.
+- **The pill off is stock at any slider value** (2026-09-17, ORO side only - `OroFog.cpp`
+  `PushBaseLights`). The client applies the glow to whatever is lit, so an addon pushing
+  a gain below 1 with the force flag off dims every runway light and base night texture in
+  the world: the ORO settings file that shipped in 260913 carried the glow at 0.41, and a
+  tester reported "burgundy" PAPI at KSC. ORO now pushes (false, 1, 1) with the pill off -
+  the same triple its disarm sends - and the user's sliders only with it on. The client
+  API is unchanged.
+
+### (ac) part 4 - three states, and "in weather" reads the numbers already pushed (2026-09-19, triage 37, ORO side only)
+
+The same tester, with the pill on: the lights were on at noon. The pill WAS the force
+(`night = (csun < csun_lights) || g_gcBaseLightsForce`) and its help had promised weather.
+`OroFog.cpp` `PushBaseLights` now takes a three-state mode (`BaseLightsMode` 0/1/2 in
+`Config\ORO.cfg`; a pre-09-19 `BaseLightsOn = TRUE` loads as 1): STOCK pushes (false, 1, 1);
+ALWAYS is the old pill; IN WEATHER pushes the force when the gloom justifies it, read off
+the two numbers ORO handed the client this frame - the storm light (`stormPushed`, the
+rain's or the falling snow's sun collapse) past 0.25, or the fog layers' pushed ground
+densities (`p_dens`, ground fog plus the storm or snow mist) giving under 5 km by
+Koschmieder - with hysteresis (off under 0.15 and over 6.5 km) and a flip, not a fade
+(the 09-01 ruling). The push order in both sensing sites (after `PushSurfaceWet` and
+`PushFog`) is what makes those numbers this frame's. The client API and the client are
+unchanged.
+
+### (ac) part 3 - the pill and the sprites' half-clip: a ruling, not a change (2026-09-18, triage 28b)
+
+Patch (z)'s runway-light depth test clips the LOWER HALF of a lamp standing on its own
+pavement: a point sprite carries ONE z for all its pixels, and the ground under its lower
+half is nearer than that z (worst at the grazing approach angles where PAPI matters). A
+pill-gated CENTRE-ONLY tap - `ZEnable` back to stock, the sprite centre carried in
+COLOR1.yzw (a point sprite overwrites every TEXCOORD) and one `SceneDepthS` sample in
+the pixel shader - was built, flown through the shader matrix, and WITHDRAWN the same
+hour on his correction: "We don't want runway lights through hills and other objects...
+Just fix the glow problem. Pill off, glow = 1. Pill on follows the sliders. As for the
+reported clipping, that is a direct consequence of the see-through-hills fix. If they
+don't like it, they can raise the lights' height by a few centimeters in their base's
+cfg file." So the (z) state stands for everyone, pill or no pill; the glow half was
+done on 09-17 (part 2 above). The only trace is a six-line comment in the technique
+block of `BeaconArray.fx` carrying the ruling; the reverted `D3D9Client.fx` diffed
+identical to the committed record.
 
 ## Patch (ad): THE CABIN AT NIGHT - the VC's fill light follows the sun (2026-09-05/06)
 
@@ -1765,6 +1970,25 @@ raises `g_oroVCNightNow` for the VC draw and drops it straight after.
 Files: `gcCore.h/.cpp` (+ the binder line), `Scene.cpp`, `VVessel.cpp`, `Mesh.cpp`.
 Known compromise: lit buttons/labels painted with the same flat emissive as the walls
 dim with the walls.
+
+**Part 2 (2026-09-17) - a material the VESSEL writes at runtime is exempt.** A tester's
+DG at night: instrument lights ON, the gimbal and hover labels lit, the MFD button labels
+unreadable. `Src\Vessel\DeltaGlider\LightSubsys.cpp:77-91` writes two materials through
+`oapiSetMaterial`: material 11 (`glowlabel`) as diffuse 0 / emissive (0.35,1,0.35) -
+a display by the black-diffuse test, spared - and material 0 (`LIT_BUTTON`, the MFD
+buttons) as diffuse 1.0 / emissive 0.6, which the test reads as a wall and dims. No
+static property separates them; what does is that the vessel is driving the material.
+So `clbkSetMeshMaterial` and `clbkSetMeshMaterialEx` (`D3D9Client.cpp`) call the new
+`D3D9Mesh::MarkMaterialRuntime(idx)` AFTER the set (the memcpy in `SetMaterial` takes
+`ModFlags` from the incoming struct, which `CreateMatExt` zeroes), which sets
+`D3D9MATEX_RUNTIME 0x10000` (`D3D9Util.h`), and `OroVCNightMat` returns such a material
+untouched. Only the two oapi entry points mark: the material manager's cfg loads and the
+debug dialog's edits do not. Consequence: with the instrument lights OFF the DG's buttons
+sit at their authored 0.15 emissive instead of 0.15 x the floor - the label plastic reads
+faintly, which is what the DG author wrote. Nothing else reads unknown `ModFlags` bits
+(`Mesh.cpp`'s PBRStatus derivation tests named bits; MaterialMgr does not read the field).
+Files: `D3D9Util.h`, `Mesh.h/.cpp`, `D3D9Client.cpp`. DLL-only; no gcCore surface, no
+guard. Client `[Build 260917]`, backup `D3D9Client.dll.pre-ad2-260917`.
 
 ## Patch (ae): CASCADED SHADOWS - one sun-shadow atlas for the whole scene (2026-09-06)
 
@@ -2087,6 +2311,52 @@ of N activated before teardown`.
 Files: `OroBaseAnim.h`, `OroBaseAnim.cpp` (new), `VBase.h`, `VBase.cpp`, `D3D9Client.cpp`,
 `CMakeLists.txt`. DLL-only: no shader, no gcCore surface, no guards. Client `[Build 260908]`.
 
+### (ag) fix - the cabins list before the lattice (2026-09-18, triage 24)
+
+Buck's report, reproduced by D. at Habana: the hangar behind the hangrail shows through
+the girder's and the portals' gaps, the cabin under the same girder does not - it vanishes
+inside every gap. `vBase::RenderStructures` draws `structure_as` in LIST ORDER with no
+sort, and the lattice texture's gaps are alpha-BLENDED with z-write ON, so whatever is
+drawn after the girder loses the z-test wherever a gap covers it. The core's buildings
+precede ORO's meshes in the list and show through; both builders pushed the rail (girder
+plus pylons or portals, one mesh, one lattice texture) BEFORE the cabins, so the cabins
+were the one thing drawn after it. Fix: the cabins are pushed first and the rail last, in
+`BuildMonorail` and `BuildHangrail` - opaque first, transparent last - and the
+all-or-nothing cleanup pops in the new order (the rail is last, so it pops first). Right
+from every side: the cabin writes its depth, the lattice blends over it where it is in
+front and fails z where it is behind. `OroBaseAnim.cpp` only; client `[Build 260918]`,
+backup `D3D9Client.dll.pre-train-260918`. Flown: "Train is now visible."
+
+**And the lattice is a cut-out in every pass** (same day, his two follow-ups: the
+track's shadow had no gap pattern, and from under the track in rain the buildings showed
+through the gaps but ORO's cloud deck did not). One cause: the rail mesh carried no
+`UsrFlag 0x20` - the client's order-independent-transparency flag, the vessel authors'
+cut-out flag - so the main pass BLENDED its gaps while the shadow-map pass
+(`ShadowMapOIT_PS` is chosen only for a mesh with that flag), the depth-normal pass
+(`NormalDepth_PS`'s bOIT branch) and the stencil sheet (`ShadowTechPS`) rasterised the
+quad as solid: a solid shadow, and `GBUF_DEPTH` saying "girder" inside every gap, which
+is where patch (g)'s clip then cut the rain deck. With the flag those passes clip texels
+under 50% alpha, and the main pass clips instead of blending - the same hard edge the
+texture already has. `MakeMesh(..., cutout)` gains the flag, true for the two rail meshes
+(girder plus pylons or portals), false for cabins and panels (opaque texels). The
+mesh-level bit follows on its own: the single-group constructor's `CheckMeshStatus` runs
+`UpdateFlags`. Backup `D3D9Client.dll.pre-cutout-260918`. Flown for the rain deck ("the
+clouds do show through the gaps during rain") - and the sun shadow stayed solid, which
+found the next thing.
+
+**A stock bug in the cut-out shadow shader** (same evening). `ShdMapOIT_PS` in
+`NewMesh.hlsl` - the variant `RenderShadowMap` uses for every mesh carrying the flag -
+and its twin `ShadowMapOIT_PS` in `Mesh.fx` answered a see-through texel with
+`return 1.0f`. The shadow maps store `1 - z/w` (1 at the near plane, 0 at the far, cleared
+to 0), and every receiver - stock `SampleShadows2`, the cascade's `OroCascTapC`, the local
+map's `OroLclShadow` - shadows where the map value EXCEEDS the pixel's depth. A stored 1.0
+is therefore a caster at the nearest possible depth: each gap in a cut-out shadowed the
+whole ground under it, and the lattice cast a solid bar. Reproducible in stock with any
+vessel part that carries a cut-out texture (`UsrFlag 0x20`). Both variants `clip(-1)` now:
+nothing is written, colour or z, so the gap is a gap and a real caster behind it (a cabin
+under the girder) still lands. Shader-only - both files are runtime-compiled and deployed,
+no DLL rebuild. A line for the jarmonik/orbitersim list beside (q), (z), (ak) and (al).
+
 ## Patch (ah): THE LIGHTS PAY FOR WHAT THEY USE - struct repack, block early-out, eviction (2026-09-08)
 
 Step 1 of the lights-and-shadows plan (`beta/reports/260906/LIGHTS_SHADOWS_INVESTIGATION.md`
@@ -2319,7 +2589,10 @@ through ctypes and prints the highest register, the literal count, the slots and
 `fxccheck.sh`'s terrain rows run through it now. This is `tools/fxeff`'s lesson (the effect files,
 2026-09-08) repeated for the standalone entry points - **the Windows-Kit fxc is not evidence about
 either.** ⚠️ It also means the terrain shader has NO register headroom in that configuration: the
-next thing added there must first take something out.
+next thing added there must first take something out. ✅ SUPERSEDED 2026-09-19: the terrain
+register round (its own section after step 5b) took that build from c222 to **c147, 76 free**,
+by packing and reordering the shader's constant structs - the compiler fact stands, the
+shortage does not.
 
 ⚠️ **THE `cast` FIELD LIES FOR A CUBE.** `ORO lcl dbg:` prints the FACE COUNT (5) in the caster
 column for a cube light, not a caster count - it is `dbgCast[k] = 5` in the cube branch. Reading it
@@ -2332,8 +2605,261 @@ Files, over step 4's: `Scene.cpp` (the aiming and cube branches, `renderCell`'s 
 `shaders/NewPlanet.hlsl` (the face pick, both DEPLOYED). No gcCore surface. Client `[Build 260909]`,
 backups `D3D9Client.dll.pre-ah5-260909`.
 
+### The terrain draw fail-safe - the ground wins over the shadow (2026-09-19, triage item 21)
+
+Buck's GT 720 lost the whole ground in the lights rig's cube cases (9 and 10), at random, while
+the hulls and the lamp post drew: his screenshot shows STARS through where the tiles should be,
+so the tiles were not drawn black, they were NOT DRAWN. The tile draw at the end of
+`SurfTile::Render` (Surfmgr2.cpp) was the one unchecked call in the chain - a refused
+`DrawIndexedPrimitive` dropped the tile with nothing in any log. A tile whose texture fails to
+load draws its parent's (Surfmgr2.cpp:129-160) and a tile with no mesh is skipped with a log
+line from `VBMESH::MapVertices`, so the "unloaded night-light tile" theory is out; what a small
+card can refuse per draw is RESIDENCY, and the ground's draw is the one that binds the 100 MB
+cascade atlas. His rule: "losing the ground tiles is unacceptable, no matter what settings the
+user has set."
+
+Four changes, no shader touched, `[Build 260919]`, backup `D3D9Client.dll.pre-tile21-260919`:
+
+1. **The draw is checked.** On a failure the tile is drawn AGAIN with every shadow map unbound:
+   `ShaderClass::UnbindTexture` (new - `SetTexture(hVar, NULL)` only forgot the texture in the
+   class, `UpdateTextures` skips NULL entries and the `pAssigned` cache would then skip the next
+   re-bind, so the device slot is emptied and the cache cleared), `bShadows` off with the Flow
+   block re-uploaded, the local maps' indices zeroed with the Lights block re-uploaded. Both
+   HRESULTs are logged. Then `s_oroShdOffUntil` opens a 20 s window in which every tile binds no
+   shadow map (the sun map, the atlas, the borrowed local slot) and the planet-level cascade
+   constants are pushed dead, so the next tiles do not each fail once first.
+2. **THE LOG DOES NOT BLOAT** (his rule): patch (al)'s collapse still allows a line a second,
+   so both new sites gate at the source - the first refusal at once, then at most one line a
+   real MINUTE carrying the count since the last line, and never more than twelve lines a
+   session per site (a thirteenth says refusals are no longer logged). Reset per session from
+   the Scene constructor (`OroTerrainDrawGuardReset`; Orbiter runs several sessions per process).
+3. **A light is handed its cell only when every cell of its map copied** (`renderCell` returns
+   the StretchRect verdict; a cube with one face missing names no cell), on BOTH atlas paths -
+   until today the index was assigned regardless, so a refused copy had every receiver compare
+   its ground against whatever that memory held. A refused copy is logged under the same gate.
+4. **The cells' home is cleared once** (`lclHomeCleared`): neither the cascade atlas' spare row
+   nor the local atlas was ever cleared (`RenderCascadeShadows` clears rows 0-2 only). TARGET
+   only, no depth-stencil pushed - the patch (q) lesson.
+
+What it does not cover: a driver that accepts the draw and drops it at the flush (Present).
+Then Buck's log shows no new line and the ground is still missing - which is itself the
+answer. Flown on the 970: nothing fires, nothing logs, the atlas clear is invisible.
+Files: `Surfmgr2.cpp`, `Scene.h/.cpp`, `D3D9Util.h/.cpp`.
+
+### Step 5b - a hemisphere flood is a cube, from spare cells (2026-09-19, flown)
+
+His stadium-flood flight (rig case 8, `fov 166 rng 120 cast 2` in the log): a 180-degree flood
+gets ONE perspective map of a 166-degree cone, because the caster fit admits every visible
+caster inside the reach by bounding sphere and a base structure's sphere drags the fit back to
+the full cone. At 30 m that is a 49 cm texel with 1024-px cells, 24 cm with 2048 - the
+staircase - and both biases scale with the texel: the normal offset lifts the receiver a metre,
+the grazing bias clears metres along the ray, so the DG's belly no longer occluded the ground
+under it (the lit band). Same family as Marg's SSV pad (item 41): the floods are hemispheres.
+
+A spot whose penumbra half-angle exceeds `ORO_LCL_WIDE_HALF` (1.05 rad, a 120-degree cone) now
+takes the five 93-degree faces around ITS OWN AXIS - face 0 = the axis, the missing face the one
+behind the light, a hemisphere's exact shape - through the point light's cube branch with
+`up = -B.D` instead of the local vertical. The receivers need nothing: they rebuild a cube's
+basis from face 0's stored axis. Gated on the Cube row (`_LCLCUBE` compiles the face decoder
+only then; an index past 99 with no decoder reads another light's map) and on `cubeDone`.
+
+**THE CUBE IS TAKEN FROM SPARE CELLS, NEVER FROM ANOTHER LIGHT'S MAP** - his SSV pad flight the
+same afternoon: the first build gave one flood a crisp cube and five floods NO shadow, and the
+cube's owner switched as the camera moved. `wideCubeOK` counts the maps the spot candidates
+would open on their own (the same join rule, one cell each) and allows the cube only when that
+count plus four fits the budget: the rig's lone flood does, the pad (seven floods and the PCR
+lights against six maps) never does and keeps exactly its 260918 assignment. Flown: case 8
+crisp with the belly dark, the pad "stopped switching". The pad itself is therefore UNCHANGED
+for Marg - the coarse 166-degree maps stay; his next idea (cap a wide flood's single map at the
+cube's face angle, soft-edged) and the terrain-shader register audit are the open discussion.
+Files: `Scene.cpp`, `SetupHelp.cpp` (the Cube row's entry), `tools/testlights.lua` (case 8 says
+which look the settings give). No shader, no gcCore surface.
+
 
 ---
+
+### Step 5c - a cube's faces share its basis (2026-09-19, flown: "No more shadow artifact")
+
+His lights-rig flight after the register round: case 9 (a point light on a mast, four
+ShuttlePBs round it at 45-degree azimuths) drew three complete shadows and one with a
+STRAIGHT CUT through it. Not the register round - the cube code dated from step 5 and this
+was the first flight that inspected each shadow.
+
+The cause was a frame mismatch inside the cube. The receivers pick a pixel's FACE in the
+cube's own basis `(X, up, Z)` - `up` the local vertical (or the flood's axis), `X` and `Z`
+derived from it - and then rebuilt each face's MAP FRAME with the single-map rule, `up =
+world y` (or `world x` when the axis is near y). The renderer built the maps the same way.
+So each face's square map and the region of directions that face serves were two squares
+about the same axis, ROTATED against each other by the angle between the world's y and the
+cube's up - 40 to 85 degrees at KSC, where the cube's up is the local vertical and the
+world's y the ecliptic pole. A rotated square does not cover the other square's corners, so
+directions near a face's 45-degree diagonals fell outside their map, the bounds test read
+them as LIT, and a caster standing on a diagonal (the rig's ring of PBs stands on exactly
+those) lost the part of its shadow past the face's edge plane.
+
+The fix, on both sides: every face's map frame is built in the cube's basis - the four
+side faces take the cube's `up`, the down face takes the cube's `X`. `SampleLocalShadow`
+(NewPlanet.hlsl) and `OroLclShadow` (Common.hlsl) declare `upv` before the cube block and
+set it per face; `renderCell` in Scene.cpp takes a `pUp` (NULL = the single-map world
+rule, unchanged) and the cube caller passes `fups[5] = { X, up, up, up, up }`. A single
+map still uses the old rule, so cases 1-7 and 11 are untouched. Cost: +24 slots on the
+mesh family's worst case (3903 of 4096), +28 on the terrain. Applies to the hemisphere
+flood's cube (step 5b) too, since it goes through the same faces.
+
+### Step 5d - the capped wide flood, the cube's complement (2026-09-19, flown: "crisp shadows, no switching")
+
+Marg's item 41 was left exactly where step 5b found it: on a crowded pad no flood can have
+its cube (five leaders plus a cube's four extra cells is nine, against six), so every flood
+kept ONE perspective map of its 166-degree cone - a 48 cm texel on the stack at 60 m with
+2048-pixel cells - and the biases scaled with it. His design call after the ceilings
+discussion, in three parts: cap such a map at the cube's face angle round the flood's OWN
+axis, soft-edge it, and let the caster fit keep narrowing inside the cap.
+
+**The cap** (Scene.cpp, the single-map path): `if (!B.pt && B.halfCone > ORO_LCL_WIDE_HALF)
+fov = 2 atan(ORO_LCL_CUBE_TAN)` - the same threshold that makes a flood a cube in step 5b, on
+the map's cone, and the same 93-degree face. The fit then runs with the capped half-cone as
+its ceiling and its floor, so a lone caster still narrows the map below the cap (his case 13
+read fov 62 on the flood whose fit held only the DG, 93 on the two a base structure widened).
+No re-aim at the casters' centroid, deliberately: a re-aim would walk the crisp disc with
+every hull that taxis past the mast, the "switching" his SSV flight rejected in step 5b's
+first build. LC39.cpp settled it anyway: the five stadium floods are aimed one degree above
+horizontal at the pad centre, so the author's axis puts the stack top (24 degrees up at 60 m)
+and the ground under it (26 degrees down) inside the 46-degree cap; only the ground within
+about 28 m of a mast's own foot falls outside.
+
+**The flag rides a lane that already existed.** `LOCALSHADOWPARAM` gains `capped`, and
+`GetLocalShadowConstants` pushes the map's RANGE NEGATED for a capped map. Both receivers
+(`OroLclShadow` in Common.hlsl, `SampleLocalShadow` in NewPlanet.hlsl) take `abs()` for the
+far plane and the sign as the flag - no new register, no change to the index space in
+`diffuse.a` (Mesh.cpp's light sort and Surfmgr2's per-tile packing still see 1..6 and
+100..105), and the record's own `range` stays positive for the CPU's range filters
+(Surfmgr2's tile registration reads it). A cube's faces abut and are never capped, so the
+sign is positive there and the edge folds to nothing.
+
+**The soft edge** is applied ONLY to a capped map, and that is not a nicety: an ordinary
+fitted map's edge sits `1.08 x + 0.02 rad` past the casters' silhouettes, so a fade over
+its outer tenth would eat the shadows of every wingtip. `edge = lerp(1, saturate((1 -
+max(|x|, |y|)) * 10), capped)` after the bounds test, multiplied into the PCF result: full
+inside |xy| < 0.9, lit at the map's edge. Measured with the client's own compiler: Metalness
+3907 -> 3944 slots in his row (152 under the cap), the Earth terrain 3739 -> 3771, registers
+unchanged on both sides (PBR c-max 174, TerrainPS c167), `tools/fxccheck.sh` 27/27.
+
+**Flown.** Rig case 13 (new: three hemisphere floods on the port side, all aimed at the DG -
+seven cells wanted against any budget, so all three cap; the log's tell is `spot-CAP`, the
+fov number is the fit's): "crisp ... everything was working as intended". Case 8 unchanged
+(`CUBE-spot`, five of six cells). The SSV pad at night: five candidates, five `spot-CAP` maps
+at fov 90-93, one cell spare, zero errors - "the behaviour is the same as before ... crisp
+shadows, no switching as the camera rotated". Marg's review after the release is the judge
+of the texel. Files: `Scene.h/.cpp`, `SetupHelp.cpp` (the Spot row's entry), `Common.hlsl` +
+`NewPlanet.hlsl` (deployed - a matched pair with the DLL: an old receiver beside the new DLL
+reads a capped map's negated range as a far plane behind the light and shadows nothing from
+it, never garbage), `tools/testlights.lua` (case 13). No gcCore surface, no new guard; the
+stamp stays `[Build 260919]`; backups `*.pre-cap-260919`.
+
+### The terrain register round - 75 registers back, and the alignment trap (2026-09-19, flown: "All tests seem to work ok")
+
+His ask after the flood cube: *"We are at 222/224 on the terrain shader... we need to
+really check the 222 number and see if we have any doubles or if we can find anything that
+we haven't optimized."* The audit (`tools/d3dxps.py -members`, new: it walks the constant
+table and prints per struct member the registers allocated, the registers the compiled
+code reads, and the packed byte offset the upload walks) found 169 uniform registers
+allocated against 118 read, no uniform declared twice, and four D3DX rules doing the
+damage. **Every number below is for his exact cache key, decoded from the shader cache's
+CRC16: `_WATER _RIPPLES _CLOUDSHD _NIGHTLIGHTS _LOCALLIGHTS _SHDMAP _DEVTOOLS _LCL6
+_LCLCUBE`.**
+
+**The four D3DX rules** (d3dx9_43.dll, the client's compiler - the Windows-Kit fxc is not
+evidence about any of this):
+1. A referenced struct is allocated from its first member to the LAST member the code
+   references, and every SCALAR member gets its own register - no packing inside a
+   struct. `Const` (Scatter.hlsl's `AtmoParams`) cost 61 registers for 32 read: its forty
+   scalars were forty registers. `Prm` cost 25 for 12.
+2. A bool used as a VALUE gives the whole bool struct a second copy in FLOAT registers.
+   `Flow` had 13 bools in b0-b12 AND 12 float registers, of which three were read: the
+   flattened `if (Flow.bCloudShd)` blocks, and two EARLY RETURNS (`if (!Flow.bLocals)
+   return;` in LocalLights, `if (Flow.bEclipse) {...return...}` in GetEclipse) - a
+   `[branch]` on a bool inside a function that then returns early is still compiled as a
+   predicated select reading the bool as a float. Both had to become single-exit.
+3. A bool ARRAY (`Spotlight[4]`) lands in float registers, one per bool.
+4. The literal table (54 registers, 216 lanes holding 133 distinct values) is the
+   compiler's own packing and cannot be steered from HLSL. Not a lever.
+
+**Part 1 - shader only, c222 -> c178** (`tools/../scratch packconst.py + packflow.py`,
+applied mechanically with counted replacements; both deployed shaders redeployed, no DLL):
+- `AtmoParams`' forty scalars packed four to a `float4` (ten groups), with a `#define`
+  per old name so every `Const.PlanetRad` in the sources reads unchanged - except `dCS`,
+  which CloudPS has as a local and which nothing reads through `Const`. Byte-identical to
+  the C++ `ConstParams`, so no DLL change. 29 registers.
+- `PerObjectParams`' five trailing scalars packed into `vEcl4` + `vABT` (macros again).
+  3 registers.
+- `Flow`'s float copy: the three `bCloudShd` blocks are `[branch]` with the cloud reads
+  as `tex2Dgrad` on gradients taken OUTSIDE the branch (their mipmaps unchanged); `GetEclipse`
+  is single-exit with `tex1Dlod` (the table has one mip); `LocalLights` is gated at its
+  CALL SITE. 12 registers.
+- Scatter.hlsl thereby became the THIRTEENTH deployed shader (an `#include` of
+  NewPlanet.hlsl, byte-stock until now - the fourth file to join the list by being
+  included). `upstream/stock/Scatter.hlsl` banked; its own `SunColor` entry point (the
+  atmosphere lookup tables, compiled standalone by VPlanetAtmo.cpp) joined `fxccheck.sh`
+  as two rows (`dxrunf`, 27 rows now).
+
+**Part 2 - the DLL levers, c178 -> c147** (`packdll.py`; both mirrored structs keep
+their byte size, every writer writes by member name, the atmosphere tables' own upload
+is the layout-aware `SetValue` too):
+- `AtmoParams` / `ConstParams` REORDERED identically: the members the terrain pixel
+  shader reads first (eight vectors, HG/iH/rmI/cAmbient, five packed groups), everything it
+  never reads LAST (six vectors, rmO, five groups, and `mVP` - the vertex shader's) - so
+  rule 1's allocation stops at 17 registers, all 17 read. Every planet shader reads the
+  same struct through the macros; the whole matrix passed.
+- `PerObjectParams` / `ShaderParams`: `mWorld` and `mLVP`, which only the vertex shader
+  reads, moved to the END. 25 -> 14.
+- `_Light` / `LightF`: four `float4` per light, the `.w` lanes carrying `cos(phi)`
+  (position), theta (direction), the shadow-map index (diffuse) and the spot flag
+  (attenuation) - the mesh family's patch (ah) repack, for the terrain. `param[]` and the
+  `Spotlight` bool array are gone; Surfmgr2's fill, the `Spotlight` handle and its lookup
+  with them. 24 -> 16.
+
+**The alignment trap, and it cost a flight: "Terrain is completely gone."** Stars through
+the ground, buildings and the DG intact: the terrain VERTEX shader was projecting garbage.
+The upload was right (`SetValue` returned S_OK) and the shaders were right (the VS's
+instruction stream, register numbers masked, was identical before and after). The C++
+struct was not what I had computed: **`FMATRIX4` carries a 16-byte alignment of its own,
+and `#pragma pack(4)` lowers only natural alignment, never a type's declared one.** With
+the two matrices at the FRONT of `ShaderParams` that cost nothing; moved to the END, after
+a member ending at 220, the compiler placed them at 224 and 288 while D3DX's member walk
+- which sums the members' packed sizes - read them from 220 and 284. Every matrix arrived
+one float early. `ConstParams`' `mVP` survived only because its members happen to sum to
+368, a multiple of 16.
+
+Found by a 32-bit layout probe compiled from the client's own struct block (now
+`tools/structlayout.py`), read against the packed walk (`tools/d3dxps.py -members`
+prints it; `tools/d3dxsetvalue.py` uploads an indexed buffer through the real `SetValue`
+on a null device and prints which source floats each register received). The fix: one
+padding float before the matrices on BOTH sides (`fPad0` in `ShaderParams`, `vABT`
+becomes a `float4` in the shader - no register cost), and `static_assert`s in VPlanet.h on
+both structs' sizes and on the matrices' offsets, so a hole before a matrix fails the
+BUILD instead of the terrain. ⚠️ **A mirrored struct is a claim about TWO layouts; the
+shader's was checked on paper and the C++ one not at all. Run `structlayout.py` after
+touching either.**
+
+**Measured, his exact option string** (d3dxps): Earth+DEVTOOLS c222 -> c178 -> **c147**
+(148 in use, **76 free**); Earth c211 -> c136; Mars c219 -> c153; Moon c173 -> c114.
+Instruction slots moved by 19 (part 1) and 0 (part 2); the mesh family untouched
+(195/224, 3903/4096 in the 16-light worst case - the register room is the TERRAIN's, not
+the vessel shaders'). `Const` 17/17 read, `Prm` 14, `Lights` 16/16, `Flow` bools only.
+fxccheck 27/27 at every step. Output bit-identical by construction: the packing moves
+registers, the branches compute one side of what the selects computed both sides of.
+
+Flown: Earth (KSC day and night, clouds, water, the lights rig), the Edwards eclipse,
+Moon, Mars, Saturn - "All tests seem to work ok." Backups: `NewPlanet.hlsl` /
+`Scatter.hlsl` `.pre-regpack-260919` (before part 1) and `.pre-regpack2-260919` (before
+part 2), `D3D9Client.dll.pre-regpack2-260919` (the cube-fix build); the padded build is
+the live one. Client `[Build 260919]`.
+
+**What is still on the shelf** (all DLL + shader pairs, ~10 more registers): the mesh
+family's `Lights` .w lanes are already used; the terrain's remaining unread `Prm` members
+(`vMSc`, half of `vOverlayCtrl`) could move last for 5; nothing else worth its risk. And a
+reminder the audit made concrete: the terrain shader also sits at **16 of 16 samplers**
+with the mesh debugger on - registers were one of three ceilings.
 
 ## Patch (ai): THE RAIN REACHES THE PAVEMENT AND THE SEA, AND THE HUD STAYS READABLE (2026-09-10/11)
 
@@ -2353,7 +2879,7 @@ Four ORO asks in one client round, all of them wet-weather and all of them flown
   CONSTANTS THE SHADER ALREADY CARRIED - `saturate(pow(saturate(dot(nvrW, vPlN)), 780.0f) * 1.6f)`
   - because the first attempt used `smoothstep(0.9945, 0.9994, ...)` and cost two new literals in
   a shader measuring **c223 of 224**. `tools/fxccheck.sh` refused it (X4507) before it reached his
-  sim. TerrainPS is still at c223/224, 55 literals.
+  sim. TerrainPS is still at c223/224, 55 literals. (c147 since the 2026-09-19 register round.)
 - **A7 - THE VC HUD IS DRAWN LAST.** ⚠️ **MASKING CANNOT WORK HERE AND THAT WAS ROUND 1.**
   Keeping the drop layer off glyph pixels does nothing, because a drop BESIDE a glyph still lenses
   that glyph's pixels into itself - the HUD was unreadable unless Drops lens went to 0. The fix is
@@ -2458,7 +2984,8 @@ time a file has joined the deployed set by being *included* rather than named.
 
 ### !! The constraint that did not apply, and measuring it decided the round
 
-The terrain shader sits at c223/224 constants and 16/16 samplers. The rings are nowhere near
+The terrain shader sat at c223/224 constants (c147 since the 2026-09-19 register round) and
+16/16 samplers. The rings are nowhere near
 it: `RingTech2/P0` is **5 of 224** and `PlanetTech/P0` **7 of 224**. Saturn is not even a
 terrain body - `Saturn.cfg` has no `TileFormat` key, so `tmgr_version = 1`, the legacy
 `SurfaceManager`, and its globe is drawn by `PlanetTechPS` in `Planet.fx`, **not** by
@@ -2595,6 +3122,40 @@ Files: `shaders/Mesh.fx`, `shaders/D3D9Client.fx` (deployed), `Scene.h/.cpp`,
 `gcCore.h` (doc). Backups `D3D9Client.dll.pre-aj2-260912`, `.pre-aj3-260912`.
 
 
+### !! Planetshine was scaling with the OBSERVER's distance (fixed 2026-09-15)
+
+Reported by Stebb on the forum thread: the shady side of Saturn's rings goes **bright white**
+at about 3 Gm with the Backlit glow slider down at 0.02, the brightening first noticeable
+around 150,000 km and growing from there.
+
+`D3D9Effect.cpp:717` packs the uniform as `(rad, radlimit, len, len-rad)` - and `len` is the
+**camera's distance from the planet centre**, which its neighbours `rl = rad/len` and
+`alt = len-rad` confirm. So `gRadius[2]` is a camera distance, not a radius. The unlit face's
+planetshine term read it as one:
+
+```hlsl
+float Ps = 0.05 * gRadius[2] * gRadius[2] / max(dpp, 1.0);   // meant: (R_planet / r)^2
+```
+
+Planetshine - a fact about where the ring sits relative to its planet - was therefore scaling
+with the SQUARE OF HOW FAR AWAY THE OBSERVER WAS STANDING. !! The three
+`gCameraPos*gRadius[2]` lines above it build a camera POSITION, which is exactly what made
+the lane read like a radius.
+
+His four observations pin it with nothing left over: it passes 1 at about 150,000 km, where
+`Ps = 0.093` overtakes the multiple-scattering term `Td = 0.054` - **his own onset distance
+falls out of the arithmetic**; it grows quadratically; `gRingPrm.w` multiplies it, so the
+slider helps; and distance squared outruns any fixed gain, so more distance beats the slider
+again. At 3 Gm it is 45 against the 0.018 the planet radius gives, about 2500x, and
+`0.02 x 45` is the ring's own colour - white.
+
+One token, `gRadius[2]` -> `gRadius[0]`, and `(R/r)^2` is then what the comment above it
+always said it was, correctly stronger nearer the planet. SWEPT rather than patched where the
+report pointed: every `gRadius[2]`/`gRadius[3]` use in all four deployed shaders was read -
+the other three are camera positions and are right.
+
+`Mesh.fx` is runtime-compiled, so this needs **no client rebuild**: edit, copy, restart.
+`RingTechORO/P0` measures 26/224 constants and 1318/4096 slots, fxccheck 25/25.
 ## Patch (ak): `PostProcess` CLAMPED TO 0..1 - the dead lens-flare mode retired (2026-09-12)
 
 ONE LINE, in `D3D9Config.cpp`'s config read. It is in the (j)/(q)/(z) family: a stock
@@ -2692,3 +3253,602 @@ number as the client without it. `D3D9Client.cpp` was force-touched and rebuilt;
 client now reads `[Build 260913]`, and the tester README's verify line follows it.
 
 Files: `Log.cpp`. No shader, no header, no gcCore surface, no new guard.
+
+## Patch (am): THE ADVANCED SETUP DIALOG EXPLAINS ITSELF (2026-09-15/16)
+
+The Launchpad's Video -> Advanced dialog ("D3D9Client Advanced Setup") had no help of any
+kind: no button, no tooltips, no context help. jarmonik's 2016 manual (`doc/D3D9Client.html`
+in the source tree) carries a whole Advanced Setup chapter, but nothing installs it - no
+CMake rule, nothing in `Doc\` - and the core's own Video-tab Help topic ends with "refer to
+the graphics client documentation", which the user does not have. The chapter is also a
+2016 document: twelve "...to be documented..." stubs, controls that no longer exist, and
+none of the Shadows box, the light-shadow rows, sun glare, the shader cache or any ORO row.
+
+### What it does
+
+Three ways in, one table:
+
+- **`WS_EX_CONTEXTHELP` on `IDD_D3D9SETUP`** gives the dialog the title-bar "?" button and
+  F1 for free: both arrive as `WM_HELP` with a `HELPINFO` naming the control clicked or
+  focused. The setup wrapper (`SetupDlgProcWrp`) forwards it - it forwarded only init,
+  command and scroll before.
+- **A popup** beside the control: its label in bold, then two or three sentences - what it
+  does, what it costs (frames, memory or nothing), the default or what greys it. Labels
+  share the dialog-wide `IDC_STATIC`, so a label is matched to its control by ROW GEOMETRY:
+  the nearest mapped control on the same row and to the right, else the nearest mapped
+  control BELOW it (every label that is not on its control's row sits above it in this
+  dialog - "Lower/Higher", "Sharp/Smooth", "Point light shadows"); controls above a label
+  are never its target. A group-box caption gives the group's note; the dialog background
+  gives a general note. The read-outs beside sliders alias to their slider.
+- **A Help button** (`IDC_SETUPHELP`, 4079 - max+1 FILE-WIDE, the `IDC_PRTLIGHT` /
+  `IDC_TILECOUNT` collision rule) in the bottom row, opening a modeless, resizable window
+  owned by the dialog: a read-only rich edit (`riched20.dll`, loaded here as the Credits
+  dialog loads it) fed an RTF document with every entry - a heading per group box with its
+  note, then each control's title in bold and its text. THE DOCUMENT IS BUILT BY WALKING THE
+  LIVE DIALOG when the button is pressed: each group box's rectangle claims the controls
+  inside it, groups run column-major (left, middle, right), controls top to bottom, and
+  whatever sits outside every group box (the right-hand checkboxes, the buttons) closes the
+  document under "Other settings". So it is not a second table; it reorders itself when the
+  dialog does. Size and position are remembered for the Launchpad's lifetime; pressing Help
+  again raises the open window.
+
+The table lives in **`SetupHelp.cpp`** (new, with `SetupHelp.h`): 61 entries, 3 aliases,
+11 group notes, ASCII only (the dialog font and the compiler's code page are). Fonts are
+Segoe UI derived from the dialog font's pixel height - 1.45x body, 1.55x bold titles, 1.75x
+group headings - so they follow the dialog's DPI; the first cut used the dialog's own
+MS Sans Serif 8 pt and was "hardly readable".
+
+### The landmine: nothing may be created INSIDE the WM_HELP call
+
+The first build showed nothing: "?" then a click did nothing, F1 "blinked". Both were one
+mistake - the popup was created inside the `WM_HELP` handler and took the mouse CAPTURE.
+In "?" mode `WM_HELP` is delivered from INSIDE the system's own help-mode loop, which still
+holds the capture and releases it on the way out; that release landed on the popup as
+`WM_CAPTURECHANGED`, which was wired to close it, so it died in the instant it was born (and
+that is why the "?" left the cursor at that moment). The rules, now in the file's header:
+
+1. The `WM_HELP` handler only RECORDS the `HELPINFO` and posts `WM_ORO_SETUPHELP`
+   (`WM_APP + 0xA5`) to the dialog; the popup is created when that message is processed,
+   after the help mode and the key handling have unwound.
+2. The popup NEVER takes the mouse capture. It takes keyboard focus (any key closes it) and
+   closes on `WM_KILLFOCUS` or `WA_INACTIVE` - a click on the dialog activates the dialog,
+   which is the dismissal - with a 120 ms timer on the PHYSICAL mouse buttons as a backstop,
+   armed only after every button has been seen UP once so the click that opened it cannot
+   close it. A held F1's autorepeat (`lParam` bit 30) is ignored.
+
+Every open and close writes ONE line to `Orbiter.log` naming the reason (`ORO setup help -
+popup shown for '...'`, `popup closed (focus left the popup)`), so a popup that vanishes on
+a machine we cannot see diagnoses itself.
+
+### The checker
+
+`tools/setuphelpcheck.py` (ORO repo) reads the `IDD_D3D9SETUP` block out of `D3D9Client.rc`
+and FAILS on any control or group box without an entry, any entry naming a control the
+dialog no longer has, a duplicate, or a non-ASCII byte. Proven on a copy with three planted
+defects before it was trusted. Run it after any edit to the dialog or the table.
+
+### Two things found while writing the entries
+
+The micro-texture "Mipmap Bias" slider is a STOCK dead control: `MicroBias` is read from and
+written to the cfg and consumed by nothing in the renderer (checked in stock `HEAD` too).
+Its entry says so. And "Max tiles allocated" only LOOKED dead - its consumer is in
+`Tilemgr2_imp.hpp`, which a `*.cpp *.h` grep skips.
+
+Files: `SetupHelp.cpp` + `SetupHelp.h` (new), `VideoTab.cpp`, `D3D9Client.rc`,
+`resource.h`, `CMakeLists.txt`. No shader, no gcCore surface, no new guard. Client
+`[Build 260916]`; backups `D3D9Client.dll.pre-am-260915`, `.pre-am2-260916`,
+`.pre-am3-260916`.
+
+## Patch (an): THE GROUND OBSERVER'S NEAR PLANE (2026-09-19)
+
+A stock defect, the (q)/(z)/(ak)/(al) family - reproducible with no addon: a ground-observer
+camera on the Moon (Brighton Beach, the rise behind the base) shows stars through the terrain
+at the bottom of the frame.
+
+`Scene::ComputeNearClipPlane` estimates the distance to the ground from `h = r - R` where
+`R = planet radius + the TARGET vessel's surface elevation` - the ground under a vessel that may
+be a kilometre away. A camera standing on HIGHER ground than its target gets a near plane past
+its own ground. `Camera.elev`, the camera's height over ITS OWN ground, is computed two hundred
+lines earlier in `UpdateCameraFromOrbiter`, which runs before this function on every pass, and
+was never read here.
+
+The fix is one guarded line after `h` is computed:
+
+```
+if (Camera.vProxy && Camera.vProxy->Type() == OBJTP_PLANET)
+    h = min(h, Camera.elev);
+```
+
+The guard mirrors the one that computes `Camera.elev` (with a non-planet proxy that field holds
+the altitude minus a RADIUS). `min()` returns the stock number wherever the two grounds agree
+or the camera stands lower, so flat ground is unchanged by construction. Not touched: a camera
+BELOW its target's ground (`h < 0`) keeps stock's no-constraint answer (`zsurf = 1000`) - the
+other branch of the same family; if a valley camera looking up at a vessel over a ridge ever
+clips its own ground, that is the line to add.
+
+Files: `Scene.cpp`. DLL-only. Backup `D3D9Client.dll.pre-nearplane-260919`.
+
+## Patch (ao): THE CEILINGS ROUND (2026-09-19)
+
+The register round (patch (ah)'s 2026-09-19 addition) closed one of the terrain shader's three
+ceilings. This round is the other two, plus the mesh family's registers, in one pass, priced
+in `beta/reports/260919/CEILINGS.md` (the audit and, section 5, the as-built record). Three
+parts, each judged by its own flight check.
+
+### Part 1: eight local lights per terrain tile
+
+`Surfmgr2.cpp`'s `LightF` and `NewPlanet.hlsl`'s `_Light` mirror by BYTE LAYOUT; both carry the
+count (`ORO_TILE_LIGHTS` / `TILE_LIGHTS` = 8) and both must change together. The tile's
+selection (`min(nMeshLights, ORO_TILE_LIGHTS)`), its zero-fill and the fail-safe's index reset
+follow the constant. `LocalLights` is TWO BLOCKS OF FOUR: the float4 vector arithmetic is per
+block, every index a constant after both loops unroll, the second block behind
+`[branch] if (b == 0 || any(Lights.diffuse[b * 4].rgb > 0))` - Surfmgr2 sorts by illuminance
+and zero-fills, so a black first light means the block is empty, and an all-zero block
+contributes exactly zero, so the branch changes no pixel.
+
+Measured (Earth + `_DEVTOOLS`): c147 -> c163, slots 2797 -> 3647. The slot rise is the second
+block's own inlined copy of the shadow taps (cube decoder included), as in the mesh family;
+both blocks test shadows, so the terrain shadows the same eight lights the hulls do. If the
+slots are ever wanted back, shadowing the first block only is one `if (b == 0)`.
+
+### Part 2a: the three land tables as one texture
+
+`tLndRay`, `tLndMie` and `tLndAtn` were three (Wc*Nc) x Wc fp16 render targets, each written by
+its own image-processing pass and read through `smaple3D`. `UpdateScatter` now ends by
+ASSEMBLING `pLandStack` ((Wc*Nc) x 3(Wc+2)): for each table three `StretchRect` copies - the
+table into rows `y0+1..y0+Wc` of its band, its first row again at `y0`, its last row again at
+`y0+Wc+1`. The three passes and their targets are untouched, so the table values are
+bit-identical; the padded rows make a bilinear tap at a band's edge blend a row with its own
+copy, which is what CLAMP returned on the separate texture. The IP pass has restored the
+device's render target by then, so no source is bound as one.
+
+`smaple3D(tSamp, uv, rc, pix, band)` remaps `uv.y = (band*(pix+2) + 1 + uv.y*pix) / (3*(pix+2))`
+(uv arrives saturated from `TransformUV`; x is untouched - the Nc z-slices still sit side by
+side). `GetLandView` reads bands 0, 1, 2 of `tLndStk`; Surfmgr2 and Cloudmgr2 bind
+`GetScatterTable(LAND_STACK)`. The cloud shader binds one texture where it bound two; it never
+referenced Mie (its compiled sampler list proves it) and still does not.
+
+The writer route - re-aiming the three passes at bands through a viewport override in
+`ImageProcessing` and a row-index recovery in the three entry points - was priced and not
+taken: the copies are exact by construction.
+
+### Part 2b: the eclipse in arithmetic
+
+`vPlanet::SetupEclipse` filled a 512 x 1 R32F DYNAMIC texture with `OcclusionFactor(x, sun,
+planet)` through `LockRect`, per planet, every frame, and the terrain sampled it with
+`tex1Dlod`. `NewPlanet.hlsl` carries `OccFactor` now - D3D9Util.cpp's function ported line for
+line (Heron's area, two `asin`, the reverse case) - and `GetEclipse` evaluates it from the two
+radii. The sun's radius rides the register round's padding lane: `ShaderParams::fEclipseSun`
+(was `fPad0`; the same offset, still the padding the matrices behind it need, the static asserts
+unchanged) = `PerObjectParams::vABT.w` (`#define fEclipseSun vABT.w`); the caster's radius is
+`1/fEclipse - fEclipseSun`. `ptEclipse`, its creation and release, `GetEclipse()` and the mesh
+debugger's display-buffer 14 strip are gone. Not bit-identical: the table was a 512-step linear
+interpolation indexed half a step off its samples; the shader evaluates the function.
+
+### Part 2c: the local-light maps' own terrain sampler
+
+Patch (z3) gave the terrain's local-light shadow maps NO sampler: the Earth build with the mesh
+debugger sat at ps_3_0's sixteen, so in TerrainShadowing modes 0-2 a beam-lit tile BORROWED
+`tShadowMap`, rebound it to the local texture and forced its `bShadows` off, and the whole
+borrow stood down with the sun up (`lsTerrainOK`, the 2026-09-05 day split). Parts 2a and 2b
+freed three slots; `tLclShadow` is one of them.
+
+`SampleLocalShadow`'s four taps read `tLclShadow`. `PlanetShader` resolves the handle;
+Surfmgr2's per-planet setup binds whatever texture `GetLocalShadowConstants(..., false)` hands
+it - the cascade atlas' spare row in mode 3, the local atlas or the scratch in modes 0-2 - ONCE
+per planet render, POINT filtered (the 2x2 PCF taps texel centres), and remembers it in
+`s_oroLclTex`; a tile's `lclOK` is `viaAtlas || (TerrainShadowing != 3 && s_oroLclTex)`, never
+inside the fail-safe window, which unbinds this sampler with the sun's. The per-tile borrow
+block, `lsTerrainOK`, `LocalShadowTerrainOK()` and the sun-elevation test in
+`RenderLocalLightShadowMap` are deleted. Found while deleting: the borrow set
+`fc->bShadows = false` AFTER the Flow upload, so the borrowed tile's shader still had shadows
+on and sampled the local texture with the sun's projection - the daylight "tile bites" the
+gate existed to hide.
+
+### Part 3: the mesh family's dither kernel packed
+
+`uniform extern float3 kernel[KERNEL_SIZE]` cost one register per tap (D3DX's array rule) - 27
+of the mesh effect's 224, with every live entry's `.z` weight equal to 1.0 (the weighted table
+in `D3D9Effect.cpp` is commented out). It is `float4 kernel[(KERNEL_SIZE + 1) / 2]` now, two xy
+offsets per register; `Common.hlsl`'s `KTAP(i)` picks `.xy` or `.zw` by the unrolled index -
+by INTEGER DIVISION, because the legacy D3DX target refuses `&` and `>>` (X3535) even on
+constants - and the loops add the literal 1.0. `D3D9Effect.cpp` packs the same 27-entry table.
+`KERNEL_SIZE` is 27 always: the 35-tap filters (ShadowMapFilter 3 and 4) had no table, so the
+shader looped over 27 offsets and eight zeros, and the Launchpad never offered them;
+`D3D9Config.cpp` clamps the key to 0-2 (a hand-set 3 or 4 was written back as -1 on the next
+OK, the (ak) family).
+
+Measured on his row (16x Full, filter 2, glass, debugger, env maps, glow, irradiance, cascade,
+six maps, cube): PBR 187 -> 174 uniform registers, highest c214 -> c201; Advanced 170 -> 157;
+FAST 160 -> 147; Metalness 175 -> 162; slots unchanged (3843 -> 3840, 3913 -> 3907). Shadows
+bit-identical.
+
+### Two corrections to the numbers on record
+
+`tools/fxeff`'s c-max column counts UNIFORM registers only; the literal `def` table sits on top
+of them in the same 224, so "195/224" was really c222 (one free) and his row c214. Read the
+highest register from an `-asm` dump (`scratchpad/regaudit.py` does it per pass), not the
+column. And his live configuration is the matrix's worst row - `LightConfiguration 8`,
+`ShadowMapFilter 2`, `EnableGlass 1`, `EnableMeshDbg 1`, `EnvMapMode 2`, `Irradiance 1`,
+`TerrainShadowing 3`, `LocalLightShadowMaps 6`, `LocalLightShadowPoint 2` - not the "HIS 4x
+Full" row `fxccheck.sh` still names.
+
+### Sampler counts after the round
+
+Earth + `_DEVTOOLS` 16 -> 14, Earth 14 -> 12, Mars 15 -> 13, Moon 7 (the eclipse traded for the
+local sampler), CloudPS 7 -> 5. Earth micro textures still do not fit with the debugger on
+(14 + 3 = 17); stacking tSun + tAmbient the same way (CEILINGS.md option B) would make them.
+
+Files: `Surfmgr2.cpp`, `Scene.h/.cpp`, `VPlanet.h/.cpp`, `VPlanetAtmo.cpp`, `Cloudmgr2.cpp`,
+`D3D9Effect.cpp`, `D3D9Config.cpp`, and the deployed `NewPlanet.hlsl`, `Scatter.hlsl`,
+`D3D9Client.fx`, `Common.hlsl` - a MATCHED SET with the DLL (a stale Scatter.hlsl beside the new
+DLL reads the land tables from three samplers that are no longer bound). No gcCore surface, no
+new guard. Client `[Build 260919]`; backups `D3D9Client.dll.pre-ceilings-260919` and the four
+shaders' `.pre-ceilings-260919`. Flown: "everything checks out."
+
+## Patch (ap): THE DEPTH PASS MIRRORS THE MAIN SCENE (2026-09-19)
+
+A stock defect of the (q)/(z)/(ak)/(al) family, reproducible with no addon: stock's own sun
+glare is occluded by it. Triage 260916 item 22, Buck's "dark posts" on the Atlantis VC plasma,
+run down by his own investigation (the VC's windows are HOLES; VC shadows on/off changed
+nothing; the mesh debugger's pick found nothing) and by reading.
+
+**The mechanism.** `Scene::RenderMainScene`'s depth-normal pass (the buffer behind SSAO, both
+glare kernels, patch (g)'s per-pixel clip and every ORO effect that uses it) ran every mesh at
+`SetCameraFrustumLimits(0.1f, 1e6f)`. The main scene draws the same meshes from a cockpit at
+`znear_for_vessels` - `ComputeNearClipPlane()`, which floors at 1 m in a cockpit view with
+`NearClipPlaneMode 0` (the default) and 0.1 m with mode 1 - and the cockpit itself after a
+z-clear at `Config->VCNearPlane`. So exterior geometry between 0.1 and 1 m of the eye was in
+the buffer and never on screen. The stock Atlantis flags its exterior orbiter mesh
+`MESHVIS_VC|MESHVIS_EXTPASS` (the wings and the bay through the aft windows); its six forward
+panes are one glass group at alpha 0.6 (skipped by patch (f) part 2, so the panes wrote no
+depth) and the frame posts between the panes are part of the fuselage group; the VC mesh's
+window holes are LARGER than the exterior's panes, so a post sits inside a hole, under a metre
+from the commander's eye. The plasma sheath, the sun glare, the rain deck and its bolts were
+cut along posts nobody could see.
+
+**The fix (Scene.cpp, the depth pass):** vessels, base structures and terrain tiles at
+`znear_for_vessels` (the mesh debugger's camera-mode override mirrored, as in the main scene);
+then `Clear(ZBUFFER)`, `SetCameraFrustumLimits(VCNearPlane clamped 0.01..1, 2 x the focus
+vessel's size)` and `vFocus->Render(pDevice, true)` LAST, so the cockpit wins wherever it has
+geometry and a hole keeps the world's depth from the draws before it; the (h) glass-marker flush
+stays last of all, on the cockpit's projection (the panes and their occluders are cockpit
+geometry); the pass leaves `(0.1, 1e6)` behind exactly as before, so nothing after it moves.
+Base structures and tiles moved AHEAD of the cockpit render because of the z-clear. Nothing
+changes in an external view (the cockpit branch does not run). DLL-only, no shader, no gcCore
+surface, no guard; stamp `[Build 260919]`; backup `D3D9Client.dll.pre-item22-260919`.
+
+**Flown:** the bands within a metre of the seat are gone. THE FAR BANDS REMAIN, AND THEY ARE
+STOCK: the exterior's window-well walls beyond a metre face INTO the cabin (measured on the
+mesh - a facing script over `Atlantis.msh`: 175 of the fuselage's 891 window-region triangles
+are front faces from the commander's seat, clustered at the pane boundaries with inward
+normals), so the main scene draws them, unlit and black, through the VC's oversized holes. He
+confirmed them against daylight with ORO off, and in Orbiter 2016 with its own D3D9Client. HIS
+RULING: a genuine Atlantis mesh disagreement (the VC and the exterior do not line up), noted in
+the release post and not ours to fix - an ORO insert mesh, a cabin clip box in the client and a
+raised exterior near plane were each priced and declined ("trying to fix it may create more
+problems for us down the line"). A per-group "hide from the cockpit" flag would not have helped
+either: the posts are not their own group. THE RULE THIS PATCH ESTABLISHES: the depth buffer
+holds exactly what the main scene draws - no more (this fix) and no less (the 09-18 glass fix).
+
+## Patch (aq): SNOW ROUND 3 - the hull remembers its cover, and the snow gets a look (2026-09-19/20)
+
+His seven-item list after flying snow round 2 ("This is an effect that will require more work"),
+steps A and B of the agreed order; flown and approved ("Sparkle and relief look good now", "The
+strips fill now"). The windscreen frost (step C) is patch (h) Part 6. New gcCore surface:
+`SetSnowLook(fallRate, brightness, relief, sparkle)` with guard **#29** `CanSetSnowLook` -
+the count is TWENTY-NINE (the checklist in section 3 above). ORO pushes it on change from
+`OroSnow.cpp`, probing by binding.
+
+### Part 1: the per-vessel cover STATE (VVessel.h/.cpp)
+
+THE REPORT: "When the DG stops the snow coverage on the mesh abruptly goes to full again."
+Since the snow round the hull's share of the cover (`gSnow.w`) was recomputed every frame in
+`vVessel::Render` from the airflow alone, so a hull that had shed its snow on the take-off roll
+was fully white the frame it stopped. `vVessel::oroSnow` / `oroSnowT` are the state now,
+stepped ONCE a frame in `vVessel::Update` (Render runs once per pass; Update once per visual
+per frame) on SIM time: the airflow strips it, an e-fold every 2 s at full shear, keyed on
+dynamic pressure through the same 150 Pa..1.5 kPa smoothstep as before; only FALLING snow lays
+it back, at `g_gcSnowFallRate` - the addon's own ground build-up rate (envelope x Snowfall over
+the Build-up minutes, `SetSnowLook`'s first argument), so hull and apron whiten together by
+construction; never above the snow-line factor at the hull's altitude. -1 = not yet seen: a
+fresh visual takes the old instantaneous law, so a scenario loaded parked in a blizzard is
+white from frame one and one loaded in flight is clean. No cover this frame (the pill off): the
+state is kept and only re-timed, so the parked A/B toggle is instant both ways and no dead
+time is integrated when it comes back. `vVessel::Render` hands `OroSnowObject` the state.
+The addon cannot read it; ORO's `Cover now` readout shows the FRAME cover and the focus hull's
+own snow-line factor instead - "hull BELOW the snow line" - which answered his first "snow
+doesn't build back up ... even after a scenario reload": the line stood at 155 m over a 3 m
+apron, and nothing at KSC could whiten by the law both sides obey.
+
+### Part 2: `gSnow2` - one Brightness slider, two calibrated lanes (Scene.cpp, D3D9Effect)
+
+`eSnow2` beside `eSnow`, pushed with the fog block and into the terrain's PS constants: x = the
+TERRAIN's albedo gain (2.2 x the slider; base tiles and pavement follow it through
+`gBaseLocal`), y relief, z sparkle, w = the HULLS' gain (the slider itself). His second flight:
+"the snow on the vessel is too white ... it should follow the brightness of the ground slider"
+(and the ground was "too gray"). The same albedo goes through two chains: the terrain's
+scattering chain tone-maps it, the vessel family clips and blooms it, so the ground wanted
+about twice the gain before the two read alike (his 2.17 on the ground against 1.0 on the
+hulls). One slider, calibrated per chain; 1 on the slider is the calibrated look, past ~1.5
+the sun-lit snow reaches the bloom.
+
+### Part 3: `OroSnowMaskN` - the share moves the threshold, the slope opens with the cover
+
+(`D3D9Client.fx` and `NewPlanet.hlsl`, one copy each; `OroSnowMask` is a wrapper.) His second
+flight again: "the removal and rebuild up seem like increasing just the opacity." The object's
+share now multiplies the COVER inside the mask (`c0 = gSnow.x * gSnow.w`), so it moves the
+lattice's THRESHOLD exactly as the frame cover does: a hull shedding on the take-off roll
+loses the exposed crests first and the sheltered hollows last, and takes it back in reverse -
+the patches he saw on the initial build-up, at every transition - instead of a translucent
+wash. The call sites no longer multiply the finished mask by the share. And THE SLOPE GATE
+OPENS WITH THE COVER (his DG at a full cover with two clear strips down the fuselage):
+`smoothstep(lerp(0.30, -0.30, c0), lerp(0.75, 0.35, c0), dot(n, up))` - a light fall lies on
+the flats alone, a full cover plasters the steep sides too, as wind-driven and wet snow does;
+it moves the threshold, so patches climb the sides as the cover builds; flats are bit for bit
+as before and downward faces stay bare at any cover. The lattice value `n` comes back out as
+the relief's height field. The terrain's copy has no per-object share and is otherwise the same.
+
+### Part 4: matte, and a dielectric (PBR.fx, Vessel.fx, Metalness.fx, Mesh.fx)
+
+The mask survives to each pass's combine and takes every specular and mirror term with it -
+a glossy white hull under an overcast was the "too white": PBR `cSpec.rgb *= 1 - snowM` and
+`cEnv *= 1 - snowM` (both the main and the FAST pass), Vessel.fx the same on `cSpec`,
+Metalness `cDiff = zD + (zS + cE) * (1 - snowM)` and `fA = lerp(fA, 1, snowM)` - snow is a
+DIELECTRIC, so a metal hull keeps its diffuse term under it.
+
+### Part 5: relief and sparkle (step B - "real snow is a 3D experience")
+
+What reads as depth is lighting, not geometry. `OroSnowRelief(dh, dpx, dpy, n, toSun, A,
+sunK)`: the snow's height field h = mask x (0.65 + 0.35 n), its surface gradient from the
+SCREEN derivatives of h and of the pixel position (Mikkelsen's bump for unparametrised
+surfaces - no tangent frame, no UV orientation; a hull's arbitrary UVs and the terrain's tile
+UVs have neither), the normal tilted by the gradient times the amplitude (0.06 x the slider on
+hulls and base tiles, 2.0 x on the terrain's ~6 m cells), the lit ratio clamped 0.3..2.2 and
+faded by `sunK` (the sun colour's maximum on hulls, `1 - gStorm` on terrain: no directional
+light under the overcast, no relief). Every patch's rim is where h climbs fastest, so each gets
+a lip for free. !! THE DERIVATIVES ARE TAKEN OUTSIDE FLOW CONTROL AND THE CONSUMER IS
+`[flatten]`: a gradient inside a branch is X4121 - a WARNING - and the client BOXES the
+compiler's buffer whatever it holds (his error box). It reached his sim through a 27/27
+matrix because neither checker failed on warnings; both do now (`tools/fxccheck.sh`'s effrun
+and `tools/d3dxps.py`, X4717 still ignored), planted-defect tested (eight failing rows).
+`OroSnowSparkle(uv, per, n, toCam, toSun, k, fade)`: a lattice EIGHT cells to the mask's one,
+`step(h1, 0.25 k)` admits a crystal - the slider is a COUNT, a quarter of the cells at 1, half
+at 2 (his first look: "the slider only changes their opacity"); the crystal is a POINT a fifth
+of its cell across at a hashed place in it, never the cell ("squares"); its facet is the
+normal tilted by a hash, catching the half vector of sun and view in a pow-200 lobe, so it
+flashes only when the camera's motion brings its alignment round; a 300 m distance fade
+against sub-pixel shimmer; integer cells per UV unit (the seam law). The glint is ADDED TO THE
+ALBEDO, so the sun lights it and an overcast puts it out for free.
+
+### !! Part 6: the ps_3_0 SLOT CLIFF, and which pass carries what (2026-09-20)
+
+THE TEAL DELTAGLIDER: with step B in every pass the plain DeltaGlider - the one metalness hull
+in his scene - rendered as a flat cyan silhouette, snow or no snow, ORO armed or not (it
+persisted with Ctrl+G), and nothing was logged anywhere. Bisected by swapping the DEPLOYED
+`Metalness.fx` ("Teal is gone with the pre-step-B Metalness, F3 makes no difference"). With
+his exact settings `MetalnessPS` sat at 4080 of the card's declared 4096 instruction slots and
+the GTX 970's driver REFUSED the pass; 3949 had flown. The cliff sits BELOW the declared cap.
+So: `MetalnessPS` keeps the albedo, the matte rule and the dielectric override only (3945 with
+his set; it also takes the hull's own UV and the hull lane rather than `OroSnowUV` and the
+lane lerp - a metalness mesh is a hull, never pavement - the dozen slots that put it back
+under the flown count), `PBR_PS` the relief (3924), `FAST_PS` (3720) and `AdvancedPS` (3847)
+both terms. `tools/fxccheck.sh` carries HIS EXACT ROW now, decoded from his `D3D9Client.cfg`
+by `D3D9Effect::D3D9TechInit`'s own rules - `ANISOTROPY_MACRO=16 LMODE=8 MAX_LIGHTS=16
+SHDMAP=3 KERNEL_SIZE=27 KERNEL_WEIGHT=0.037037 LCLMAPS=6 _GLASS _DEBUG _ENVMAP _LIGHTGLOW
+_IRRADIANCE _CASCADE _LCLCUBE` - in place of the old "worst" row (SHDMAP 4 / kernel 35, no
+longer reachable since the config clamps the filter to 0-2 and the kernel is packed to 27),
+which read 4051 where his real set read 4080: the row that let the teal hull through. The
+effect rows are pinned at `-slots 3950`, the flown count, not 4096. Measure VesselTech
+P0/P1/P2/P4 with that row before adding anything to a vessel pass.
+
+### ORO side, and the flakes
+
+`OroSnow.cpp`: the setter on change; the frost's clock (Part 6 of (h)); the focus hull's
+snow-line factor for the readout. Keys `SnowContrast` (a flake against the air it falls
+through; the flakes show at night at half of it - his rule for the snow), `SnowWindDir` (0..360
+clockwise from north, the weather report's convention; the `SnowSlant` key and slider are
+RETIRED - the wind's speed and direction carry the lean; a stale key is ignored), `SnowBright`,
+`SnowRelief`, `SnowSparkle`. The sheet (`OroRain.cpp`, `OroModule.h`): THREE polys of 21,760
+triangles (`RAIN_POLYS` x `RAIN_POLY_TRI` - the 65,535-vertex cap is PER GROUP, his reminder
+mid-build), `SNOW_MAX_STREAK` 28,000 on a square law of Snowfall, `emitF` fogging each element
+once. Measured by him: a whiteout costs 7-8 fps.
+
+Files: `VVessel.h`, `VVessel.cpp`, `Scene.cpp`, `gcCore.h`, `gcCore.cpp`, `D3D9Effect.h`,
+`D3D9Effect.cpp`, the hand-edited `<Orbiter>\Orbitersdk\include\gcCoreAPI.h` (guard #29) and
+SIX deployed shaders: `D3D9Client.fx`, `NewPlanet.hlsl`, `Mesh.fx`, `PBR.fx`, `Vessel.fx`,
+`Metalness.fx` - a matched set with the DLL (an old shader beside the new DLL never reads
+`gSnow2` and renders the 09-14 snow: no garbage). Client `[Build 260919]` (steps A/B) and
+`[Build 260920]` (with (h) Part 6); backups `D3D9Client.dll.pre-snow3a-260919`,
+`D3D9Client.dll.pre-snow3a2-260919`, shaders `*.pre-snow3a-260919`, `*.pre-snow3a2-260919`,
+`*.pre-snow3b-260919`, and `Metalness.fx.snow3b-current` - the 4080-slot build, kept as the
+evidence.
+
+## Patch (ar): THE TRACK MAP - tire marks in the ground snow that fade (2026-09-20)
+
+Snow round 3, step D (his item 6), discussed before a line was written; the four decisions
+were his: 2048 texels at half a metre (a kilometre of ground round the camera, 8 MB of R16F),
+a fade in minutes with falling snow refilling on top, the pavement on the FAST pass only,
+moving vessels only. `gcCore::SetSnowTracks(bool bOn, float fadeMin)`, guard #30
+`CanSetSnowTracks` (the count is THIRTY). Flown: "all works great".
+
+### The map (Scene.h/.cpp: UpdateTrackMap, ClearTrackBand, OroTrackStamp, GetTrackConstants)
+
+One `D3DFMT_R16F` render target, `SnowTrackMap` texels a side (D3D9Client.cfg: 1024, 2048 or
+4096, default 2048, no Launchpad row), allocated on first need and released with the scene.
+THE ANCHORING is patch (ab)'s round-4 form: the lattice - an origin and its east/north basis -
+lives in the PLANET's frame in doubles, and each frame three camera-relative float vectors are
+rebuilt from the planet's current rotation and position, so no float carries a distance from
+the planet's centre. A pixel's map coordinate is two dot products of its camera-relative
+position. THE WINDOW is a toroidal clipmap: it slides with the camera's ground point in whole
+texels, the texture is addressed modulo its size (WRAP), and the band that scrolls out of the
+window is the band that scrolls in, cleared with one or two rect clears - no copy, no second
+surface, no stall. A full reset only when the camera is 20 km from the lattice origin (the
+tangent plane's lateral error reaches a texel near 50 km) or the proxy planet changes; idle
+above 5 km AGL; the content is KEPT while the pill is off (the A/B is instant both ways).
+`UpdateTrackMap` runs first thing inside the scene, before the wet mirror draws terrain.
+
+### The stamps (VVessel.h/.cpp -> Scene::OroTrackStamp)
+
+Every vessel with a visual, in ground contact, groundspeed > 0.2 m/s and at least three
+touchdown points hands the scene its first three points (the gear, by the API's own
+definition: they set the plane, and mu_lng is "only used for first 3 points") as global
+positions; the scene keeps them planet-local per vessel (`oroTrkLast`) and draws a CAPSULE from
+last frame's point to this frame's - a continuous line at any speed - radius 4% of the gear
+track (the widest pair) clamped 0.5..4 texels, MAX-blended (ShaderClass blend 3) so a
+re-driven track never lightens. The memory is dropped whenever contact or motion stops, so a
+hop never draws a bridge. A capsule longer than a quarter of the map is a teleport, skipped.
+
+### The fade
+
+One full-window multiply per frame - ShaderClass blend 5, NEW: ZERO / SRCCOLOR = dest * src -
+by exp(-dt_sim * 2.3 * (1 / (60 * fadeMin) + fallRate)): a fresh track vanishes (depth 0.1, the
+visible floor, is 2.3 e-folds) in `Track fade` minutes with nothing falling, and falling snow
+refills it at the ground's own build-up rate (SetSnowLook's fallRate) on top. Paused: nothing;
+warp: exact.
+
+### The read (NewPlanet.hlsl, D3D9Client.fx, Mesh.fx, PBR.fx, Vessel.fx)
+
+`OroTrack(posW)` (posW = -camW in every family): two dot products against three float4 -
+`vTrackPrm[3]` + `tTrack` on the terrain, bound per planet render in Surfmgr2 beside the local
+maps (`PlanetShader::tTrack`, WRAP + LINEAR); `gTrackPrm[3]` + `TrackS` in the effect, pushed
+once a frame - then one tex2Dlod on the torus at the phase, 0 outside the window or with no
+map (the .w span is 0). `OroSnowMaskN` gained a `trk` argument: `c0 *= (1 - trk)`, so a track
+is the bare ground at 1 and the hollows alone in between, and the relief gives it a lip.
+Terrain, base tiles (Mesh.fx) and the pavement (FAST_PS x gBaseGround) read it; PBR_PS,
+Vessel.fx and Metalness pass a literal 0 (the slot cliff - a runway authored with normal maps
+shows none). The two passes `TrackVS` / `TrackStampPS` (a capsule's distance field with a
+texel of soft edge) / `TrackFadePS` live in NewPlanet.hlsl as ShaderClass entry points
+compiled at scene creation - no new deployed file. D3D9's pixel centre sits at the integer, so
+texel t maps to screen t - 0.5 (`vTrackVS` = 2/N, -2/N, -1 - 1/N, 1 + 1/N). MEASURED (his row):
+terrain c172 -> c176, 3902 -> 3924 slots, 14 -> 15 samplers; the mesh family unchanged
+(Metalness 3945). !! `HR()` is a BLOCK: `if (...) HR(...); else` will not compile.
+
+### The instrument
+
+`ShadowDebug 6` paints the map magenta on the terrain (`vCascBasis[0].w` carries the key;
+D3D9Config clamps ShadowDebug 0..6); `ShadowDebug >= 1` logs `ORO track dbg:` once a real
+second (window, phase, stamps, shifts, resets) - !! IN THE CLIENT'S OWN LOG (`LogAlw` ->
+`Modules\D3D9Client\D3D9ClientLog.html`), not Orbiter.log; the map's creation logs one line.
+
+### Files
+
+`Scene.h`, `Scene.cpp`, `VVessel.h`, `VVessel.cpp`, `Surfmgr2.cpp`, `VPlanet.h`,
+`VPlanetAtmo.cpp`, `D3D9Effect.h`, `D3D9Effect.cpp`, `D3D9Config.h`, `D3D9Config.cpp`,
+`D3D9Util.cpp` (blend 5), `gcCore.h`, `gcCore.cpp`, the hand-edited
+`<Orbiter>\Orbitersdk\include\gcCoreAPI.h` (guard #30) + FIVE deployed shaders:
+`NewPlanet.hlsl`, `D3D9Client.fx`, `Mesh.fx`, `PBR.fx`, `Vessel.fx` - a matched set with the
+DLL (an old shader beside the new DLL has no `TrackVS`: the stamp shaders fail to compile, the
+map is never live, no garbage). Client `[Build 260920]`; backups
+`D3D9Client.dll.pre-tracks-260920` and `*.pre-tracks-260920` for the five shaders. `tools/fxccheck.sh`
+carries the three track rows (30 rows).
+
+### (aq) amended the same day: the hull law's settle gate, floor and instrument (VVessel.cpp)
+
+Step E's flights (the shed flakes, ORO side - see CLAUDE.md invariant 33(j)): laid back at
+the full rate under full shear, the law had a FIXED POINT - half the cover stripped a second
+against a sixtieth laid back = 3.4% at Snowfall 1 - and that residue sat on the hull as the
+lattice's top cells, static as the hull rolled, above any floor a floor could honestly take.
+Fresh snow settles through still air only: the fall term x (1 - ts)^2, so the fixed point is
+zero at speed; and under shear (ts > 0.3) the last 5% goes with the airflow (an exponential
+never reaches zero, and once the hull stops the shear stops with it). `ShadowDebug >= 1`
+logs `ORO snow hull dbg:` once a second for the focus hull (state, ts, fall rate, lineF,
+cover) - the client log again. ORO mirrors the same law in `OroSnow.cpp` (UpdateShed) to
+know what leaves the hull. Backup `D3D9Client.dll.pre-shedfloor-260920`. Also repaired: six
+`\brief` lines in `gcCore.h` that had carried a BACKSPACE byte (a bash heredoc's `\b`) since
+patches (o) and (s).
+
+## Item 20 (2026-09-20): the contact-line staircase - a box per building, a near grid, and what stayed
+
+The report (Buck, Olympus, low sun, Cascaded (ORO)): a stepped line where a wall meets the
+ground. Diagnosed on 09-17 as the cascade's texel lattice - cascade 2 (50-450 m) is 0.32 m a
+texel at Cascade detail 2048 and 0.16 m at 4096, and at a 10-degree sun one texel is six of
+those along the ground. Two builds in one session, both flown, neither shipped as a fix; the
+receivers and the hull boxes kept what they gained. All of it is inside patch (ae)'s files;
+no gcCore surface, no new guard.
+
+### Round 1: a box per building (dead by fact)
+
+The hull slots 6-8 sit empty whenever fewer than three other vessels are within 6 km, so the
+nearest above-shadow structures took them, each in a half-size box of its own carrying the
+FULL caster set (structures, tiles and vessels that meet it), with the terrain and the FAST
+wall shader using the box ALONE where a pixel is inside it: `min()` with the cascade's coarse
+copy of the same wall keeps the staircase. The flag is the SIGN of the pushed texel lane,
+which the mesh family's `OroCascIn` already rejects, so the three vessel passes ignore such a
+box by construction (verified: PBR, Advanced and Metalness disassemble IDENTICAL under his
+exact row; FAST +4 slots for the replace rule, the terrain +6).
+
+It died on a fact the ledger did not carry: **`Base::ExportBaseStructures` merges every
+generic object of a base (HANGAR, TANK, BLOCK...) by texture into ONE mesh** - the client log
+reads `nsas=1` at Olympus, and Canaveral's 158 generics are one mesh two kilometres wide. So
+"the nearest structure" was the whole base: a 260 m sphere at 0.254 m a texel, COARSER than
+the cascade it replaced. The atlas dump (`ShadowDebug >= 3`, decoded with numpy) showed the
+base as a small cluster in a 520 m cell. Only MESH blocks and the (ag) meshes are separate.
+
+### The compiler flag (the reshaped tap - kept)
+
+His ShadowDebug 4 frame painted shadow SHAPES where a flat 0.95 was due: the tap's `out float
+inside`, written after `[branch] if (...) return 1.0f;`, tracked the shadow comparison in the
+3900-slot terrain shader while a 20-line probe of the same construct compiled correctly
+through the same `d3dx9_43.dll`. `OroCascTapT` now decides the flag BEFORE the branch from
+the one condition (`ok`) and branches on it: correct, and 67 slots cheaper (3930 -> 3863 on
+his Earth+DEVTOOLS row). Rule: never write an `out` parameter on the fall-through side of an
+early return in the deployed shaders.
+
+### Round 2: the near grid (built, flown, OFF by default)
+
+Boxes are REGIONS: squares of `ShadowCascadeGrid` metres (default 100 while it was on; 0 =
+off, the shipped default; 20..400) on a lattice in the light plane about a PLANET-LOCAL
+anchor (`cascGridAnch`, walked toward the camera's ground point in whole lattice steps - the
+round-5 rule - and taking the ground point's depth along the light), the 5 x 5 neighbourhood's
+cells nearest the ground point first, in the hull slots the vessels leave and the spare row's
+six cells (slots 9-14 of a 15-slot table) the spot maps leave (`nLclMaps` is the running cell
+count). r = S/2 EXACTLY and no snap, so adjacent cells continue one texel lattice. Every grid
+box is COMPLETE (every vessel that meets it, structures culled by sphere -
+`vBase::RenderStructureDepthBox` / `vPlanet::RenderBaseDepthBox` - and tiles), its window
+min(far, 10 km) toward the sun and 1000 m past; by day only (`sunUp > -0.05`). 100 m at a
+2048-px cell is 0.049 m a texel, at 1024 px 0.098 m: three times finer than cascade 2 either
+way. The grid's cells in row 3 are rect-cleared per frame beside the spot maps' cells.
+
+THE RECEIVERS pick ONE box per pixel among slots 6-14. First form: nine containment tests on
+per-slot box constants - FAST went to 3976/3980 slots on nine four-component selects. Shipped
+form, THE LATTICE: every grid box is a cell of one lattice, pushed as four vectors
+(`vCascGrid` / `gCascGrid`: origin u,v in light space + the shared near depth and 1/range;
+the texel, S, and each slot's cell code `100 + (m+2)*5 + (n+2)`), so the cell under the
+receiver's OFFSET point is arithmetic, the box's own constants are arithmetic, and the nine
+tests ask only which slot holds that cell (one compare, two constants). FAST 3850, terrain
+c180 / 3819, the vessel passes identical up to register numbering (same literal multiset,
+same instruction count - `tools/fxeff -asm` on both, the literal table sorted). On FAST the
+walls take a complete box over a hull's (gBaseLocal), a hull keeps its OWN box and takes a
+cell only when no hull box holds it. Inside a complete box the cascade steps aside (`rep`,
+the crisp tap's `[branch]` then skips the fetches).
+
+TWO THINGS THE PICK-ONE FORCED, BOTH KEPT WITH THE GRID OFF: a hull box holds EVERY vessel
+that meets it (`RenderCascadeCasters`: hullBox -> the vessel loop with no exclusions), so a
+ground pixel under two parked hulls loses neither and a parked hull sees its neighbour's shadow
+on its own skin (the round-6 two-hull-overlap edge, closed); and every hull box reaches
+min(far, 10 km) toward the sun (`hullMargin`), so a neighbour standing sunward is in it (24
+bits and a float over 11 km are under a millimetre, far inside a 13 mm texel's bias). The
+terrain's three unconditional hull-box taps became a pick (cheaper), slot 0 still min'd.
+
+HIS VERDICT after five frames: the staircase gone inside the cells, and "ground tiles and
+shadows jump as the camera moves" - a clean cell against the cascades' shading of the same
+rough ground at a low sun, a seam that re-anchors in 100 m steps. "This has caused more
+problems than it solved." The seam's likely cause, unproven: the cascades' receiver-plane
+bias against the pixel normal at coarse texels shades rough terrain a shade darker; the fine
+cell has none of it. That is a cascade-side matter and would change the flown look
+everywhere. Default 0; the key stays as the experiment's record.
+
+### Files, numbers, backups
+
+`Scene.h/.cpp` (the 15-slot table, `cascGrid*`, `GetCascadeConstants(..., grid, ...)`,
+`RenderCascadeCasters`' three slot kinds), `VBase.h/.cpp` + `VPlanet.h/.cpp` (the culled
+structure draw), `Surfmgr2.cpp` (the `vCascGrid` push), `D3D9Effect.h/.cpp` (`eCascGrid`),
+`D3D9Config.h/.cpp` (`ShadowCascadeGrid`), and THREE deployed shaders: `NewPlanet.hlsl`
+(the reshaped tap, `OroCascInT`, the pick), `D3D9Client.fx` (`OroCascadeShadowX(...,
+replace)` + the three-argument wrapper the vessel passes call, `gCascGrid[4]`), `PBR.fx`
+(FAST calls the replacing form). His row: PBR 3924 / Advanced 3847 / Metalness 3945 unchanged;
+FAST 3733 -> 3850; terrain c175/3863 -> c180/3819. Backups `D3D9Client.dll.pre-basebox-260920`
+and `NewPlanet.hlsl / D3D9Client.fx / PBR.fx .pre-basebox-260920` (the flown build before
+item 20). Probes kept in the session's scratchpad: `test_out.hlsl` (the compiler flag),
+`atlas_decode.py` (the atlas dump to PNG).

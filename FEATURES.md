@@ -9,10 +9,10 @@ This is the first time the whole thing has been listed in one place. Everything 
 |---|---|
 | Started | 2026-07-25 |
 | Shipped to beta | 2026-08-10 (16 days) |
-| Distinct effects | **32** — 13 physiological, 19 environmental (the LENS FLARE and the RINGS both joined 2026-09-12; the FOG joined the weather; the windscreen drops joined the storm; the vapour cone is TWO independent cones) |
-| Live controls | **184** sliders/knobs, **18** colour pickers, organised as a **menu tree** (WORLD / VESSEL / PILOT → 7 menus, 14 pages), all thruster settings PER ENGINE GROUP (MAIN / HOVER / RETRO / USER / **RCS**) — or **PER INDIVIDUAL THRUSTER** via layered overrides |
-| Source | ~33100 lines across 18 source files, plus 9 pixel shaders in one HLSL file |
-| Client patches | **41** (a–z, +k2, +z2, +z3, +aa–al) — every one of them load-bearing |
+| Distinct effects | **33** — 13 physiological, 20 environmental (the SNOW joined 2026-09-14; the LENS FLARE and the RINGS both joined 2026-09-12; the FOG joined the weather; the windscreen drops joined the storm; the vapour cone is TWO independent cones) |
+| Live controls | **211** sliders/knobs (incl. the ten snow round-3 controls, 2026-09-20, and the two cabin/drum LOOP pickers, 2026-09-18), **18** colour pickers, organised as a **menu tree** (WORLD / VESSEL / PILOT → 7 menus, 15 pages), all thruster settings PER ENGINE GROUP (MAIN / HOVER / RETRO / USER / **RCS**) — or **PER INDIVIDUAL THRUSTER** via layered overrides |
+| Source | ~34300 lines across **19** .cpp and 7 headers, plus 9 pixel shaders in one HLSL file (the old line said "18 source files" for a count that included the headers - it is spelled out now) |
+| Client patches | **47** (a–z, +k2, +z2, +z3, +aa–ar) — every one of them load-bearing |
 | Test rigs shipped | **1** — `Script\testlights.lua`, twelve automatic cases over the local-light and shadow work, with its own scenario |
 | Worlds with auroras | 12 |
 | Settings scopes | 3 — global / per vessel class / per body (+ a window-geometry file). The G-FORCES and VIRTUAL COCKPIT pages' settings can be moved between the first two per hull with a **Save target** switch |
@@ -63,6 +63,19 @@ External view, and through the VC windows where it makes sense.
 
 A complete replacement for Orbiter's two camera-facing billboards. Heat is
 **Sutton-Graves** (`√ρ·v³`), which peaks higher and later than stock's `ρ·v³`.
+
+- **Two heat curves, chosen per vessel class** (2026-09-15, from a forum report that the
+  plasma arrived minutes late on a Shuttle-class entry). CLASSIC measures that heating rate
+  against two fixed thresholds and is what every vessel tuned before it flies — it is the
+  default, and a hull asks for anything else only in its own cfg, so switching one vessel
+  cannot move another's look. **PHYSICAL** reads the same rate as the *temperature* it holds
+  the stagnation region at, with the two ends set in **kelvin**. The reason is a range
+  problem rather than taste: the heating rate spans sixty times between the first visible
+  glow and peak heating, and a linear ramp cannot render both ends of that — a temperature
+  is its fourth root, so the same span becomes less than three. Its default onset, 800 K, is
+  the **Draper point** where solids first glow red, and on a Shuttle entry the model crosses
+  it 25 s after entry interface, which is when crews report the first faint glow at the nose.
+  A hypersonic gate ends it below ~Mach 4 rather than letting it linger into the approach.
 
 - **Shock shell** — ORO welds and decimates *the vessel's own mesh triangles* into a
   smoothed, detail-clamped copy and lights it. Any vessel gets a heatshield for free, with
@@ -316,7 +329,10 @@ visibility.
   runners radiate from the *stagnation point* — where the oncoming air first meets
   the airframe, which is below the glass — so they run straight down when parked and
   sweep **up** the windscreen and outward from about rotation speed onward, the way
-  they do on a real canopy, on any vessel and with nothing to configure. Past roughly
+  they do on a real canopy, on any vessel and with nothing to configure. Yaw or pitch
+  moves the radiant by about that angle and no more — its direction is the airflow's,
+  only its depression below the nose is the airframe's — and the runners are spread
+  evenly over the pane, a runner being born where a drop lands. Past roughly
   45 m/s of **dynamic pressure** (so it stays honest at altitude, where 200 m/s in
   thin air barely disturbs a drop) the sitting drops thin out, the runners multiply to
   carry the water away, and what is left is a moving **film** that ripples the view
@@ -347,6 +363,48 @@ visibility.
   crack, in-cloud flashes only rumble (their channel is buried in the deck), the rare
   positive giant hits hardest — and the ear is the **camera**: the STRIKE test button's
   crack follows at the view's own distance from the bolt.
+- **Snow** (2026-09-14) — the rain's sheet re-particled, plus a cover that lies on the
+  world. The two storms are **mutually exclusive** by design, which is what lets the snow
+  have the whole geometry budget: switching one on switches the other off. Falling snow is
+  the rain machinery in a second mode — near flakes drawn as soft out-of-focus discs, mid
+  ones as dots, far ones as specks, each with its own hashed size, coloured as *the air*
+  rather than a flat white, with a gusting **Wind** slider that streams them past a parked
+  ship. The **cover** wakes client patch (aa)'s dormant `SetSnowCover`: terrain, base tiles
+  and all five vessel paths lerp toward white through one helper, filling in from the
+  hollows by a thresholded lattice instead of fading up uniformly. It lies on up-facing
+  surfaces, never on water, and hulls shed it as dynamic pressure builds, so a parked ship
+  whitens and a moving one does not. It accumulates on **simulation** time while the fall's
+  envelope runs on real time — the invariant-1 split — and a **snow line** by altitude
+  puts rain country below and white above. The mist runs on a **log scale**, about 1.3 km
+  of visibility at 0.5 down to 100 m at 2, and in snow it takes the cloud deck with it, so
+  a blizzard has no visible sky. No colour picker anywhere in it: the deck and the flakes
+  take the sun's own warmth at dusk. **Round 3** (2026-09-19/20, client patch aq): a hull
+  **remembers** its cover — the client keeps a per-vessel state that the airflow strips and
+  only falling snow lays back, at the ground's own pace, so what the take-off roll blew off
+  does not return to a parked ship until it snows again; one **Brightness** slider in two
+  calibrated lanes (ground and hulls read alike); **Relief** — the lattice read as a height
+  field and shaded by the sun, a lit and a shade side per drift and a lip at every patch's
+  rim, centimetres on a hull and metres on the ground; **Sparkle** — a count of point
+  crystals that flash as the camera moves; the share and the slope gate move the lattice's
+  threshold rather than its alpha, so a hull sheds crests-first and a full cover climbs its
+  steep sides; **Contrast** and **Wind from** (degrees) join the sheet, which draws some
+  thirty thousand flakes across three polys at a whiteout and shows them at night. And **frost
+  on the virtual cockpit's windows** (its own pill): ice grows in from each pane's own frame
+  while snow falls, by a reach in metres, and melts when it stops — client patch (h) part 5
+  hands the shader every declared pane's distance to its frame per pixel, from a subdivided
+  copy the client draws into its depth buffer, so it fits any pane on any vessel with nothing
+  to tune. The glass controls and the base lights block sit on the SNOW page too.
+  **Tire marks** (2026-09-20, client patch ar) — every moving vessel's gear marks the ground
+  snow it rolls over, through a one-kilometre track map the client keeps round the camera: a
+  toroidal render target anchored in the planet's frame, stamped as capsules from the three
+  gear points, read by the terrain, the base tiles and the plain-textured pavement as a
+  lowering of the lattice's threshold (bare ground at a full mark, the hollows alone in
+  between, the relief's lip for free), faded on simulation time over **Track fade** minutes
+  and refilled by falling snow. **Blow-off** — snow leaves a hull as the airflow strips it:
+  ORO mirrors the client's cover law and sheds the difference as world particles in the
+  planet's frame, clumps and tumbling chunks drawn as the sheet's soft fans elongated into
+  their motion blur; still being tuned at this build (a hard-edged residue near the hull at
+  speed is open).
 - **The storm from the cockpit** (2026-08-23) — in a virtual cockpit the rain, splashes,
   deck and bolts draw through the windows, cut per pixel at the frame by the depth clip;
   the cabin stays dry (the client keeps wet sheen and drop glint off the interior in the
@@ -378,7 +436,7 @@ rather than rendering anything.
 | **VC shadows** | Sunlight falls through the canopy and sweeps the cabin as the ship rotates. ORO drives the client's own shadow pass. Cabin box per class; **shadow depth** lets the shadow take the ambient share with it — but never the emissive, so a lit MFD doesn't dim when a frame passes over it. |
 | **The cabin at night** | A stock VC stays fully lit at midnight — its authors fill it with flat emissive light. ORO scales that fill (and the ambient) down as the sun sets at the camera, the horizon dipping for orbit and a twilight band on worlds with air; storms and fog dim it further by a slider of your own. MFDs, self-lit instruments, emission maps and every cockpit lamp are untouched, so the cabin light finally has a job. |
 | **Fog** | Two analytic height-fog layers rendered by the client inside every surface — terrain, bases, hulls, particles, runway lights, the sky — one grey for all of them, coloured by the sun's own irradiance. Visibility, top, fade, brightness, sun glow; the rain's gloom is the second layer. Ground shadows, VC shadows and the sun all weaken through it. |
-| **Base lights** | Every base's night state forced on — night textures, runway and taxiway lights — with a glow gain into the bloom and a fog halo that grows with the air between you and the lamp. One setting behind two doors (RAIN and FOG). |
+| **Base lights** | A three-state button: STOCK (Orbiter's own flip, on at night, off by day), IN WEATHER (every base's night state — night textures, runway and taxiway lights — switched on when the storm light has taken more than a quarter of the sun or the fog's visibility is under 5 km, and back to stock when it clears; a flip with hysteresis, read off the very numbers the client is rendering) and ALWAYS (forced on now). With a glow gain into the bloom and a fog halo that grows with the air between you and the lamp, applied while the lights are ORO's. One setting behind two doors (RAIN and FOG). |
 | **Base trains and solar plants** | No knob at all — the client revives the three base objects that only Orbiter 2010's own renderer ever animated. The monorail cabin shuttles between its ends, the hangrail's two cabins pass each other under their girder rail, and a solar plant's panels track the sun and glint at you; all frozen or invisible under every graphics client since terrain arrived. The rails follow the terrain under an 8% grade on pylons and portals cut to the ground; everything casts and receives the cascaded shadows and takes local lights, fog and night textures. Habana's monorail and hangrail are the stock examples. |
 | **Stock reentry kill** | Stock's billboards *and* every vessel's default reentry particle stream, suppressed — neither of which any documented API can turn off. |
 | **Stock exhaust kill** | Billboards and exhaust streams, as two independent bits, per vessel. |
@@ -455,9 +513,11 @@ addon involved:
   through buildings.
 - Local lights have **no shadows at all** — a spotlight beam passes straight through
   a hangar, and a vessel standing in the beam casts nothing. The patched client
-  renders a real shadow map from the strongest spot light each frame (buildings,
-  vessels and terrain ridges all cast; terrain and every vessel shader receive), a
-  night-and-dusk feature so daylight sun shadows stay pixel-stock.
+  renders up to six shadow maps a frame from the strongest spot lights (lamps mounted
+  together share one), an aimed map or a five-face cube for a point light, and for a
+  launch pad's hemisphere floods a cube when the cells are spare or a map capped at the
+  cube's face angle when they are not (buildings, vessels and terrain ridges all cast;
+  terrain and every vessel shader receive, day and night, in every Terrain shadows mode).
 - **Terrain flattening (`.flt` files) silently did nothing under cubic elevation
   interpolation** — the core's default. Stock flattened only a float copy of each
   elevation tile while cubic mode's file-less children interpolated from the raw array,

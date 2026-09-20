@@ -103,7 +103,89 @@ Thanks for testing. ORO is a global module that adds two families of effects:
 
 Everything is adjustable live, from one panel, while you fly.
 
-NEW IN THIS BUILD (260913) - THE SKY, THE GLASS, THE TOUR:
+NEW IN THIS BUILD (260920) - THE SNOW, THE HEAT, THE LIGHTS:
+  * SNOW (WORLD / WEATHER / SNOW). Falling snow and the cover it lays on the
+    ground, the pavement and the hulls, Earth, outside and from the VC. Snow
+    and rain are mutually exclusive on purpose (the whole geometry budget goes
+    to whichever is on). The cover deepens on SIMULATION time and thaws when it
+    warms; the pill off clears it at once so you can compare. A snow line by
+    altitude with its own width; no snow on water or steep ground. A hull
+    REMEMBERS its snow: the take-off roll blows it off, it comes back only
+    while snow falls, in patches from the sheltered hollows out. One
+    Brightness slider for the ground and the hulls, drifts with a lit and a
+    shade side (Relief), crystals that flash as you move (Sparkle), Contrast
+    for the flakes, Wind from in degrees. A full Snowfall is a whiteout.
+  * FROST ON THE VC WINDOWS (THE WINDSCREEN group on the SNOW page, its own
+    pill). Ice grows in from each pane's own frame while snow falls, by a
+    reach set in metres, and melts when it stops; the world blurs through it.
+    It needs the panes declared as rain surfaces (the DeltaGlider's ship) and
+    Sun glare on, like the raindrops.
+  * TIRE MARKS IN THE SNOW (TIRE MARKS group, its own pill). Every moving
+    vessel's gear marks the ground snow it rolls over, and the marks fade
+    over Track fade minutes, faster while it snows. SnowTrackMap in
+    D3D9Client.cfg picks the map's size (1024 / 2048 / 4096 texels at half a
+    metre: 2 / 8 / 32 MB).
+  * BLOW-OFF: snow blows off a hull as the airflow strips it. Work in
+    progress - see KNOWN ISSUES; Blow-off 0 removes it.
+  * A PHYSICAL ENTRY-HEAT CURVE, PER VESSEL (VESSEL / REENTRY / PLASMA). A
+    Heat model button: CLASSIC (the default, exactly what shipped before - no
+    tuned vessel changes) or PHYSICAL, which reads the heating as a
+    TEMPERATURE with Glow onset and Full plasma in kelvin. It exists because a
+    Shuttle-class orbiter flown well caps its own heating and could stay dark
+    for a whole descent; the default onset, 800 K, is where solids first glow
+    red, about 25 s after entry interface on a Shuttle profile. The Plasma
+    heat readout shows the temperature in both models, so you can decide from
+    ordinary flying whether a hull wants switching over.
+  * AN AUTHORED HEATSHIELD SHELL FOR THE STOCK ATLANTIS (Meshes\ORO\
+    Atlantis.msh), as the DeltaGlider and DG-S already had. Addon orbiters:
+    copy it under your class name, reposition it to your mesh, adjust it with
+    the sliders.
+  * THE ADVANCED SETUP DIALOG EXPLAINS ITSELF (Launchpad / Video / Advanced).
+    A "?" in the title bar - click it, then any setting - or F1 on a focused
+    setting gives a popup; the Help button opens every setting, stock and
+    ORO, in one window.
+  * SELECTABLE CABIN AND DRUM LOOPS (PILOT / VIRTUAL COCKPIT). Two buttons
+    cycle ten rain-in-the-cabin loops (a sealed capsule to an open cockpit)
+    and ten hull-drum loops; each names its file, and any of the twenty can be
+    replaced by your own loop under the same name (the length does not
+    matter, a clean seam does - XRSound\ORO\README.txt says how).
+  * BASE LIGHTS IS A THREE-STATE BUTTON: STOCK, IN WEATHER (the airfield
+    switches its lights on when the storm or the fog justify it, off when it
+    clears) and ALWAYS (the old pill). The pill off is stock at any slider
+    value now - the shipped 260913 settings had dimmed every runway light,
+    PAPI and VASI to 41% (that was the "burgundy PAPI").
+  * LIGHTS AND SHADOWS. A hemisphere flood (a pad's stadium light) casts as a
+    five-face cube when the cells are spare, and where they are not - a pad
+    full of floods - its single map is capped at the cube's face angle round
+    its own axis, eight times finer where the author aimed it, in every
+    Terrain shadows mode. Eight local lights per terrain tile (was four).
+    Spotlight shadows on the ground in DAYLIGHT in every mode. A point light's
+    cube no longer loses its corners. A parked hull now sees its neighbour's
+    shadow on its own skin (Cascaded mode).
+  * THE WINDSCREEN RUNNERS follow the nose under yaw AND pitch by about the
+    angle (not two or three times it), spread evenly over the pane instead of
+    crowding the middle, and their count follows Rain density.
+  * FIXED: the DeltaGlider's MFD button labels unreadable at night with the
+    instrument lights on; Saturn's rings brightening as you flew away; storm
+    clouds and lightning showing through buildings from the VC; the monorail
+    and hangrail cabins hidden by their own track, the track's shadow with no
+    gaps, the rain deck not showing through them.
+  * IN THE CLIENT: cut-out textures cast solid shadows (a stock bug); a
+    terrain tile whose draw the driver refuses is drawn again with the
+    shadow maps unbound instead of vanishing; the ground observer no longer
+    clips the terrain; effects no longer cut against hull you cannot see from
+    the cockpit (the Shuttle's window posts); the terrain shader has 76 of
+    its 224 registers free again, where the last build had one.
+  * KNOWN: Blow-off can leave hard white squares over a hull's top at taxi
+    speed and above (Blow-off 0 removes it); the stock Atlantis's VC and
+    exterior meshes do not line up at the windows (black bars, stock - not
+    ours); the Space Shuttle Vessel's MEDS draw at a quarter size with
+    VCMfdSize 1024 (set 512 for it); in Cascaded mode a stepped contact line
+    where a wall meets the ground at a low sun is the shadow map's texel
+    lattice - Cascade detail 4096 halves the steps, and that is where it
+    stands.
+
+IN 260913 - THE SKY, THE GLASS, THE TOUR:
   * SIXTEEN SCENARIOS THAT EXPLAIN THEMSELVES. The ORO_beta scenario folder is
     replaced by ORO, six folders, sixteen scenarios - and every one of them
     tells you in the description panel what it is, what to look for, and
@@ -176,9 +258,11 @@ ALSO SINCE 260904 (the 260906 build) - SHADOWS TO THE HORIZON, THE AIR, THE NIGH
     at noon. Now its fill light follows the sun - and the weather - so at
     night, or in orbit's shadow, you reach for the cockpit light the way a
     pilot would. PILOT / VIRTUAL COCKPIT: a night floor and a weather dim.
-  * BASE LIGHTS on demand, with a HALO in fog: runway and taxiway lights become
-    aureoles that grow with the air between you and the lamp. One pill, on
-    both the RAIN and FOG pages.
+  * BASE LIGHTS in bad weather, with a HALO in fog: a three-state button -
+    STOCK, IN WEATHER (the airfield switches its lights on when the storm or
+    the fog justifies it, and off again when it clears) and ALWAYS - and the
+    runway and taxiway lights become aureoles that grow with the air between
+    you and the lamp. One setting, on both the RAIN and FOG pages.
   * SHADOWS HIDE BEHIND HILLS in the stock shadow modes too: stencil ground
     shadows are cut where a hill stands between them and you. The
     frame-to-frame blink this first showed at KSC is fixed at the root.
@@ -193,12 +277,13 @@ ALSO SINCE 260904 (the 260906 build) - SHADOWS TO THE HORIZON, THE AIR, THE NIGH
     to None (an error box at every scenario start, since 260809); a spotlight
     lit a vessel behind a building in daylight.
 
-ALSO IN THIS BUILD - LIGHTS, SHADOWS AND THE SCULPTED PLUME:
+ALSO IN 260913 - LIGHTS, SHADOWS AND THE SCULPTED PLUME:
   * SPOTLIGHT SHADOWS. Base spotlights now cast real shadows: a hangar carves
     its beam, a vessel standing in it throws its shadow on the ground, and a
-    terrain ridge ends the beam. Vessels receive them day and night; the pool
-    on the ground is a dusk-and-night feature in the stock shadow modes and
-    works in daylight in Cascaded mode. Up to six spotlights cast at once (the
+    terrain ridge ends the beam. Vessels AND the ground receive them day and
+    night in every Terrain shadows mode (builds before 260919 kept the ground's
+    share to dusk and night outside Cascaded). A tile of ground is lit by its
+    eight strongest lamps, was four. Up to six spotlights cast at once (the
     Spot light shadows row in the Shadows box; Off turns the feature off, or
     LocalLightShadows=0 in D3D9Client.cfg. ShadowDebug=1 there is a diagnostic
     - only if I ask you for it.)
@@ -380,7 +465,7 @@ install at any time, in one click, and it will not touch anything you tuned.
 To confirm the install took, open Orbiter.log in the Orbiter root and look near
 the top for:
 
-    Module D3D9Client.dll ........ [Build 260913, ...]   <- patched, good
+    Module D3D9Client.dll ........ [Build 260920, ...]   <- patched, good
     Module D3D9Client.dll ........ [Build 241231, ...]   <- still stock
 
 It is the BUILD number that tells them apart. Ignore the "API" number printed
@@ -401,6 +486,11 @@ These fail SILENTLY. Nothing errors; effects just quietly look wrong or do
 nothing, and you would have no way to tell that a setting was the reason.
 
 In the Launchpad, VIDEO tab -> "Advanced" / D3D9 configuration:
+
+  (Every setting in that dialog explains itself: click the "?" in the dialog's
+  title bar and then the setting, or press F1 while it has the focus, and a
+  popup tells you what it does, what it costs and its default. The HELP button
+  at the bottom opens the whole list in one window.)
 
   Sun glare .................. ON      REQUIRED
       The depth buffer ORO reads only exists when glares are enabled. Without
@@ -452,7 +542,18 @@ In the Launchpad, VIDEO tab -> "Advanced" / D3D9 configuration:
                                  shadows in every direction). Cube uses five of
                                  the maps above, so it wants the 6 row if a
                                  spotlight is to keep one too. Spotlights are
-                                 always served first.
+                                 always served first. With Cube chosen, a flood
+                                 wider than 120 degrees (a launch pad's stadium
+                                 lights) takes the same five maps round its own
+                                 axis when the cells are spare - never at the
+                                 cost of another light's map - so a lone flood
+                                 casts crisply and a pad full of them keeps
+                                 every map it had. On such a pad, where no cube
+                                 can be spared, each flood's single map is
+                                 capped at 93 degrees round its own axis
+                                 instead: crisp where the flood is aimed,
+                                 lit but unshadowed past that, with a soft
+                                 edge between. Case 13 of the lights test.
       Greyed rows are the ones that do nothing in the selected mode.
       Keys in D3D9Client.cfg: TerrainShadowing 3, ShadowCascadeSize,
       ShadowCascadeFar, ShadowCascadeSoft, LocalLightShadows, LocalLightShadowMaps,
@@ -908,9 +1009,33 @@ sets in code, and lets you move them live. Units are the API's own.
     (three pages: PLASMA, VAPOUR CONES, and FLIGHT AID under VESSEL itself)
 
   Reentry plasma  Master pill and overall strength.
-  Plasma heat     A live readout. No vessel publishes a nose radius, so the
-                  heat numbers cannot be guessed - this shows what ORO
-                  computed, so you can tell "too cold" from "not working".
+  Plasma heat     A live readout, and beside it the temperature that heating
+                  rate holds the nose at. No vessel publishes a nose radius,
+                  so neither can be guessed - showing them is how you tell
+                  "too cold" from "not working". The temperature is live in
+                  BOTH heat models, so on a vessel set to CLASSIC it tells you
+                  what PHYSICAL would be seeing.
+  Heat model      WHEN the fire starts and how fast it builds, per vessel
+                  class. CLASSIC is the original curve and the default - every
+                  vessel tuned before this build flies it, and a hull asks for
+                  anything else only in its own settings file, so switching one
+                  ship over cannot change another's look.
+                  PHYSICAL reads the same heating rate as a TEMPERATURE. Reach
+                  for it on a vehicle that flies a long, energy-managed entry:
+                  a Shuttle-class orbiter caps its own heating rate on purpose
+                  while CLASSIC's thresholds were set for a steep dive, so such
+                  a ship could stay dark for an entire descent.
+    Glow onset (K)  PHYSICAL only: where the fire first appears. 800 K is the
+                    Draper point, where solids begin to glow visibly red - on a
+                    Shuttle entry that lands about 25 seconds after entry
+                    interface, which is when crews report the first faint glow
+                    at the nose. Lower starts earlier.
+    Full plasma (K) PHYSICAL only: where it reaches full strength. 2500 K is
+                    white hot; a real nose cap peaks near 1900, so the default
+                    leaves headroom. The two cannot cross. Below about Mach 4
+                    the glow switches off whatever they say - the physics
+                    behind the curve is hypersonic, and without that the fire
+                    would linger into the approach.
   VC ON/OFF       Whether plasma is drawn looking out of the virtual cockpit.
 
   PLASMA TUNING - the look, per vessel class.
@@ -924,6 +1049,13 @@ sets in code, and lets you move them live. Units are the API's own.
                     than something being torn off a hypersonic vehicle. One
                     clock for all of it, so the wake stays coherent; note that
                     means "Spark life (s)" is seconds at churn 1.
+    VC churn        How FAST the cockpit sheath lives - the filaments past the
+                    windscreen and the gate that makes them appear and die.
+                    1 = the standard rate, 0 freezes them into a steady glow
+                    (the flares keep coming - they are the event outside the
+                    window). Real entry footage from the seat is a steady
+                    sheath more often than a dancing one; this is that knob,
+                    and it no longer shares a clock with Wake churn.
     Fin rake (deg)  How far the streamers splay OUT from the flow direction.
                     0 lays them straight downstream. Every fin carries the same
                     angle whatever its length.
@@ -1326,7 +1458,16 @@ sets in code, and lets you move them live. Units are the API's own.
                     POINT - the spot on the nose where the oncoming air first
                     meets the airframe, which is below the glass - so from
                     about rotation speed onward they sweep UP the windscreen
-                    and outward, the way they do on a real canopy.
+                    and outward, the way they do on a real canopy. Yaw or
+                    pitch, and the radiant moves by about that angle - its
+                    direction is the airflow's, only its depression below
+                    the nose is the airframe's, so pushing the stick forward
+                    tilts the runners rather than putting the radiant in the
+                    window. They are spread evenly over the glass: a runner
+                    is born where a drop lands, so the corners get their
+                    share and the middle does not crowd. The slider is the
+                    MAXIMUM: the live count follows Rain density, and speed
+                    multiplies it through the shear.
     Runner size     Runner thickness relative to the sitting drops - a ratio,
                     so Drop size still scales both families together.
     Water film      Past about 45 m/s of dynamic pressure the air strips drops
@@ -1342,8 +1483,12 @@ sets in code, and lets you move them live. Units are the API's own.
     Mask Debug      What the client thinks your glass is. Leave it at 0 for
                     normal flight. 1 draws drops everywhere, ignoring the
                     window mask; 2 paints the mask itself - GREEN where the
-                    client sees authored window glass, BLUE where it sees
-                    interior, untouched where it sees nothing. If drops are
+                    client sees authored window glass with only sky beyond
+                    it, TEAL where it sees glass with something beyond it (a
+                    building, the ground - what hides the rain, the lightning
+                    and the aurora behind them), BLUE where it sees interior
+                    or hull with no glass, untouched where it sees nothing.
+                    If drops are
                     missing, or are showing up somewhere they should not,
                     position 2 answers the one question a screenshot cannot:
                     whether the glass was declared. A shot at 2 is the most
@@ -1376,13 +1521,24 @@ sets in code, and lets you move them live. Units are the API's own.
     Rain            Readout: the storm's build-up and ground wetness, or the
                     honest reason nothing draws - "external only", "Earth
                     only", "above the weather", "VC: SunGlare off".
-    Base lights     Forces every base's NIGHT state on now - night textures,
-                    runway and taxiway lights - the way an airfield lights up
-                    when the visibility drops. Off is Orbiter's own behaviour
-                    (on at night, off by day). The same switch sits at the
+    Base lights     A three-state button. STOCK is Orbiter's own behaviour:
+                    every base's night state - night textures, runway and
+                    taxiway lights - on at night, off by day, at stock
+                    brightness whatever the two sliders below read.
+                    IN WEATHER switches that night state on when the gloom
+                    justifies it, the way an airfield lights up when the
+                    visibility drops: once the storm light has taken more
+                    than a quarter of the sun (rain or falling snow at about
+                    half strength with Gloom 1) or the fog's visibility is
+                    under 5 km, and back to stock when it clears - a flip,
+                    not a fade. ALWAYS forces the night state on now. The
+                    value beside the button is the live result: stock,
+                    waiting, lit or forced. The same button sits at the
                     bottom of the FOG page: one setting, two doors.
-    Lights glow     A gain on everything those lights emit; past 1 they reach
-                    the Light glow post-process and bloom.
+    Lights glow     A gain on everything those lights emit while they are
+                    ORO's (lit by the weather, or forced); past 1 they reach
+                    the Light glow post-process and bloom. On STOCK, and
+                    while IN WEATHER is still waiting, it does nothing.
     Lights halo     The aureole round each runway light in fog - a soft disc
                     that grows with the fog between you and the lamp. 0 is a
                     plain lamp that only dims with distance.
@@ -1452,6 +1608,42 @@ sets in code, and lets you move them live. Units are the API's own.
     The RAIN page's Gloom drives a second layer - the storm's own mist, up to
     the storm deck. Needs the ORO patched client; on stock the page is inert.
 
+  SNOW - falling snow, and the cover it lays down. Earth, outside views and
+  the virtual cockpit. SNOW AND RAIN ARE MUTUALLY EXCLUSIVE: turning one on
+  turns the other off, which is deliberate - it gives the snow the whole
+  budget rather than half of it, so the flakes can be as dense as they are.
+    TEST            Previews the fall with the pill off.
+    Snowfall        How hard it is coming down. The fall ramps over about ten
+                    seconds; the pill off stops it at once.
+    Flake size      Near flakes are soft out-of-focus discs, mid ones dots,
+                    far ones specks. Every flake has its own size around this.
+    Fall speed      1 is about 1.6 m/s, which is real snow. Your own motion is
+                    added to it, so taxiing turns the fall into streaks.
+    Wander          How much each flake drifts side to side on the way down.
+                    It dies off as the relative wind grows, as it should.
+    Slant (deg)     Tilts the fall off vertical.
+    Wind (m/s)      A horizontal wind, gusting on its own. At 20 a parked ship
+                    sees near-horizontal streaks and the wander is gone.
+    Gloom           How much the overcast darkens the world.
+    Mist            Visibility, on a LOG scale because snow spans so much of
+                    it: 0.5 is about 1.3 km, 1 about 550 m, 2 a 100 m
+                    whiteout. In snow the mist takes the cloud deck with it,
+                    so a real blizzard has no visible sky.
+
+    THE COVER - what settles. It builds on SIMULATION time, so it deepens
+    while you fly and thaws when it warms; the pill off clears it at once.
+    Cover           How deep the standing cover is, on top of what has fallen.
+    Snow line (m)   Below it rain country, above it white. The readout names
+                    the air temperature and where the freezing level really is,
+                    so you can put the line somewhere honest.
+    Line width (m)  How sharp that transition is.
+    Build-up (min)  How long a full cover takes to accumulate at Snowfall 1.
+                    Melting runs at a third of that rate.
+    Cover now       Readout: what the client is actually being shown, which
+                    includes the altitude gate - so it reads 0 from orbit.
+    It never lies on water, never on steep ground, and hulls shed it as the
+    air loads up: a parked ship whitens, a moving one does not. Needs the ORO
+    patched client; on stock the page is inert.
 === PILOT / VIRTUAL COCKPIT ===  the cockpit
 
    SAVE TARGET     The same switch, for this whole page - the shadow on/off and all
@@ -1485,9 +1677,12 @@ sets in code, and lets you move them live. Units are the API's own.
                   ramp on worlds with air, a sharp flip without, and in orbit
                   the planet's shadow. MFD screens, self-lit instruments,
                   emission maps and every cockpit lamp are untouched - so
-                  switching the cabin light on finally means something.
-                  Needs the ORO patched client (the section greys out
-                  without it).
+                  switching the cabin light on finally means something. So
+                  is any material the vessel's own code switches while you
+                  fly: the DeltaGlider's instrument lights write the MFD
+                  button labels that way, so with them on the buttons stay
+                  readable at night. Needs the ORO patched client (the
+                  section greys out without it).
     Night floor   What is left at full night. 0 is black without a lamp on,
                   1 is stock. The caption shows the live value.
     DIM UNDER RAIN AND FOG  A second pill: the weather takes light out of the
@@ -1508,6 +1703,30 @@ sets in code, and lets you move them live. Units are the API's own.
                   roof under rain: dull thumps over a low panel rumble, no
                   hiss - structure-borne so it is never muffled. Its own
                   volume, up to 3; 0 is silent.
+    Cabin loop    WHICH rain loop the seat plays. Press to cycle through the
+                  ten files XRSound\ORO\Rain_in_cabin_0.wav .. _9.wav; the
+                  button names the file. The ten that ship run from a sealed
+                  capsule (only the low rumble comes through) to a thin
+                  canopy and an open cockpit, in drizzle and in a downpour.
+    Drum loop     WHICH drum loop plays, from Hull_drum_0.wav .. _9.wav the
+                  same way. 0 is the original drum of the first rain build,
+                  1 the later one, the rest vary the drop rate, the rumble
+                  and the odd metallic ping. Both choices save with the VC
+                  block, so a hull can keep its own.
+                  YOUR OWN SOUNDS: any of those twenty files can be replaced
+                  under the same name - Orbiter's addon zoo has cars, planes
+                  and trains, and no one cabin sound fits them all. WAV PCM,
+                  44.1 kHz, 16-bit stereo. The LENGTH does not matter (ours
+                  are 12 and 16 s; anything from 10 to 30 s is a good size -
+                  short enough to stay small, long enough not to be
+                  recognized as it repeats). What matters is a CLEAN LOOP:
+                  the file's last moment must lead into its first without a
+                  jump, or you will hear a click every time it wraps. Either
+                  cut both ends at a quiet moment, or crossfade the end into
+                  the start (Audacity: overlap the ends and Crossfade Clips),
+                  or as a last resort fade the first and last half-second
+                  (no click, a brief dip instead). Start a new session after
+                  swapping a file - XRSound reads sounds at load.
 
   CAM-SHAKE       Buffet and the push into your seat. The STRENGTH is physics
                   driven - thrust, dynamic pressure, ground contact - so these
@@ -1570,6 +1789,11 @@ for eleven worlds. Other vessels will work but are untuned.
 * Aurora scales for the gas giants and moons are derived from physics but have
   never been checked against the limb in the sim. Tell me if one looks absurd.
 * Lightning ships for Earth. Other worlds have it available but set to zero.
+* The stock Atlantis's VC and exterior meshes do not line up at the windows,
+  so the exterior's window-frame walls show through the VC's larger window
+  holes as black bars against anything bright behind them - the plasma, a
+  daylit Earth. Stock Orbiter 2024 (and 2016) does the same with ORO off; it
+  is the Shuttle's mesh, not the addon.
 * Orbiter 2024 crashes on exit on some installs, after everything is saved and
   closed. It predates ORO - it is Orbiter's own shutdown path - and it costs
   nothing. If you see a crash dialog AFTER quitting, that is probably it.

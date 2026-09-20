@@ -104,6 +104,44 @@ namespace {
 	const double Q_ON   = 2.0e9;    // first visible glow
 	const double Q_FULL = 1.2e10;   // full plasma (~peak heating on a shallow entry)
 
+	// ⚠️ AND THOSE TWO ARE CALIBRATED FOR A STEEP ENTRY, which is fine for a DeltaGlider
+	// diving in and wrong for anything flying a real, energy-managed corridor (2026-09-15,
+	// found on SSV's orbiter). MEASURED along a representative STS entry: q peaks at
+	// 2.8e9, so the whole descent lives in the bottom 8% of the band above and the first
+	// ten minutes read EXACTLY ZERO - which is what "the plasma doesn't show up at all"
+	// turned out to be. See beta/reports/260915/REENTRY_HEAT.md for the table.
+	//
+	// ⚠️⚠️ AND THE FIX IS NOT A SLIDER ON Q_ON, which is the first thing anyone tries:
+	// q spans SIXTY TIMES between the first visible glow (6e7 at entry interface) and peak
+	// heating (2.8e9), and this ramp is LINEAR, so no pair of anchors on it gives both a
+	// faint nose glow up high and a built sheath down low. Drag Q_ON to 4e7 and the early
+	// phase reads 0.2% - alive arithmetically, invisible on screen - while the peak crawls
+	// to 23%. THE CURVE HAS TO BE COMPRESSIVE, and the physical one below is, for free.
+	//
+	// THE PHYSICAL CURVE: Sutton-Graves gives the stagnation heat FLUX; hold a surface at
+	// that flux and it settles at the radiative-equilibrium temperature, which is what
+	// decides whether anything glows and how brightly. That is a fourth root, so 60x of q
+	// becomes 2.8x of T - a range a single ramp can actually render.
+	//     q_s = K sqrt(rho / Rn) v^3           K = 1.7415e-4  (SI, W/m^2)
+	//     T   = (q_s / (eps sigma))^(1/4)      eps = 0.85, sigma = 5.670e-8
+	// Folding the constants at a REFERENCE nose radius of 0.3 m (the orbiter's nose cap)
+	// leaves T = (T_REF_C * q)^(1/4) with q the same sqrt(rho) v^3 CLASSIC uses. Rn is
+	// still exposed by nothing, so a sharper or blunter nose shifts the whole temperature
+	// scale - which is exactly what the two per-class KELVIN anchors absorb. THREE
+	// independent checks landed on this curve with no constant tuned to fit them:
+	//   - EI+25 s on an STS entry -> 791 K, against the Draper point's 798 K, and that is
+	//     the moment McCool reported the first faint glow at Columbia's nose.
+	//   - EI+2 min -> 956 K, dull red: "it started to become visible to the camera".
+	//   - peak -> 2060 K = 1787 C, the RCC nose cap at its real limit.
+	const double T_REF_C = 6597.5;  // q -> T^4, at Rn 0.3 m / eps 0.85 (derivation above)
+
+	// ⚠️ SUTTON-GRAVES IS A HYPERSONIC CONTINUUM CORRELATION and says nothing useful at
+	// Mach 4. Without this the compressive curve would keep a glow on a vessel that is
+	// subsonic and cold - stock's other sin in issue #502, "ends too late", which we are
+	// not about to reproduce while fixing the onset. MACH, not m/s: it has to mean the
+	// same thing at Mars and Titan.
+	const double M_GATE_LO = 4.0, M_GATE_HI = 10.0;
+
 	const double V_MIN     = 1000.0;  // [m/s] cheap reject
 	const double STANDOFF  = 0.75;    // stagnation point, in units of GetSize(), UPSTREAM
 	const double RANGE_K   = 12.0;    // light range in units of GetSize()
@@ -163,6 +201,25 @@ namespace {
 	const double HEAT_POW  = 0.60;    // heat -> emission shaping; <1 so the first streaks
 	                                  // arrive early and softly
 
+	// The stagnation temperature the heat flux holds a surface at, in kelvin. Its own
+	// function because the READOUT wants it in both models (a CLASSIC hull shows what the
+	// physical curve would be reading, which is how you decide whether to switch) and
+	// because it is worth being able to grep for the one place the constant is used.
+	inline double ReentryTempK(double q)
+	{
+		return (q > 0.0) ? pow(T_REF_C * q, 0.25) : 0.0;
+	}
+
+	// ... and the same for a vessel, for the readout. Two oapi calls, once a step, for
+	// the camera target alone - the loop that calls it already has the interface.
+	inline double ReentryTempOf(VESSEL* v)
+	{
+		const double rho = v->GetAtmDensity();
+		if (rho <= 0.0) return 0.0;
+		const double vel = v->GetAirspeed();
+		return ReentryTempK(sqrt(rho) * vel * vel * vel);
+	}
+
 	float ReentryHeat(VESSEL* v)
 	{
 		const double rho = v->GetAtmDensity();
@@ -170,7 +227,21 @@ namespace {
 		const double vel = v->GetAirspeed();
 		if (vel < V_MIN) return 0.0f;
 		const double q = sqrt(rho) * vel * vel * vel;
-		return (float)sat01((q - Q_ON) / (Q_FULL - Q_ON));
+
+		// CLASSIC - byte for byte what shipped before the curve became selectable, and
+		// what every hull with a cfg written before 2026-09-15 flies, because the loader
+		// parks the model at 0 before every class read.
+		if (g_fx.plasHeatModel == 0)
+			return (float)sat01((q - Q_ON) / (Q_FULL - Q_ON));
+
+		// PHYSICAL - the same q, read as a temperature between two per-class anchors.
+		const double on   = (double)g_fx.plasGlowOnset;
+		const double full = (double)g_fx.plasGlowFull;
+		if (full - on < 1.0) return 0.0f;           // a dragged-together pair is not a band
+		const double T    = ReentryTempK(q);
+		const double mach = v->GetMachNumber();
+		const double gate = sat01((mach - M_GATE_LO) / (M_GATE_HI - M_GATE_LO));
+		return (float)(sat01((T - on) / (full - on)) * gate);
 	}
 
 	// Would STOCK draw its own reentry effect right now? The SUPPRESSION window must
@@ -632,7 +703,8 @@ void OroModule::ReleaseReentry()
 {
 	for (int i = 0; i < MAX_RENTRY; i++)
 		if (rentry[i].hV) ReentryFreeSlot(i, true);
-	g_fx.reentryHeat = 0.0f;
+	g_fx.reentryHeat  = 0.0f;
+	g_fx.reentryTempK = 0.0f;
 	plasmaGlow       = 0.0f;
 	plasmaGlowValid  = false;  // the cabin wash's snapshot dies with the glow it drives
 	plasVtxN         = 0;      // nothing for the render proc to draw
@@ -769,6 +841,7 @@ void OroModule::UpdateReentry()
 	OBJHANDLE hFocus = oapiGetFocusObject();
 	OBJHANDLE hCam   = oapiCameraTarget();
 	float camHeat = 0.0f;
+	float camTemp = 0.0f;   // ... and its stagnation temperature, for the readout
 	plasmaGlow = 0.0f;
 	plasmaGlowValid = false;   // re-raised below only if the focus vessel is still hot
 	// The geometry is REBUILT IN THE RENDER PATH now; clearing the snapshot here is what
@@ -798,7 +871,7 @@ void OroModule::UpdateReentry()
 			ReentryFreeSlot(i, true);                     // cooled - give it all back
 			continue;
 		}
-		if (e.hV == hCam) camHeat = e.heat;
+		if (e.hV == hCam) { camHeat = e.heat; camTemp = (float)ReentryTempOf(v); }
 
 		// Build the shock shell EARLY (round 4): the one-frame precompute cost
 		// lands the moment heating BEGINS - before any plasma is on screen.
@@ -909,7 +982,8 @@ void OroModule::UpdateReentry()
 	// (the zero-pad moved into BuildPlasmaGeometry with the geometry - 2026-08-15)
 	// (the trail buffer's twin pad moved to UpdateTrailPost with the trail - round 3)
 
-	g_fx.reentryHeat = camHeat;
+	g_fx.reentryHeat  = camHeat;
+	g_fx.reentryTempK = camTemp;
 }
 
 // ----------------------------------------------------------------------------
@@ -935,6 +1009,69 @@ void OroModule::SampleHull(int i, VESSEL* v)
 // SAME sampler, because the slot table above enlists vessels on HEAT and a parked
 // ship in a rainstorm has no slot to borrow a field from. Main thread only (mesh
 // template reads are oapi calls).
+// Where the vessel's HULL actually sits in its own frame - the displacement an
+// AUTHORED override has to take with it (2026-09-15, his SSV shell).
+//
+// A heatshield override is modelled in the vessel's DEFAULT frame, about the origin.
+// Plenty of addons then move the frame out from under it: VESSEL::ShiftCG is the usual
+// route (SSV's orbiter imports it; Vostok is reported to do the same), and the core
+// answers it by calling ShiftMeshes(-shift) - so the displacement lands in every mesh
+// offset and GetMeshOffset reports it. That is why the vessel's OWN geometry has always
+// tracked a shifted hull correctly: both walks below add the per-mesh offset. Only the
+// override was pinned at the origin, which is what put a stock-Atlantis shell through
+// the middle of SSV's hull.
+//
+// ⚠️ THE ESTIMATOR IS THE VERTEX-WEIGHTED MODE, not the mean and not mesh 0. Under a
+// ShiftCG every mesh carries the IDENTICAL displacement, so the mode is exact and
+// unanimous; where an addon also parks some meshes at their own authored offsets, the
+// heaviest group is the hull, which is the thing the shell has to line up with. A mean
+// would be dragged off by one antenna hung two metres out.
+//
+// A vessel that shifts nothing returns exactly (0,0,0), so every override flying today
+// - the DeltaGlider's and the DG-S's - is untouched to the bit.
+static VECTOR3 OroHullMeshOffset(VESSEL* v)
+{
+	const int MAXG = 12;
+	VECTOR3 off[MAXG]; double wgt[MAXG]; int ng = 0;
+	VECTOR3 first = _V(0, 0, 0); bool haveFirst = false;
+	const UINT nm = v->GetMeshCount();
+	for (UINT m = 0; m < nm; m++) {
+		if (!(v->GetMeshVisibilityMode(m) & MESHVIS_EXTERNAL)) continue;
+		// ⚠️ The FIRST external mesh's offset is kept whether or not it has a template,
+		// as the fallback below - see there for why it is a good one.
+		if (!haveFirst) { v->GetMeshOffset(m, first); haveFirst = true; }
+		MESHHANDLE hM = v->GetMeshTemplate(m);
+		if (!hM) continue;                       // load-on-demand mesh - no template
+		VECTOR3 o = _V(0, 0, 0);
+		v->GetMeshOffset(m, o);
+		double nv = 0.0;
+		const DWORD nG = oapiMeshGroupCount(hM);
+		for (DWORD g = 0; g < nG; g++) { MESHGROUP* gr = oapiMeshGroup(hM, g); if (gr) nv += gr->nVtx; }
+		if (nv <= 0.0) continue;
+		int hit = -1;
+		for (int i = 0; i < ng; i++)
+			if (fabs(off[i].x - o.x) < 0.01 && fabs(off[i].y - o.y) < 0.01
+			 && fabs(off[i].z - o.z) < 0.01) { hit = i; break; }   // 1 cm buckets
+		if (hit >= 0) wgt[hit] += nv;
+		else if (ng < MAXG) { off[ng] = o; wgt[ng] = nv; ng++; }
+	}
+	int best = -1;
+	for (int i = 0; i < ng; i++) if (best < 0 || wgt[i] > wgt[best]) best = i;
+	// ⚠️ NOT ZERO WHEN NOTHING COULD BE WEIGHED. Every mesh on a vessel whose meshes
+	// load on demand answers GetMeshTemplate with NULL, so the weighted pass can come
+	// back empty on exactly the kind of big addon this exists for - and a silent
+	// (0,0,0) would look like 'nothing is shifted' rather than 'I could not tell'.
+	// The first external mesh's offset is the honest answer there: a ShiftCG moves
+	// EVERY mesh by the same displacement, so any one of them carries it, and the
+	// weighting only ever existed to break ties between per-mesh AUTHORED offsets.
+	const VECTOR3 pick = (best >= 0) ? off[best] : (haveFirst ? first : _V(0, 0, 0));
+	// ⚠️ A displacement bigger than the hull itself is a data error, not a CG shift -
+	// stay where we were rather than throw the shell somewhere worse than the origin.
+	const double sz = v->GetSize() > 1.0 ? v->GetSize() : 1.0;
+	if (length(pick) > sz) return _V(0, 0, 0);
+	return pick;
+}
+
 int OroModule::SampleHullPoints(VESSEL* v, HullPt* out, int maxN)
 {
 	int nOut = 0;
@@ -952,6 +1089,9 @@ int OroModule::SampleHullPoints(VESSEL* v, HullPt* out, int maxN)
 			hOverride = oapiLoadMeshGlobal(mres);
 		}
 	}
+
+	// ... and if it IS an override, find out where this hull has been moved to.
+	const VECTOR3 ovrOfs = hOverride ? OroHullMeshOffset(v) : _V(0, 0, 0);
 
 	// Pass 1: count candidate vertices so the stride lands near MAX_HULLPT.
 	const UINT nm = hOverride ? 1 : v->GetMeshCount();
@@ -977,7 +1117,7 @@ int OroModule::SampleHullPoints(VESSEL* v, HullPt* out, int maxN)
 	for (UINT m = 0; m < nm && nOut < maxN; m++) {
 		MESHHANDLE hM;
 		VECTOR3 ofs = _V(0, 0, 0);
-		if (hOverride) hM = hOverride;
+		if (hOverride) { hM = hOverride; ofs = ovrOfs; }
 		else {
 			if (!(v->GetMeshVisibilityMode(m) & MESHVIS_EXTERNAL)) continue;
 			hM = v->GetMeshTemplate(m);
@@ -1000,7 +1140,11 @@ int OroModule::SampleHullPoints(VESSEL* v, HullPt* out, int maxN)
 				// (user's screenshots, 2026-08-01). Anything outside the official bounding
 				// radius is suspect; drop it.
 				const double sz = v->GetSize() > 1.0 ? v->GetSize() : 1.0;
-				if (length(p) > sz * 1.15) continue;
+				// ⚠️ ... and the test is made in the frame the mesh was AUTHORED in. For the
+				// vessel's own meshes that is the vessel origin, which is the whole point of
+				// the filter; for a SHIFTED override it is the override's own origin, or
+				// moving the shell would chop off whichever end the shift ran toward.
+				if (length(hOverride ? (p - ofs) : p) > sz * 1.15) continue;
 				HullPt& hp = out[nOut++];
 				hp.pos = p;
 				hp.nrm = _V(n.nx, n.ny, n.nz);   // template normals are unit-ish; good enough
@@ -1112,9 +1256,14 @@ void OroModule::BuildShell(int i, VESSEL* v)
 		if (GetFileAttributesA(mfile) != INVALID_FILE_ATTRIBUTES) {
 			char mres[96]; sprintf_s(mres, "ORO\\%s", cls);
 			hOverride = oapiLoadMeshGlobal(mres);    // core-cached template; never ours to delete
-			if (hOverride)
-				OroLog(1, "ORO: heatshield mesh %s - shell source override (%s).",
-				              mfile, v->GetName());
+			if (hOverride) {
+				// The deduced shift goes in the line: an override that lands wrong is then a
+				// NUMBER in the log rather than a mesh eyeballed back into place (the (ag)
+				// rule - a matcher that can miss says what it found).
+				const VECTOR3 o = OroHullMeshOffset(v);
+				OroLog(1, "ORO: heatshield mesh %s - shell source override (%s), hull offset %.3f %.3f %.3f m.",
+				              mfile, v->GetName(), o.x, o.y, o.z);
+			}
 		}
 	}
 
@@ -1122,13 +1271,15 @@ void OroModule::BuildShell(int i, VESSEL* v)
 	struct SrcMesh { MESHHANDLE hM; VECTOR3 ofs; };
 	std::vector<SrcMesh> src;
 	const UINT nm = hOverride ? 1 : v->GetMeshCount();
+	const VECTOR3 ovrOfs = hOverride ? OroHullMeshOffset(v) : _V(0, 0, 0);
 	int nSrc = 0;
 	VECTOR3 bbMin = _V(1e9, 1e9, 1e9), bbMax = _V(-1e9, -1e9, -1e9);
 	for (UINT m = 0; m < nm; m++) {
 		MESHHANDLE hM;
 		VECTOR3 ofs = _V(0, 0, 0);
 		if (hOverride) {
-			hM = hOverride;                  // authored envelope, vessel-origin frame
+			hM  = hOverride;                 // authored envelope, in the vessel's DEFAULT frame
+			ofs = ovrOfs;                    // ... moved to wherever this hull now sits
 		} else {
 			if (!(v->GetMeshVisibilityMode(m) & MESHVIS_EXTERNAL)) continue;
 			hM = v->GetMeshTemplate(m);
@@ -1143,7 +1294,8 @@ void OroModule::BuildShell(int i, VESSEL* v)
 			any = true;
 			for (DWORD k = 0; k < gr->nVtx; k++) {
 				const VECTOR3 p = _V(gr->Vtx[k].x + ofs.x, gr->Vtx[k].y + ofs.y, gr->Vtx[k].z + ofs.z);
-				if (length(p) > size * 1.15) continue;        // the gear landmine
+				// the gear landmine - measured in the AUTHORED frame, see SampleHullPoints
+				if (length(hOverride ? (p - ofs) : p) > size * 1.15) continue;
 				nSrc++;
 				if (p.x < bbMin.x) bbMin.x = p.x; if (p.x > bbMax.x) bbMax.x = p.x;
 				if (p.y < bbMin.y) bbMin.y = p.y; if (p.y > bbMax.y) bbMax.y = p.y;
@@ -2583,7 +2735,11 @@ void OroModule::BuildVCGlow()
 	// observer, different apparent rate - the eclipse's lesson (model the observer)
 	// applied to a clock.
 	// Still rides plasChurn, so 0 freezes it exactly as it does everywhere else.
-	const float twv = (float)animT * 9.0f * clampf(g_fx.plasChurn, 0.0f, 3.0f);
+	// ... on ITS OWN knob since 2026-09-17 (VC churn, per class): it rode Wake churn,
+	// and two testers wanted the cockpit steady while the wake outside keeps moving.
+	// 0 freezes the filaments and the intermittency gate together (the flash envelope
+	// is separate and keeps flaring); 1 is the flown look bit for bit.
+	const float twv = (float)animT * 9.0f * clampf(g_fx.plasVcChurn, 0.0f, 3.0f);
 
 	// ---- THE FIELD -----------------------------------------------------------
 	// A centre fan plus concentric quad rings. NSEG is high enough that no angular facet

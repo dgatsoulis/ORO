@@ -157,7 +157,7 @@ if exist "%SRC%\Modules\Plugin\D3D9Client.dll" (
   echo   [ok] D3D9Client.dll restored and verified
 )
 
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
+for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx Scatter.hlsl) do (
   if exist "%SRC%\Modules\D3D9Client\%%F" (
     call :copyVerify "%SRC%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client" "%%F"
     if defined CVFAIL goto :restorefailed
@@ -184,6 +184,13 @@ if not exist "%PAY%" (
 
 del /q "%ROOT%\Modules\Plugin\ORO.dll" >nul 2>&1
 call :cleanTree "Modules\ORO"
+rem  Sounds RETIRED on 2026-09-18 (the selectable cabin/drum loops replaced them):
+rem  not in the payload any more, so cleanTree would keep them as "yours"; their
+rem  last shipped copies ride under legacy\ and the byte-compare is made there.
+call :cleanLegacyFile "XRSound\ORO\Rain_hull.wav"
+call :cleanLegacyFile "XRSound\ORO\Rain_light_in.wav"
+call :cleanLegacyFile "XRSound\ORO\Rain_medium_in.wav"
+call :cleanLegacyFile "XRSound\ORO\Rain_heavy_in.wav"
 call :cleanTree "XRSound\ORO"
 call :cleanTree "Meshes\ORO"
 call :cleanTree "Textures\ORO"
@@ -309,7 +316,7 @@ call :copyVerify "%SRC%\Modules\Plugin\D3D9Client.dll" "%ROOT%\Modules\Plugin" "
 if defined CVFAIL goto :restorefailed
 echo   [ok] D3D9Client.dll restored and verified
 
-for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx) do (
+for %%F in (D3D9Client.fx Vessel.fx PBR.fx Metalness.fx Sketchpad.fx NewPlanet.hlsl Mesh.fx NewMesh.hlsl Particle.fx BeaconArray.fx Common.hlsl Planet.fx Scatter.hlsl) do (
   if exist "%SRC%\Modules\D3D9Client\%%F" (
     call :copyVerify "%SRC%\Modules\D3D9Client\%%F" "%ROOT%\Modules\D3D9Client" "%%F"
     if defined CVFAIL goto :restorefailed
@@ -463,6 +470,23 @@ for /r "%ROOT%\%SUB%" %%F in (*) do (
 )
 for /f "delims=" %%D in ('dir "%ROOT%\%SUB%" /ad /b /s 2^>nul ^| sort /r') do rd "%%D" >nul 2>&1
 rd "%ROOT%\%SUB%" >nul 2>&1
+goto :eof
+
+rem ===========================================================================
+rem  cleanLegacyFile - ONE file a PREVIOUS release shipped, inside a folder that
+rem  still holds current files: gone if byte-identical to its copy under legacy\,
+rem  kept (and said so) if the user changed it. cleanLegacy is for a whole tree.
+rem ===========================================================================
+:cleanLegacyFile
+set "REL=%~1"
+if not exist "%ROOT%\%REL%" goto :eof
+if not exist "%LEG%\%REL%" goto :eof
+fc /b "%ROOT%\%REL%" "%LEG%\%REL%" >nul 2>&1
+if errorlevel 1 (
+  echo     kept ^(you changed this^): %REL%
+) else (
+  del /q "%ROOT%\%REL%" >nul 2>&1
+)
 goto :eof
 
 rem ===========================================================================

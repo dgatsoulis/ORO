@@ -656,6 +656,30 @@ struct OroEffectState {
 	float reentryHeat     = 0.0f;  // 0..1 heat of the CAMERA-TARGET vessel; module-written,
 	                               // read by the dialog so a wrong threshold is visible as a
 	                               // number instead of as "nothing happened"
+	float reentryTempK    = 0.0f;  // readout: the same vessel's stagnation temperature [K]
+	                               //   (the PHYSICAL curve's own coordinate, shown in BOTH
+	                               //   models - in CLASSIC it is what the physical one would
+	                               //   be reading, which is how you decide whether to switch)
+
+	// THE HEAT CURVE, PER CLASS (2026-09-15, his ruling after the SSV report).
+	// ⚠️ CLASSIC IS THE DEFAULT AND THAT IS THE WHOLE POINT. Every class cfg on disk
+	// predates this key, and the loader PARKS all three at these values before every class
+	// read (see OroSettings_LoadClass), so no hull that was ever approved can move - not
+	// "should not", cannot: the CLASSIC branch is the arithmetic that shipped, untouched.
+	// The 2016 lesson, in code rather than in a promise: an addon that wants its own onset
+	// opts in on its own cfg and reaches nobody else's.
+	int   plasHeatModel   = 0;     // 0 = CLASSIC (sqrt(rho) v^3 against two fixed q
+	                               //   thresholds - what every tuned vessel flies today),
+	                               //   1 = PHYSICAL (the stagnation temperature, anchored
+	                               //   in KELVIN by the two below). See ReentryHeat().
+	float plasGlowOnset   = 800.0f;// [K] first visible glow. The default is the DRAPER
+	                               //   POINT (798 K), the temperature at which solids begin
+	                               //   to glow visibly red - and on an STS entry the model
+	                               //   crosses it 25 s after entry interface, which is when
+	                               //   McCool reported the first faint glow at the nose.
+	float plasGlowFull    = 2500.0f;//[K] full plasma. 2500 K is white-hot; the orbiter's
+	                               //   RCC nose cap peaks near 1900 K, so a real entry uses
+	                               //   most of this band without pinning at the top.
 
 	// PLASMA TUNING (round 2.6.2) - LAB scaffolding. Live multipliers the dialog
 	// writes and BuildPlasmaGeometry reads every frame, so the reentry look tunes
@@ -877,11 +901,94 @@ struct OroEffectState {
 	float fogI            = 0.0f;  // live: the envelope, 0..1 - never saved
 	char  fogWhy[32]      = "";    // live: why there is none, when there is none
 
+	// --- SNOW (2026-09-13, the weather chapter's second effect) -----------------
+	// See OroSnow.cpp (the cover: ORO draws none of it - patch (aa)'s SetSnowCover) and
+	// the flake mode of the rain sheet in OroRain.cpp. GLOBAL like the rain, Earth only,
+	// and MUTUALLY EXCLUSIVE with it (his rule: "if we have rain, snow is off and vice
+	// versa. Keep the geometry budget for the effect") - the pill click and the load both
+	// enforce it, the pre-step never re-imposes it (the 2026-08-29 lesson).
+	bool  snowEnabled     = false; // the pill: snow where you are - the standing cover AND
+	                               //   the snowfall. Off is INSTANT (the rain's A/B rule).
+	bool  snowTest        = false; // TEST: the same event as a preview - never saved
+	// SNOWFALL - what is in the air
+	float snowFall        = 1.0f;  // x how much is falling (0..2; 0 = a standing cover only:
+	                               //   no flakes, no deck, no mist)
+	float snowFlake       = 1.0f;  // x flake size (0..2)
+	float snowSpeed       = 1.0f;  // x fall speed (0..2; 1 = ~1.6 m/s, a real flake)
+	float snowWander      = 1.0f;  // x the sideways drift as they fall (0..2; 0 = straight)
+	float snowWind        = 0.0f;  // m/s, THE WIND (2026-09-14, The Long Dark reference): a
+	                               //   horizontal component added to the fall, along east.
+	                               //   A blizzard IS wind - 15-25 m/s turns every flake into
+	                               //   a streak while the vessel is parked; the rain's
+	                               //   relative-wind law does the rest. 0..30, gusting.
+	float snowWindDir     = 270.0f;// deg the wind blows FROM, 0..360 clockwise from north
+	                               //   (round 3, 2026-09-19): 270 = from the west = the 09-14
+	                               //   east-blowing wind, bit for bit; the slant leans downwind
+	float snowContrast    = 1.0f;  // x how far a flake stands off the air it falls through
+	                               //   (0..2, round 3): 1 = the 09-14 air-coloured flake
+	float snowGloom       = 0.6f;  // x the overcast (0..2) - lower than the rain's: a snow
+                                   //   sky is a bright flat grey, not a storm's dark base
+	float snowMist        = 1.0f;  // x the falling snow's own mist (0..2; 1 = ~2 km of
+	                               //   visibility at full snowfall, rides the fog's layer 1)
+	// SNOW COVER - what lies on the ground
+	float snowCover       = 0.0f;  // the STANDING cover, 0..1 - applied at once (alpine
+	                               //   scenery with nothing falling; the instant A/B)
+	float snowLine        = 0.0f;  // m over the mean radius: snow lies ABOVE this. 0 =
+	                               //   everywhere the pill reaches (his call) - the sim's
+	                               //   atmosphere is a standard one, +15 C at sea level at
+	                               //   the pole in January, so it cannot supply a real
+	                               //   line; that is the weather model's, later (-500..6000)
+	float snowLineW       = 300.0f;// m, over which the line fades in (10..2000)
+	float snowBuild       = 20.0f; // SIM-minutes for snowfall 1.0 to lay a full cover
+	                               //   (1..120); it melts at 3x that when the fall stops
+	float snowBright      = 1.0f;  // x the snow's brightness, 0..3 (round 3, 2026-09-19), ONE
+	                               //   slider in two lanes the client calibrates (terrain 2.2x,
+	                               //   hulls 1x): 1 = the calibrated look, ~1.5+ blooms in sun
+	float snowRelief      = 1.0f;  // x the drifts' relief (step B): the lattice read as height,
+	                               //   lit and shade sides under the sun, a lip at each patch's
+	                               //   rim; 0 = flat (0..2)
+	float snowSparkle     = 1.0f;  // x the crystals' sun glints (step B); 0 = none (0..2)
+	float snowShed        = 1.0f;  // x the flakes that blow off a hull as the airflow strips its cover
+	                               //   (step E, 2026-09-20); 0 = none (0..2)
+	float snowHullCov     = -1.0f; // the FOCUS hull's cover as ORO mirrors the client's law, live;
+	                               //   -1 = no cover pushed yet - never saved
+	float snowShedRate    = 0.0f;  // cover fraction leaving that hull per SIM second, live - never saved
+	int   snowShedLive    = 0;     // shed flakes in the air, live - never saved
+	// live readouts, never saved
+	float snowI           = 0.0f;  // the event envelope, 0..1 (real time)
+	float snowFallCov     = 0.0f;  // what the snowfall has LAID DOWN, 0..1 (sim time)
+	float snowCoverNow    = 0.0f;  // standing + fallen, clamped - what the client is shown
+	float snowFrzLive     = -1.0f; // the sim's freezing level, m (the standard atmosphere's
+	                               //   2308 m everywhere), -1 = no atmosphere here
+	float snowAirC        = 0.0f;  // the air temperature at the vessel, deg C (the readout)
+	float snowHullLineF   = 1.0f;  // the FOCUS hull's snow-line factor, live (round 3): 0 = the
+	                               //   hull sits below the line and can take no snow
+	// THE WINDSCREEN (step C, 2026-09-20): ice on the VC glass, growing from the frame in
+	bool  snowFrostOn     = true;  // the pill: ice forms on the glass while snow falls
+	float snowFrostReach  = 0.35f; // METRES of glass a full frost ices in from the pane's rim (0..1;
+	                               //   client patch (h) part 5 hands the shader the true rim distance)
+	float snowFrostMin    = 10.0f; // SIM-minutes of full snowfall to a full frost (1..120)
+	float snowFrostBlur   = 1.0f;  // how much the world scatters through the ice (0..2)
+	float snowFrost       = 0.0f;  // the ice's STATE, 0..1, live on sim time - never saved
+	// TIRE MARKS (step D, 2026-09-20): the client's TRACK MAP - the gear of every moving
+	// vessel marks the ground snow, and the marks fade (client patch (ar), guard #30)
+	bool  snowTracksOn    = true;  // the pill
+	float snowTrackFade   = 15.0f; // SIM-minutes a fresh track takes to vanish with nothing falling (1..120)
+
 	// BASE LIGHTS (2026-09-05, client patch ac) - his ask: low visibility is when an
 	// airfield switches its lights on. ONE setting, mirrored at the bottom of the RAIN
-	// and FOG pages. Off = stock (on at night, off by day). Auto-on at an effect
-	// threshold is a later question; the user's choice wins either way. GLOBAL.
-	bool  baseLightsOn    = false; // force every base's night state on now
+	// and FOG pages. GLOBAL.
+	// A THREE-STATE BUTTON since 2026-09-19 (triage 37, DaveS: with the pill on his
+	// runway lights were on at noon): STOCK = Orbiter's own flip, on at night, off by
+	// day, at stock brightness whatever the sliders read; IN WEATHER = the airfield
+	// switches its lights on when the gloom justifies it - the storm light past a
+	// quarter of the sun, or the fog layers' visibility under 5 km - with hysteresis, a
+	// flip not a fade (his 09-01 ruling), and back to stock when the weather clears;
+	// ALWAYS = the old pill's force, every base in its night state now. A pre-09-19
+	// file's BaseLightsOn = TRUE loads as IN WEATHER (OroSettings_Load).
+	int   baseLightsMode  = 0;     // 0 STOCK, 1 IN WEATHER, 2 ALWAYS (key BaseLightsMode)
+	int   baseLightsLive  = 0;     // readout, never saved: 0 stock, 1 waiting for weather,
+	                               //   2 lit by the weather, 3 forced (PushBaseLights)
 	float baseLightsGlow  = 1.0f;  // x the lit result (0.25..3; 1 = stock, >1 blooms with Light glow)
 	float baseLightsHalo  = 1.0f;  // x the fog AUREOLE round each light (0..3; 1 = designed, 0 = none) -
 	                               //   size and softness grow with the fog between lamp and eye
@@ -932,6 +1039,11 @@ struct OroEffectState {
 	// physical rate is renderable and the mapping to a PERCEIVED rate is a look choice.
 	// Invariant 25(i)'s rule exactly - the sim owns what happens, the user owns the look.
 	float plasChurn       = 1.0f;  // x wake temporal rate       (0..3)
+	float plasVcChurn     = 1.0f;  // x the COCKPIT sheath's clock (0..3), 2026-09-17: the
+	                               //   VC glow ran on Wake churn x 9 (27g); two testers
+	                               //   asked for a sheath that does not "dance" (DaveS's
+	                               //   STS-114 HUD-camera reference is a steady glow).
+	                               //   0 = frozen filaments, 1 = the flown look.
 	// THE FIN RAKE (2026-08-15). A beta tester: "the effects are set at 90 deg to the
 	// respective surface, if they could be set at 10/15 deg outwards". Reading the code
 	// says they were RIGHT and it was worse than a taste question: the fin's outward tip
@@ -1243,6 +1355,11 @@ struct OroEffectState {
 	// still hear from an external view. The hull drum sits beside it - both are what a
 	// HULL transmits to the seat, so both keys ride the movable VC block.
 	float vcRainSound     = 1.0f;   // x cabin rain volume (0..2; 0 = silent inside)
+	int   vcRainSndSel    = 0;      // WHICH cabin loop the seat plays: Rain_in_cabin_<n>.wav,
+	                               //   0..9 (2026-09-18, his design - ten ship, any can be the
+	                               //   user's own seamless loop). Cycled by the VC page's button.
+	int   hullDrumSel     = 0;      // ... and which drum loop: Hull_drum_<n>.wav, 0..9. Both
+	                               //   ride the movable VC block (a hull's sound is the hull's).
 	                               //   MEASURED on the stock DeltaGlider (2026-08-04), not
 	                               //   guessed: the sharpest box that still contains its
 	                               //   canopy structure. It stays a slider because unlike

@@ -996,6 +996,8 @@ private:
 	// ORs per frame and nothing in the log unless someone is actually debugging glass.
 	int     glassDiag   = 0;
 	float   glassDiagDr = 0.0f;
+	float   glassDiagFr = 0.0f, glassDiagFw = 0.0f;   // step C: the frost pushed / wanted, for the diag line
+	float   rainLightLive = 0.0f;                     // step C: the light on the storm (SenseRain's lightF), for the ice
 	float   glassDiagI  = -1.0f;            // the intensity the RENDER PATH sees
 	double  glassDiagT  = -99.0;
 
@@ -1082,7 +1084,17 @@ private:
 	// occludes; it is not light), drawn beside it and before anything additive.
 	// Sized in METRES and projected per element, so camera zoom costs nothing - see the
 	// header comment in OroRain.cpp for why distance decided the whole architecture.
-	static const int RAIN_MAX_STREAK = 1800;// streaks in the sheet at full density
+	static const int RAIN_MAX_STREAK = 1800;// RAIN streaks in the sheet at full density
+	// THE SHEET SPANS THREE GROUPS (snow round 3, 2026-09-19 - his brief: "at full slider
+	// strength the 3 rows of snowflakes should really hide the scenery"). A D3D9 vertex
+	// stream caps at 65535 vertices PER GROUP (invariant 19d - his reminder), so one poly
+	// holds ~21k triangles and a whiteout needs three of them: the one buffer is drawn as
+	// consecutive slices, each its own HPOLY. The rain still fits the first.
+	static const int RAIN_POLYS      = 3;
+	static const int RAIN_POLY_TRI   = 21760;   // x3 = 65280 vertices, under the cap
+	static const int SNOW_MAX_STREAK = 28000;   // flakes at Snowfall 2: 0.86 x 2 + 0.14 x 4 = 2.28 tris
+	                                            //   each on the layer split (the near layer is a fan)
+	                                            //   = 63.8k of the 65.3k triangles
 	// SPLASH RINGS, PER STRATUM (round 4, his LOD design: "hexagons close, rhombuses
 	// mid range and triangles farther away"). The ground poly was ~59.5k of its 65,535
 	// vertices - MORE splashes were impossible at 36 tris/ring, so the per-ring cost
@@ -1124,7 +1136,7 @@ private:
 	// (RAIN_HULL_TRI lived here for one day - hull rivulets/streamers/drips, cut whole
 	//  on 2026-08-22, his call. See the note at RainSnap in OroRain.cpp.)
 	static const int RAIN_GND_TRI    = RAIN_MAX_DECK;
-	static const int RAIN_MAX_TRI    = RAIN_MAX_STREAK * 2 + 64;
+	static const int RAIN_MAX_TRI    = RAIN_POLY_TRI * RAIN_POLYS;   // the whole sheet, every group
 	void    UpdateRain();                   // main thread: envelope, gates, snapshot
 	void    UpdateRainSound();              // main thread (invariant 12): the loop crossfade
 	void    BuildRainGeometry();            // RENDER PATH: the drops and the rings
@@ -1203,7 +1215,35 @@ private:
 	                                        //   and the cockpit ONLY, not terrain - the
 	                                        //   ground is clipped by hand in the build.
 	int     rainVtxN    = 0;
-	HPOLY   hRainPoly   = NULL;             // device resource - released with the others
+	HPOLY   hRainPoly[RAIN_POLYS] = {};     // device resources, one per group - released with the others
+	// THE SHED FLAKES (snow round 3, step E, 2026-09-20): snow blowing off the hull on the
+	// take-off roll. A pool of WORLD particles - PLANET-LOCAL positions in doubles, the frame
+	// the air is at rest in (it co-rotates with the planet; the trail's inertial rpos would
+	// have the ground sweep past at 460 m/s) - born on the focus hull's up-facing sample
+	// points while its MIRRORED cover falls, advected on SIM time in UpdateShed (OroSnow.cpp)
+	// and projected in the render path in BuildRainGeometry (OroRain.cpp) from the
+	// snapshot's planet rotation and the render-epoch centre. Its own poly, its own ceiling
+	// (invariant 19d: 12000 triangles = 36000 vertices).
+	struct ShedPt { VECTOR3 p, v; float age, life, rad, hue; bool live, chunk; };   // chunk: a tumbling slab of crust (one in fourteen)
+	static const int SHED_MAX     = 1500;
+	static const int SHED_MAX_TRI = SHED_MAX * 8;                  // an eight-triangle fan each (12000 tris = 36000 verts, under the cap)
+	static const int SHED_FULL    = 900;                           // flakes a FULL cover sheds at Blow-off 1
+	ShedPt   shed[SHED_MAX] = {};                                  // value-initialised: no slot is live before the first spawn
+	int      shedCur       = 0;                                    // the ring's next slot
+	int      shedLive      = 0;                                    // live count this step
+	HullPt   shedHull[MAX_HULLPT];                                 // the focus hull's sample points (28h's walk, its own buffer)
+	int      shedHullN     = 0;
+	OBJHANDLE shedHullV    = NULL;                                 // the hull they were sampled from
+	OBJHANDLE shedRef      = NULL;                                 // the planet the pool is stored in
+	float    shedCov       = -1.0f;                                // the MIRRORED hull cover (-1 = unseen)
+	double   shedSpawnAcc  = 0.0;                                  // fractional flakes carried over
+	VECTOR3  shedVesL      = {0, 0, 0};                            // the focus hull's ground velocity, planet-local, this step
+	                                                               //   (the render path streaks a flake against it: the camera rides the hull)
+	PlasVtx  shedVtx[SHED_MAX_TRI * 3];
+	float    shedDepth[SHED_MAX_TRI * 3];
+	int      shedVtxN      = 0;
+	HPOLY    hShedPoly     = NULL;                                 // device resource - released with the others
+	void     UpdateShed(VESSEL* v, double sdt, bool want);         // main thread (OroSnow.cpp)
 	bool    rainActive  = false;
 	float   stormPushed = -1.0f;            // last storm-light factor handed to the client
 	float   wetDarkPushed = -1.0f;          // last wet-darkness gain handed to the client
@@ -1259,6 +1299,15 @@ private:
 	                                        //   so it only ever dims the VC mildly
 	DWORD   FogColNear(DWORD c, float dist) const;        // the alpha byte scaled by it (0xAABBGGRR)
 	DWORD   FogColNearGround(DWORD c, float dist) const;  // ...by the ground fog alone
+
+	// THE SNOW (2026-09-13) - see OroSnow.cpp. The COVER is the client's (patch (aa)'s
+	// SetSnowCover, on change); the FLAKES are the rain sheet in snow mode (OroRain.cpp -
+	// one buffer, one poly, one phase, because rain and snow are mutually exclusive by his
+	// rule). The sensing is SenseRain's: it runs for either storm and publishes both.
+	void    UpdateSnow();                   // main thread: the fall envelope (real time), the cover (SIM time)
+	void    PushSnow();                     // wherever the sensing ran: the cover to the client, on change
+	float   snowIntensityLive = 0.0f;       // 0..1 the snow's envelope x the rain's altitude gate
+	                                        //   (SenseRain sets it beside rainIntensityLive)
 	void    PushBaseLights();               // patch (ac): on change, wherever the sensing ran
 	int     blPushedOn   = -1;              // last force state handed to the client (-1 = never)
 	float   blPushedGlow = -1.0f;           // last glow gain handed to the client
@@ -1558,12 +1607,23 @@ private:
 	// change crossfading between families through the same 0.35 s slew that already
 	// de-clicks everything. The hull loop is deliberately unfiltered: the taps are ON
 	// the hull, structure-borne, and inside is exactly where they are bright.
-	enum { SND_RAIN_BASE = 30, SND_RAIN_N = 4, SND_RAIN_IN_BASE = 34,
-	       SND_RAIN_CH = 7 };               // channels 0-2 ext tiers, 3 hull, 4-6 int
-	bool  rainSndLoaded = false;            // all three LoadWav'd this session
-	bool  rainSndInLoaded = false;          // ... and the three _in twins (all-or-
-	                                        //   nothing too; absent, interior falls
-	                                        //   back to the old 45% volume duck)
+	// THE CABIN AND DRUM LOOPS ARE SELECTABLE (2026-09-18, his design, after testers
+	// asked for the older muffled cabin back): the seat plays ONE cabin loop,
+	// Rain_in_cabin_<sel>.wav (ids 60..69), and one drum loop, Hull_drum_<sel>.wav
+	// (ids 70..79), each chosen from ten by a button on the VIRTUAL COCKPIT page and
+	// saved in the movable VC block. Ten of each ship (tools/raingen.py --variants);
+	// any file can be the user's own seamless loop, of any length. Loaded LAZILY on
+	// first selection (RainVariantId - two of twenty in memory, not twenty), tri-state
+	// per file so a missing one is logged once and reads as "silent channel", never
+	// as a retry storm. This replaced the fixed 450 Hz muffled tiers of 2026-08-27
+	// (channels 4-6, the rainmuffle.py _in twins - the thunder keeps its own).
+	enum { SND_RAIN_BASE = 30, SND_RAIN_N = 3, SND_CABIN_BASE = 60, SND_DRUM_BASE = 70,
+	       SND_VARIANTS = 10, SND_RAIN_CH = 5 };   // channels 0-2 ext tiers, 3 drum, 4 cabin
+	bool  rainSndLoaded = false;            // all three tiers LoadWav'd this session
+	signed char cabinSndSt[SND_VARIANTS] = {};   // per variant: 0 untried, 1 loaded, -1 missing
+	signed char drumSndSt[SND_VARIANTS]  = {};
+	int   RainVariantId(bool drum, int sel);     // the XRSound id, loading on first use; -1 = none
+	int   rainSndId[SND_RAIN_CH] = {};       // the id each channel currently plays (-1 = none)
 	float rainSndLvl[SND_RAIN_CH] = {};     // slewed per-loop volume (anti-click)
 	bool  rainSndOn[SND_RAIN_CH]  = {};     // which loops currently hold a mixer voice
 	                                        // (silent loops are STOPPED, not parked at

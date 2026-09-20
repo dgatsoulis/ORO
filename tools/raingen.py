@@ -336,7 +336,10 @@ def write_wav(path, x, rng):
         w.writeframes(q.tobytes())
 
 
-def build_tier(name, p, out_dir):
+def build_loop(fname, p, out_dir, fc=None):
+    # One seamless loop from one parameter dict. fc: an optional zero-phase low-pass
+    # applied before mastering (the cabin variants' muffle) - after every RNG draw of
+    # the synthesis, so the three exterior tiers regenerate bit for bit with fc=None.
     rng = np.random.default_rng(p["seed"])
     n = int(p["dur"] * SR)
 
@@ -351,9 +354,11 @@ def build_tier(name, p, out_dir):
                   p.get("tap_gain", 0.0), tap_maker, rng,
                   amp_pow=p.get("tap_pow", 2.4), amp_floor=p.get("tap_floor", 0.0))
 
+    if fc:
+        buf = lowpass_fft(buf, fc)          # the muffle, then master to the variant's level
     buf = master(buf, p.get("rms_db", TARGET_RMS_DB), p.get("peak_db"))
 
-    path = out_dir / f"Rain_{name}.wav"
+    path = out_dir / fname
     write_wav(path, buf, rng)
 
     # -- verification (a generated asset gets checked, not assumed) --
@@ -374,6 +379,97 @@ def build_tier(name, p, out_dir):
     return path
 
 
+def build_tier(name, p, out_dir):
+    return build_loop(f"Rain_{name}.wav", p, out_dir)
+
+
+# ---------------------------------------------------------------------------
+# THE SELECTABLE CABIN AND DRUM LOOPS (2026-09-18, his design). Inside the cockpit the
+# seat plays ONE cabin loop and ONE drum loop, each chosen from ten on the VIRTUAL
+# COCKPIT page (Rain_in_cabin_0..9.wav, Hull_drum_0..9.wav - `python raingen.py
+# --variants`). His reasoning: a spacecraft is a sealed, airtight container and should
+# be close to sound-proof - taps on the hull and the rumble of the thunder - "but the
+# addon zoo of Orbiter is quite extensive and diverse: planes, cars, bikes, even a few
+# trains", so no single cabin sound is right, and a user may replace any file with
+# their own seamless loop. What ships is a LADDER, documented one line each in
+# XRSound\ORO\README.txt: the cabin loops are the exterior tiers muffled the way a hull
+# muffles (rainmuffle.py's zero-phase FFT low-pass, seamless on a loop by construction)
+# at cutoffs from a sealed capsule to an open cockpit, mastered a few dB under the
+# exterior; the drum loops vary the drop rate, the panel rumble and the odd ping, and
+# the first two ARE the two drums that have shipped - variant 0 the original 2026-08-23
+# recipe (the one testers asked for back; regenerated bit for bit, checked by hash
+# against the 260823 file), variant 1 the 2026-09-06 round-4 drum (= Rain_hull.wav).
+# ---------------------------------------------------------------------------
+def lowpass_fft(x, fc, order=4):
+    # Zero-phase Butterworth MAGNITUDE low-pass as an FFT multiply (rainmuffle.py's
+    # law): the FFT treats the signal as periodic, which a loop IS, so the filter is
+    # seamless at the loop point - a time-domain IIR would break it with its warm-up.
+    n = x.shape[0]
+    f = np.fft.rfftfreq(n, 1.0 / SR)
+    H = 1.0 / np.sqrt(1.0 + (f / fc) ** (2 * order))
+    return np.fft.irfft(np.fft.rfft(x, axis=0) * H[:, None], n=n, axis=0)
+
+
+# (tier, low-pass Hz or None, RMS dBFS, one-line description for the README)
+CABIN = [
+    ("medium", 450,  -24.0, "sealed cabin - steady rain through a pressurized hull (the 2026-08-27 muffle, 450 Hz)"),
+    ("medium", 280,  -25.0, "deep hull - a capsule: only the low rumble of the rain comes through"),
+    ("medium", 800,  -24.0, "thin skin - a light aircraft's cabin, some patter audible"),
+    ("medium", 1500, -24.0, "canopy - a fighter's bubble, the patter is clear"),
+    ("medium", None, -26.0, "open - the outside rain, only quieter (the 260823 cabin: a window cracked)"),
+    ("light",  450,  -26.0, "drizzle through a sealed hull"),
+    ("light",  1500, -26.0, "drizzle on a canopy"),
+    ("heavy",  450,  -23.0, "downpour through a sealed hull"),
+    ("heavy",  900,  -23.0, "downpour on a thin roof"),
+    ("heavy",  None, -25.0, "downpour, open"),
+]
+
+
+def _drum(note, **kw):
+    p = dict(TIERS["hull"]); p.update(kw); p["note"] = note
+    return p
+
+# Each entry is a full hull-tier dict (build_loop reads the same keys as the tiers).
+DRUM = [
+    # 0 - THE ORIGINAL 2026-08-23 DRUM, the recipe verbatim from that commit (8260950):
+    #     a low membrane thump with a contact tick, over a faint low bed; heavy-tailed
+    #     amplitudes with no floor; equal-RMS mastering. grain_tap, 13 a second.
+    dict(note="the original 2026-08-23 drum - membrane thumps and contact ticks over a faint bed",
+         seed=404, dur=12.0,
+         spectrum=[(30, -34), (80, -26), (200, -24), (500, -27), (1200, -31),
+                   (3000, -37), (8000, -46), (16000, -58), (20000, -64)],
+         wash=0.18, gust_depth=0.18,
+         tick_rate=0.0, tick_gain=0.0, blop_rate=0.0, blop_gain=0.0,
+         splat_rate=0.0, splat_gain=0.0,
+         tap_rate=13.0, tap_gain=1.00),
+    # 1 - the 2026-09-06 round-4 drum = the shipped Rain_hull.wav, byte for byte
+    _drum("the 2026-09-06 drum - dull thumps over a 150-250 Hz panel rumble (= Rain_hull.wav)"),
+    _drum("big slow drops - half the drop rate", tap_rate=15.0, seed=405),
+    _drum("downpour drumming - twice the drop rate", tap_rate=60.0, seed=406),
+    _drum("seams and pings - sparse metallic tinks, no rumble", tap_maker="metal", tap_rate=12.0, wash=0.05, seed=407),
+    _drum("panel rumble forward - the bed louder under the thumps", wash=0.30, seed=408),
+    _drum("even steady drum - every drop about as loud as the next", tap_pow=1.0, tap_floor=0.50, seed=409),
+    _drum("dry taps - no rumble at all, 45 a second", wash=0.0, tap_rate=45.0, seed=410),
+    _drum("tin roof - metallic taps over the panel rumble", tap_maker="metal", tap_rate=25.0, wash=0.12, seed=411),
+    _drum("click first, drum second - a crisp contact tick over the thumps (the round-3 idea)",
+          tick_rate=8.0, tick_gain=0.55, seed=412),
+]
+
+
+def build_variants(out_dir):
+    print("cabin loops (Rain_in_cabin_N.wav):")
+    for i, (tier, fc, rms, note) in enumerate(CABIN):
+        p = dict(TIERS[tier])
+        p["seed"] = TIERS[tier]["seed"] + 1000 + i     # its own drops, not the exterior's
+        p["rms_db"] = rms
+        print(f" [{i}] {note}")
+        build_loop(f"Rain_in_cabin_{i}.wav", p, out_dir, fc)
+    print("drum loops (Hull_drum_N.wav):")
+    for i, p in enumerate(DRUM):
+        print(f" [{i}] {p['note']}")
+        build_loop(f"Hull_drum_{i}.wav", p, out_dir)
+
+
 def main():
     # XRSound\ORO is where ORO sounds live (the Orbiter convention - textures in
     # Textures\, meshes in Meshes\, sounds under XRSound\<addon>\; his call 2026-08-23).
@@ -382,10 +478,16 @@ def main():
     ap.add_argument("--out", type=Path, default=default_out,
                     help=f"output folder (default: {default_out})")
     ap.add_argument("--only", default=None, help="regenerate one tier only (light / medium / heavy / hull)")
+    ap.add_argument("--variants", action="store_true",
+                    help="write the ten selectable cabin loops and ten drum loops instead of the tiers")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
     print(f"raingen: {SR} Hz stereo 16-bit -> {args.out}")
+    if args.variants:
+        build_variants(args.out)
+        print("done. Twenty loops, exactly periodic - the README names each one.")
+        return
     for name, p in TIERS.items():
         if args.only and name != args.only:
             continue

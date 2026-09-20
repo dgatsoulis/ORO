@@ -31,7 +31,7 @@ Everything else in the addon exists to decide *what* to draw and *where*.
 ## 2. The hard dependency: a patched D3D9Client
 
 **ORO does not work on a stock client.** Stock Orbiter 2024's D3D9Client crashes the
-instant any HUD render proc is registered, which is the first thing ORO does. Forty
+instant any HUD render proc is registered, which is the first thing ORO does. Forty-five
 patches are applied to the client; the patch set, a full rebuild recipe and the landmines
 are in **`upstream/BUILDING.md`**, with the combined diff in
 `upstream/ORO-D3D9Client-all-patches.patch`.
@@ -237,7 +237,9 @@ specific things, and the discipline of knowing which proof a change needs.
 | tool | proves |
 |---|---|
 | `tools/fxccheck.sh` | Every client shader compiles in every configuration the client uses. **Run it on every shader edit.** Run it from a POSIX shell where `$TEMP` is set. |
-| `tools/d3dxps.py` | One standalone shader entry point compiles **through the client's own compiler**, with its register, sampler and instruction-slot counts. `-asm` dumps the disassembly. |
+| `tools/d3dxps.py` | One standalone shader entry point compiles **through the client's own compiler**, with its register, sampler and instruction-slot counts. `-asm` dumps the disassembly; `-members` walks the constant table and prints, per struct member, the registers allocated, the registers the code reads, and the packed byte offset the upload walks. |
+| `tools/structlayout.py` | The 32-bit byte layout of the client's shader-mirrored C++ structs (`ConstParams`, `ShaderParams`, `LightF`), from a probe built with the client's own compiler. Run it after changing any of them. |
+| `tools/d3dxsetvalue.py` | What `SetValue` actually lands in the registers for a struct upload: an indexed buffer through the real D3DX walk on a null device. Its "packed walk" column must match `structlayout.py`'s offsets, or the shader reads the wrong floats. |
 | `tools/fxeff` | The same for the client's effect files, per pass. |
 | `tools/luachk` | Lua 5.1 syntax for anything in `Script\`. |
 | `tools/ipicheck.py` | Every uniform the host pushes is one its entry point actually references. A push to a name the shader does not use is **not a no-op** — the compiler strips the unused uniform out of the constant table, the call fails, and the client logs an error *every frame*. |
@@ -245,6 +247,7 @@ specific things, and the discipline of knowing which proof a change needs.
 | `tools/scnstate.py` | `--check` validates the scenario-authoring frame maths against states Orbiter itself wrote, before any of it reaches a scenario file. |
 | `tools/scenarios.py` | The scenarios, their launchpad pages and the folder pages, all from one table, so a description can never drift from the scenario beside it. It keeps a manifest and **refuses to overwrite a file a human has edited since it was written** (`--force` overrides). |
 | `tools/scnfreeze.py` | Once a scenario has been flown and re-saved, its state is Orbiter's, not the generator's: this captures everything after `END_DESC` into `scenarios.frozen.json`, and `--check` proves the frozen data still matches the live tree. The generator then emits the prose and replays the frozen tail verbatim. |
+| `tools/setuphelpcheck.py` | Every control and group box of the client's Advanced Setup dialog has a help entry (the "?" / F1 / Help text lives in the client's `SetupHelp.cpp`). It reads the dialog out of the resource script, so a control added later cannot ship silent, and it insists the table stays ASCII. |
 
 ⚠️ **The Windows SDK's `fxc` is not evidence about this client.** The client compiles
 through `d3dx9_43.dll`, which allocates literal constants differently and has twice

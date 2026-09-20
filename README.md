@@ -99,7 +99,7 @@ modifications of Jarmo Nikkanen's and Martin Schweiger's GPL/LGPL code and carry
 
 - **Orbiter** — Martin Schweiger. MIT licensed.
 - **D3D9Client** — Jarmo Nikkanen and Martin Schweiger. ORO would not exist without it, and
-  forty-one patches to it are what make these effects possible — capabilities it did not expose,
+  forty-seven patches to it are what make these effects possible — capabilities it did not expose,
   ways to switch stock behaviour off, and a number of plain stock bug fixes.
 - **XRSound** — Douglas Beachy. MIT licensed.
 

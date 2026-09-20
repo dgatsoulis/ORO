@@ -52,5 +52,6 @@ tools/ringprofile_test/*.txt
 # Private to the development repository - never published. See
 # tools/publish_public.ps1, which is what stages this tree.
 CLAUDE.md
+HISTORY.md
 OroParticlesSprites.cpp.shelved
 beta/reports/

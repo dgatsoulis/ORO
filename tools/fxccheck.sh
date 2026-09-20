@@ -25,11 +25,22 @@ run() { # label, args...
 # 2026-09-10: THE STANDALONE TERRAIN ENTRY POINTS RUN THROUGH tools/d3dxps.py, NOT fxc. His sim
 # rejected a NewPlanet.hlsl the Windows-Kit fxc had just passed (X4507, max ps_3_0 constant register
 # index exceeded): the client compiles these through d3dx9_43.dll, whose literal-constant allocation
-# differs, and the Earth terrain shader with six maps + cube + dev tools sits at c223 of 224. d3dxps
+# differs, and the Earth terrain shader with six maps + cube + dev tools sat at c223 of 224 until the
+# 2026-09-19 register round took it to c147 (its constant structs packed and reordered). d3dxps
 # drives that very DLL, so what passes here passes in the sim; it also prints the highest register.
 dxrun() { # label, entry, profile, defines...
   local label="$1" entry="$2" prof="$3"; shift 3
   out=$(MSYS_NO_PATHCONV=1 python "$D3DXPS" NewPlanet.hlsl "$entry" "$prof" "$@" 2>&1)
+  if echo "$out" | grep -q '^OK'; then
+    echo "ok    $label  $(echo "$out" | sed -E 's/^OK +[^ ]+ [^ ]+ \[[^]]*\] +//')"
+  else
+    echo "FAIL  $label"; echo "$out" | tail -3; fail=1
+  fi
+}
+
+dxrunf() { # label, file, entry, profile, defines... (2026-09-19: for the shaders that are not NewPlanet.hlsl)
+  local label="$1" file="$2" entry="$3" prof="$4"; shift 4
+  out=$(MSYS_NO_PATHCONV=1 python "$D3DXPS" "$file" "$entry" "$prof" "$@" 2>&1)
   if echo "$out" | grep -q '^OK'; then
     echo "ok    $label  $(echo "$out" | sed -E 's/^OK +[^ ]+ [^ ]+ \[[^]]*\] +//')"
   else
@@ -47,8 +58,17 @@ DE="-D_WATER -D_RIPPLES -D_CLOUDSHD -D_NIGHTLIGHTS -D_LOCALLIGHTS -D_SHDMAP"
 # and then silently fails on the device - patch (ah) step 4 at 16x), whatever GPU runs this check.
 effrun() { # label, args...
   label="$1"; shift
-  out=$(MSYS_NO_PATHCONV=1 "$FXEFF" D3D9Client.fx "$@" -slots 4096 -q 2>&1); rc=$?
-  if [ $rc -ne 0 ]; then echo "FAIL  $label"; echo "$out" | head -6; fail=1; else echo "ok    $label  $(echo "$out" | tail -1)"; fi
+  # 2026-09-20: pinned at 3950, NOT the card's declared 4096. MetalnessPS at 4080 compiled here and
+  # the GTX 970's driver refused it on the device (a flat cyan hull, nothing logged); 3949 had flown.
+  # The real cliff lies between the two, and the flown count is the only number worth trusting.
+  out=$(MSYS_NO_PATHCONV=1 "$FXEFF" D3D9Client.fx "$@" -slots 3950 -q 2>&1); rc=$?
+  # 2026-09-19: a WARNING is a failure too - the client MessageBoxes the compiler's buffer whatever
+  # it holds (D3D9Effect.cpp:428), and X4121 (a gradient inside flow control) reached his sim
+  # through a 27/27 matrix because fxeff prints the buffer and returns 0. X4717 stays ignored.
+  if [ $rc -ne 0 ]; then echo "FAIL  $label"; echo "$out" | head -6; fail=1
+  elif echo "$out" | grep -v X4717 | grep -qi 'warning X4'; then
+    echo "FAIL  $label  (a warning the client boxes)"; echo "$out" | grep -v X4717 | grep -i 'warning X4' | head -4; fail=1
+  else echo "ok    $label  $(echo "$out" | tail -1)"; fi
 }
 effrun "D3D9Client.fx 4x Partial"               -D ANISOTROPY_MACRO=4 -D LMODE=1 -D MAX_LIGHTS=4 -D SHDMAP=3 -D KERNEL_SIZE=27 -D KERNEL_WEIGHT=0.037037
 effrun "D3D9Client.fx HIS 4x Full + cascade"    -D ANISOTROPY_MACRO=4 -D LMODE=2 -D MAX_LIGHTS=4 -D SHDMAP=3 -D KERNEL_SIZE=27 -D KERNEL_WEIGHT=0.037037 -D _ENVMAP -D _LIGHTGLOW -D _DEBUG -D _IRRADIANCE -D _CASCADE -D LCLMAPS=4
@@ -56,7 +76,13 @@ effrun "D3D9Client.fx MARG 8x Full + cascade + glass" -D ANISOTROPY_MACRO=4 -D L
 effrun "D3D9Client.fx 8x Full + cascade + kernel 35" -D ANISOTROPY_MACRO=4 -D LMODE=4 -D MAX_LIGHTS=8 -D SHDMAP=4 -D KERNEL_SIZE=35 -D KERNEL_WEIGHT=0.0285 -D _ENVMAP -D _LIGHTGLOW -D _DEBUG -D _IRRADIANCE -D _GLASS -D _CASCADE -D LCLMAPS=6 -D _LCLCUBE
 effrun "D3D9Client.fx NOSHADOW 4x Full + cascade" -D ANISOTROPY_MACRO=4 -D LMODE=2 -D MAX_LIGHTS=4 -D SHDMAP=0 -D KERNEL_SIZE=27 -D KERNEL_WEIGHT=0.037037 -D _ENVMAP -D _LIGHTGLOW -D _DEBUG -D _IRRADIANCE -D _CASCADE -D LCLMAPS=1
 effrun "D3D9Client.fx 12x Full + cascade + glass"  -D ANISOTROPY_MACRO=4 -D LMODE=6 -D MAX_LIGHTS=12 -D SHDMAP=3 -D KERNEL_SIZE=27 -D KERNEL_WEIGHT=0.037037 -D _ENVMAP -D _LIGHTGLOW -D _DEBUG -D _IRRADIANCE -D _GLASS -D _CASCADE -D LCLMAPS=6 -D _LCLCUBE
-effrun "D3D9Client.fx 16x Full + cascade + glass + kernel 35 (worst)" -D ANISOTROPY_MACRO=4 -D LMODE=8 -D MAX_LIGHTS=16 -D SHDMAP=4 -D KERNEL_SIZE=35 -D KERNEL_WEIGHT=0.0285 -D _ENVMAP -D _LIGHTGLOW -D _DEBUG -D _IRRADIANCE -D _GLASS -D _CASCADE -D LCLMAPS=6 -D _LCLCUBE
+# 2026-09-20: HIS EXACT ROW, built from his D3D9Client.cfg by D3D9Effect::D3D9TechInit's own rules
+# (Anisotrophy 16, LightConfiguration 8 = LMODE 8 / 16 lights, ShadowMapFilter 2 = SHDMAP 3, the
+# kernel is 27 always, six spot maps, the cube, glass, the mesh debugger, env maps, light glow,
+# irradiance, cascades). It REPLACES the old "worst" row, whose SHDMAP 4 / kernel 35 are no
+# longer reachable (the config clamps the filter to 0-2 and the kernel is packed to 27) - and
+# which read 4051 where his real set reads 4080: THE ROW THAT LET THE TEAL DELTAGLIDER THROUGH.
+effrun "D3D9Client.fx HIS EXACT (cfg 2026-09-20: 16x Full, cascade, glass, 6 maps, cube, debugger) - THE WORST ROW" -D ANISOTROPY_MACRO=16 -D LMODE=8 -D MAX_LIGHTS=16 -D SHDMAP=3 -D KERNEL_SIZE=27 -D KERNEL_WEIGHT=0.037037 -D LCLMAPS=6 -D _GLASS -D _DEBUG -D _ENVMAP -D _LIGHTGLOW -D _IRRADIANCE -D _CASCADE -D _LCLCUBE
 effrun "D3D9Client.fx 16x Partial + cascade"        -D ANISOTROPY_MACRO=4 -D LMODE=7 -D MAX_LIGHTS=16 -D SHDMAP=3 -D KERNEL_SIZE=27 -D KERNEL_WEIGHT=0.037037 -D _ENVMAP -D _LIGHTGLOW -D _DEBUG -D _IRRADIANCE -D _CASCADE -D LCLMAPS=2
 # ORO patch (ae): HIS effect - LightConfiguration 2, env maps, light glow, the mesh debugger, cascades on.
 # mirrors the client's D3DXSHADER_PREFER_FLOW_CONTROL, which is what spends the boolean registers.
@@ -69,6 +95,11 @@ dxrun "TerrainPS Earth+DEVTOOLS+PERF" TerrainPS ps_3_0 $DE -D_DEVTOOLS -D_PERFOR
 dxrun "TerrainPS Earth"               TerrainPS ps_3_0 $DE
 dxrun "TerrainPS Mars"                TerrainPS ps_3_0 -D_LOCALLIGHTS -D_MICROTEX -D_SHDMAP -D_DEVTOOLS -D_MED -D_LCL6 -D_LCLCUBE
 dxrun "TerrainPS Moon"                TerrainPS ps_3_0 -D_LOCALLIGHTS -D_MICROTEX -D_SHDMAP -D_DEVTOOLS -D_MED -D_NO_ATMOSPHERE -D_LCL6 -D_LCLCUBE
+# 2026-09-19: Scatter.hlsl is the THIRTEENTH deployed shader (AtmoParams' forty scalars packed into
+# ten float4 for the terrain register round) and is also compiled on its own as the sun-colour
+# image-processing entry point (VPlanetAtmo.cpp) - both of its variants belong in the matrix.
+dxrunf "Scatter.hlsl SunColor"        Scatter.hlsl SunColor ps_3_0
+dxrunf "Scatter.hlsl SunColor+PERF"   Scatter.hlsl SunColor ps_3_0 -D_PERFORMANCE
 dxrun "TerrainVS Earth"               TerrainVS vs_3_0 $DE -D_DEVTOOLS
 dxrun "CloudPS"                       CloudPS ps_3_0 -D_CLOUDMICRO -D_CLOUDNORMALS
 dxrun "CloudPS plain"                 CloudPS ps_3_0
@@ -81,4 +112,8 @@ run "HorizonVS"                   /T vs_3_0 /E HorizonVS NewPlanet.hlsl
 run "TileShdPS"                   /T ps_3_0 /E TileShdPS $E /D_DEVTOOLS=1 NewPlanet.hlsl
 run "TileDepthPS"                 /T ps_3_0 /E TileDepthPS NewPlanet.hlsl
 run "TileDepthVS"                 /T vs_3_0 /E TileDepthVS NewPlanet.hlsl
+# 2026-09-20: the snow track map's stamp + fade passes (step D), the client's own compiler
+dxrun "TrackStampPS"                  TrackStampPS ps_3_0
+dxrun "TrackFadePS"                   TrackFadePS ps_3_0
+dxrun "TrackVS"                       TrackVS vs_3_0
 exit $fail

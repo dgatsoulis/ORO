@@ -39,9 +39,9 @@ THE LIST                       what has to be in frame
   13_the_sun.jpg               the Cape at sunrise, shafts through the VAB, long shadows
   14_eclipse_edwards.jpg      Edwards lakebed, 20 May 2012: the sun 82% eaten and 13 deg
                                up, the DG and the hangars in the same frame
-                               (the ONLY shot still outstanding - 2026-09-13, he compared
-                                Edwards against Baikonur and kept Edwards, so the old
-                                17_eclipse_baikonur is gone with its scenario)
+                               (delivered 2026-09-15 - it arrived named 14_total_eclipse
+                                and was renamed to the name in THIS list, which is the
+                                one the page references; all 16 pages carry a picture now)
   15_rings_crossing.jpg        VC, the B ring near edge-on a couple of km off, Saturn beyond
   16_rings_wide.jpg            external, pulled back: the globe, the ring line, the shadow band
 
